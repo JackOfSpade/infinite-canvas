@@ -524,6 +524,50 @@ export default [
   },
 
   {
+    name: 'practice ear: callers arriving together share one inference worker, and a worker that loads after close is closed',
+    async run() {
+      const dir = tempDir();
+      const file = path.join(dir, 'candidate.wav');
+      writeWav(file, concat(sine(150, 3000), silence(500)), RATE);
+      let created = 0;
+      let closedCount = 0;
+      const ear = createPracticeEar({
+        candidatePath: file, minSpeechMs: 3000,
+        inference: async () => {
+          created += 1;
+          await new Promise(resolveLoaded => setTimeout(resolveLoaded, 20));
+          return { endOfTurn: async () => 0.9, tone: async () => null, close() { closedCount += 1; } };
+        },
+      });
+      try {
+        const values = await Promise.all([ear.endOfTurn(3000), ear.endOfTurn(3000), ear.endOfTurn(3000)]);
+        assert.deepEqual(values, [0.9, 0.9, 0.9]);
+        assert.equal(created, 1, 'one worker serves every caller');
+        ear.close();
+        assert.equal(closedCount, 1);
+      } finally {
+        ear.close();
+      }
+      closedCount = 0;
+      const late = createPracticeEar({
+        candidatePath: file,
+        inference: async () => {
+          await new Promise(resolveLoaded => setTimeout(resolveLoaded, 20));
+          return { endOfTurn: async () => 0.9, tone: async () => null, close() { closedCount += 1; } };
+        },
+      });
+      try {
+        const pendingValue = late.endOfTurn(3000);
+        late.close();
+        assert.equal(await pendingValue, 0.5, 'a turn check that outlives close() answers neutrally');
+        assert.equal(closedCount, 1, 'the worker that finished loading after close() was closed');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+
+  {
     name: 'call metrics: only the candidate\'s own typed lines are typed answers, and a typed-only call measures no delivery',
     run() {
       const transcript = [

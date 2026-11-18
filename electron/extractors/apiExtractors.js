@@ -42,6 +42,8 @@ import { getCurrentIpcRequestContext } from '../ipc/ipcUtils.js';
 // This is a hard ceiling, not a retry window: an unresponsive request still
 // has one bounded attempt, and provider blocks retain their no-retry behavior.
 const DICE_SEARCH_REQUEST_TIMEOUT_SEED_MS = 25_000;
+const DICE_MAX_RETRIES = 3;
+const DICE_RETRY_DELAYS_MS = [1000, 2000, 4000];
 
 const API_TIMEOUT_SEEDS = {
   'linkedin-api':   10000,
@@ -72,15 +74,22 @@ function apiTimeout(key) {
 // and logs each guard's detail at warn.
 const WALK_GUARD_MAX = 20;
 
+const DESKTOP_CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
 /** One counts-only guard. No titles, URLs or query text — numbers and words only. */
 function walkGuard(kind, { page = null, pages = null, newRows = null, detail = '' } = {}) {
   return { kind, page, pages, newRows, detail: String(detail || '').slice(0, 240) };
 }
 
 /** Push a guard, capped so a pathological walk cannot inflate the envelope. */
-function pushWalkGuard(guards, guard) {
+export function pushWalkGuard(guards, guard) {
   if (guards.length < WALK_GUARD_MAX) guards.push(guard);
   return guard;
+}
+
+/** A backstop guard for one source's walk (no query text). */
+function pushBackstopGuard(guards, source, kind, fields) {
+  return pushWalkGuard(guards, { ...walkGuard(kind, fields), source, query: null });
 }
 
 /**
@@ -248,6 +257,11 @@ export async function runApiTransportRetry(operation, {
  * HTML to plain text for snippets, via html-to-text.
  * Only a plain-text snippet is needed here; nothing downstream renders markdown.
  */
+/** Drops tags and collapses whitespace; unlike stripHtml it leaves entities and newlines alone. */
+function tagStrippedText(html) {
+  return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 function stripHtml(html) {
   if (!html || typeof html !== 'string') return '';
   try {
@@ -259,6 +273,12 @@ function stripHtml(html) {
   }
 }
 
+/**
+ * Consecutive pages that may add zero NEW OUTPUT before a query's walk gives up.
+ * Bounds the cost of a query whose results an earlier query already returned.
+ */
+const LINKEDIN_MAX_UNPRODUCTIVE_PAGES = 2;
+
 // ── LinkedIn Hidden API ─────────────────────────────────────────────────────
 /**
  * Why one LinkedIn query's page walk stopped — the pure decision behind the
@@ -267,7 +287,11 @@ function stripHtml(html) {
  *   'exhausted'      — the page carried no well-formed cards at all.
  *   'no-new-rows'    — cards were present but none were new TO THIS QUERY, i.e.
  *                      the pager stopped advancing.
+ *   'redundant-query' — consecutive pages added no new output, because an
+ *                      earlier query already returned these rows.
  *   'result-ceiling' — the offset budget ran out with the query still yielding.
+ *                      The one caller passes an infinite maxResults, so this
+ *                      is reached only from tests.
  *   null             — keep walking.
  *
  * The critical distinction is that a page whose rows were all already returned
@@ -277,7 +301,7 @@ function stripHtml(html) {
  * and ended the walk on page 1, reported as "results exhausted".
  *
  * @param {{cardsOnPage: number, newToThisQuery: number, nextStart: number, maxResults: number}} state
- * @returns {'exhausted'|'no-new-rows'|'result-ceiling'|null}
+ * @returns {'exhausted'|'no-new-rows'|'redundant-query'|'result-ceiling'|null}
  */
 export function linkedInPageStopReason({
   cardsOnPage,
@@ -299,12 +323,6 @@ export function linkedInPageStopReason({
   if (Number.isFinite(nextStart) && Number.isFinite(maxResults) && nextStart >= maxResults) return 'result-ceiling';
   return null;
 }
-
-/**
- * Consecutive pages that may add zero NEW OUTPUT before a query's walk gives up.
- * Bounds the cost of a query whose results an earlier query already returned.
- */
-const LINKEDIN_MAX_UNPRODUCTIVE_PAGES = 2;
 
 /**
  * LinkedIn walk depth has no fixed total-results ceiling. Source-local pacing
@@ -463,7 +481,7 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
       const r = await safeApiFetch(`https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?${params}`, {
         headers: {
           'Accept': 'text/html',
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          'User-Agent': DESKTOP_CHROME_UA,
           'Referer': 'https://www.linkedin.com/jobs/search/',
         },
         signal: createTimeoutSignal(signal, apiTimeout('linkedin-api')),
@@ -1777,13 +1795,12 @@ export function filterWholeFeedJobsByTitleRelevance(jobs, queries, geoTerms = EM
     // Whole-feed extractors can carry encoded text straight from JSON/RSS. The
     // admission boundary needs the human title, not its serialized HTML form:
     // `Systems &amp; Analytics Architect` otherwise inserts a fake `amp` word
-    // between the two role concepts and can fail the local-phrase guard. Keep
-    // the source object intact — this normalized value is matcher/telemetry-only
-    // and normal pipeline markup cleanup still owns the persisted job fields.
-    // Keep the source object untouched, but make the admission decision and its
-    // diagnostic sample read the human title. RemoteOK occasionally returns
-    // UTF-8 mojibake (for example "MACAÃ"), and this boundary otherwise runs
-    // before the final kept-job cleanup where that text is normally repaired.
+    // between the two role concepts and can fail the local-phrase guard.
+    // RemoteOK also occasionally returns UTF-8 mojibake (for example "MACAÃ"),
+    // and this boundary runs before the final kept-job cleanup where that text
+    // is normally repaired. The source object stays untouched: this normalized
+    // value only feeds the admission decision and its diagnostic sample, and
+    // normal pipeline markup cleanup still owns the persisted job fields.
     const title = decodeHtmlEntities(repairMojibake(String(job?.title || '')));
     const decisions = roleQueries.map(query => computeJobRelevanceDecision(title, query, geoTerms));
     const matched = decisions
@@ -2061,15 +2078,11 @@ async function fetchUSAJobsPages(query, apiKey, email, signal, requestedAgeDays,
       // Auto's row budget is a backstop, not a user choice: say so loudly. An
       // explicit allowance reaching itself is the walk doing its job — quiet.
       if (autoRowWalk) {
-        const guard = pushWalkGuard(walkGuards, {
-          ...walkGuard('job-backstop', {
-            page,
-            pages: pagesFetched,
-            newRows: rows.length,
-            detail: `hit Auto's ${autoRowBudget}-row budget on page ${page} after ${pagesFetched} page(s); gathered ${rows.length} row(s)`,
-          }),
-          source: 'usajobs',
-          query: null,
+        const guard = pushBackstopGuard(walkGuards, 'usajobs', 'job-backstop', {
+          page,
+          pages: pagesFetched,
+          newRows: rows.length,
+          detail: `hit Auto's ${autoRowBudget}-row budget on page ${page} after ${pagesFetched} page(s); gathered ${rows.length} row(s)`,
         });
         stopReason = 'job-backstop';
         logger.warn(`[USAJobs] ${guard.detail}`);
@@ -2087,15 +2100,11 @@ async function fetchUSAJobsPages(query, apiKey, email, signal, requestedAgeDays,
       break;
     }
     if (page === pageCeiling) {
-      const guard = pushWalkGuard(walkGuards, {
-        ...walkGuard('page-backstop', {
-          page,
-          pages: pagesFetched,
-          newRows: pageNewRows,
-          detail: `hit the ${pageCeiling}-page backstop on page ${page} without the provider running out; gathered ${rows.length} row(s)`,
-        }),
-        source: 'usajobs',
-        query: null,
+      const guard = pushBackstopGuard(walkGuards, 'usajobs', 'page-backstop', {
+        page,
+        pages: pagesFetched,
+        newRows: pageNewRows,
+        detail: `hit the ${pageCeiling}-page backstop on page ${page} without the provider running out; gathered ${rows.length} row(s)`,
       });
       stopReason = 'page-ceiling';
       logger.warn(`[USAJobs] ${guard.detail}`);
@@ -2119,7 +2128,6 @@ async function runUSAJobsSearch(query, apiKey, email, signal, maxAgeDays, locati
   // from the user's role phrase. This is NOT a claim that the ranking is good —
   // measured on-target rate is flat across depth, with no usable relevance
   // ordering — only that a local gate discards more real rows than it removes.
-  const items = mapped;
   // A 200 carrying zero rows is a real, reportable outcome and is otherwise
   // indistinguishable from an empty federal search.
   if (providerTotal === 0) {
@@ -2134,7 +2142,7 @@ async function runUSAJobsSearch(query, apiKey, email, signal, maxAgeDays, locati
     logger.info(`[USAJobs] "${query}": gathered ${rows.length} of ${providerTotal} reported after ${pagesFetched} page(s) — ${why}`);
   }
   return {
-    items,
+    items: mapped,
     warning,
     gathered: mapped.length,
     providerGathered: rows.length,
@@ -2154,9 +2162,6 @@ async function runUSAJobsSearch(query, apiKey, email, signal, maxAgeDays, locati
     ...(pageShapeFailures > 0 ? { pageShapeFailures } : {}),
   };
 }
-
-
-// ── Shared Utilities ────────────────────────────────────────────────────────
 
 
 // ── RemoteOK Direct API ─────────────────────────────────────────────────────
@@ -2216,6 +2221,22 @@ export function formatRemoteOkSalary(min, max) {
   return '';
 }
 
+/** At most this many extra tag-scoped requests per run (ToS courtesy). */
+const REMOTEOK_MAX_TAG_FETCHES = 3;
+
+// A dropped connection or one 10s timeout is often transient. Retry it once
+// with an abort-aware delay; provider responses such as 403/429 never enter
+// this path because immediate retries would worsen a throttle.
+const REMOTEOK_MAX_TRANSPORT_RETRIES = 1;
+const REMOTEOK_TRANSPORT_RETRY_DELAY_MS = 2000;
+
+/** Words that are never useful RemoteOK tags. */
+const REMOTEOK_TAG_STOPWORDS = new Set([
+  'and', 'the', 'for', 'with', 'jobs', 'job', 'remote', 'senior', 'junior', 'lead',
+  'staff', 'principal', 'entry', 'level', 'years', 'experience', 'work', 'time',
+  'full', 'part', 'new', 'all', 'any', 'top', 'best',
+]);
+
 /**
  * Tags to request from RemoteOK in addition to the bare feed, derived from the
  * run's own queries.
@@ -2260,22 +2281,6 @@ export function remoteOkTagsFromQueries(queries, max = REMOTEOK_MAX_TAG_FETCHES)
   return tags;
 }
 
-/** At most this many extra tag-scoped requests per run (ToS courtesy). */
-const REMOTEOK_MAX_TAG_FETCHES = 3;
-
-// A dropped connection or one 10s timeout is often transient. Retry it once
-// with an abort-aware delay; provider responses such as 403/429 never enter
-// this path because immediate retries would worsen a throttle.
-const REMOTEOK_MAX_TRANSPORT_RETRIES = 1;
-const REMOTEOK_TRANSPORT_RETRY_DELAY_MS = 2000;
-
-/** Words that are never useful RemoteOK tags. */
-const REMOTEOK_TAG_STOPWORDS = new Set([
-  'and', 'the', 'for', 'with', 'jobs', 'job', 'remote', 'senior', 'junior', 'lead',
-  'staff', 'principal', 'entry', 'level', 'years', 'experience', 'work', 'time',
-  'full', 'part', 'new', 'all', 'any', 'top', 'best',
-]);
-
 async function fetchRemoteOkFeed(url, signal) {
   // Never put a query-derived tag (or the whole request URL) in process logs.
   // Source logs may be included in support bundles; the structured diagnostic
@@ -2287,7 +2292,7 @@ async function fetchRemoteOkFeed(url, signal) {
     return safeApiFetch(url, {
       headers: {
         'Accept': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'User-Agent': DESKTOP_CHROME_UA,
       },
       signal: createTimeoutSignal(signal, apiTimeout('remoteok-api')),
     }, 'remoteok');
@@ -2456,7 +2461,7 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
   const feedJobs = providerRows.map((job) => {
     // RemoteOK's API returns description as raw HTML — strip tags to plain text.
     const descText = typeof job.description === 'string'
-      ? job.description.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+      ? tagStrippedText(job.description)
       : '';
     const tags = Array.isArray(job.tags) ? job.tags.map(remoteOkScalarText).filter(Boolean).join(', ') : '';
     const url = remoteOkPostingUrl(job.url);
@@ -2625,7 +2630,7 @@ async function fetchWwrFeed(url, signal) {
   return safeApiFetch(url, {
     headers: {
       'Accept': 'application/rss+xml, application/xml, text/xml',
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      'User-Agent': DESKTOP_CHROME_UA,
     },
     signal: createTimeoutSignal(signal, apiTimeout('wwr-api')),
   }, 'weworkremotely');
@@ -2646,6 +2651,7 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
   }
 
   const itemPattern = /<item>([\s\S]*?)<\/item>/gi;
+  const rssItemLink = item => (item.match(/<link>\s*([^<\s]+)\s*<\/link>/i) || [])[1];
   let xml = r.text;
   // A 200 that is not an RSS document at all is not an empty feed; one the detector already flagged keeps its own warning.
   const feedShapeMissing = !r.warning && wwrFeedShapeMissing(r.text);
@@ -2653,7 +2659,7 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
   // main feed is always the base, duplicates are dropped by <link>, and a 403 or
   // an unknown slug simply contributes nothing.
   const mainLinks = new Set((xml.match(itemPattern) || [])
-    .map(item => (item.match(/<link>\s*([^<\s]+)\s*<\/link>/i) || [])[1])
+    .map(rssItemLink)
     .filter(Boolean));
   for (const slug of wwrCategoriesFromQueries(queries)) {
     if (signal?.aborted) break;
@@ -2663,7 +2669,7 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
       continue;
     }
     const fresh = (cat.text.match(itemPattern) || []).filter(item => {
-      const link = (item.match(/<link>\s*([^<\s]+)\s*<\/link>/i) || [])[1];
+      const link = rssItemLink(item);
       if (!link || mainLinks.has(link)) return false;
       mainLinks.add(link);
       return true;
@@ -2753,7 +2759,7 @@ const REVERB_HEADERS = {
   'Accept': 'application/hal+json',
   'Accept-Version': '3.0',
   'Content-Type': 'application/hal+json',
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'User-Agent': DESKTOP_CHROME_UA,
 };
 
 /**
@@ -2794,7 +2800,7 @@ export function reverbListingsToComps(listings) {
  * Guide API was retired; see the section header). Returns the standard
  * { items, warning } envelope so a block/throttle surfaces in the UI.
  */
-async function fetchReverbActiveListings(query, signal, safeApiFetch) {
+async function fetchReverbActiveListings(query, signal) {
   const res = await safeApiFetch(
     `https://api.reverb.com/api/listings/all?query=${encodeURIComponent(query)}&per_page=40`,
     { headers: REVERB_HEADERS, signal: createTimeoutSignal(signal, apiTimeout('reverb-api')) },
@@ -2817,7 +2823,7 @@ async function fetchReverbActiveListings(query, signal, safeApiFetch) {
  * header; this is the honest, still-working replacement, reclassified as active.)
  */
 export async function fetchReverbListings(query, signal = null) {
-  return fetchReverbActiveListings(query, signal, safeApiFetch);
+  return fetchReverbActiveListings(query, signal);
 }
 
 // ── PriceCharting (direct HTTP, NOT the stealth browser) ────────────────────
@@ -2839,7 +2845,7 @@ export async function fetchReverbListings(query, signal = null) {
 // enough of the query's distinctive tokens with its title — a genuine match shares
 // most, a fuzzy junk match shares one.
 const PRICECHARTING_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'User-Agent': DESKTOP_CHROME_UA,
   'Accept': 'text/html,application/xhtml+xml',
 };
 
@@ -2851,7 +2857,12 @@ const PRICECHARTING_HEADERS = {
 // price (unpriced accessories) are skipped; de-duped by URL. JSDOM does not run
 // scripts or load resources, so the anti-automation JS can't blank the prices here.
 export function parsePriceChartingHtml(html) {
-  const doc = new JSDOM(String(html || '')).window.document;
+  const dom = new JSDOM(String(html || ''));
+  try { return parsePriceChartingDocument(dom.window.document); }
+  finally { dom.window.close(); }
+}
+
+function parsePriceChartingDocument(doc) {
   const parsePrice = (txt) => {
     const m = String(txt || '').replace(/[,\s]/g, '').match(/\$?(\d+(?:\.\d{1,2})?)/);
     return m ? parseFloat(m[1]) : 0;
@@ -2938,7 +2949,13 @@ export async function fetchPriceChartingComps(query, signal = null, { category }
     logger.warn(`[PriceCharting] HTTP ${res.status}`);
     return { items: [], url, warning: { code: 'task-failed', severity: 'block', evidence: `HTTP ${res.status} (server bot-gate or rate-limit)` } };
   }
-  const html = await res.text();
+  let html;
+  try {
+    html = await res.text();
+  } catch (e) {
+    logger.warn(`[PriceCharting] body read failed: ${String(e?.message || e).slice(0, 160)}`);
+    return { items: [], url, warning: { code: 'task-failed', severity: 'block', evidence: `fetch failed: ${String(e?.message || e).slice(0, 200)}` } };
+  }
   const parsed = parsePriceChartingHtml(html);
   const shapeMissing = priceChartingShapeMissing({ html, finalUrl: res.url, parsedCount: parsed.length });
   const items = filterPriceChartingByRelevance(parsed, q);
@@ -2960,7 +2977,7 @@ export async function fetchPriceChartingComps(query, signal = null, { category }
 // request for a non-furniture category (isAptDecoApplicable) since AptDeco's
 // fuzzy Algolia returns loose matches even for off-category queries.
 const APTDECO_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'User-Agent': DESKTOP_CHROME_UA,
   'Accept': 'text/html,application/xhtml+xml',
 };
 
@@ -3002,9 +3019,13 @@ export function extractAlgoliaHits(html) {
 // de-duped by product URL. `price` is the current ask (the comp value);
 // `original_price`/MSRP is retail context and is NOT used as the comp price.
 export function parseAptDecoComps(html) {
+  return compsFromAlgoliaHits(extractAlgoliaHits(html));
+}
+
+function compsFromAlgoliaHits(hits) {
   const items = [];
   const seen = new Set();
-  for (const rec of extractAlgoliaHits(html)) {
+  for (const rec of hits) {
     if (!rec || typeof rec !== 'object') continue;
     // Skip sold/unavailable inventory — these are ACTIVE asking-price comps.
     if (rec.is_available === false || rec.is_saleable === false) continue;
@@ -3050,9 +3071,15 @@ export async function fetchAptDecoComps(query, signal = null, { category } = {})
     logger.warn(`[AptDeco] HTTP ${res.status}`);
     return { items: [], url, warning: { code: 'task-failed', severity: 'block', evidence: `HTTP ${res.status} (server bot-gate or rate-limit)` } };
   }
-  const html = await res.text();
-  const items = parseAptDecoComps(html);
-  return { items, url, warning: null, shapeMissing: aptDecoShapeMissing(html, extractAlgoliaHits(html).length) };
+  let html;
+  try {
+    html = await res.text();
+  } catch (e) {
+    logger.warn(`[AptDeco] body read failed: ${String(e?.message || e).slice(0, 160)}`);
+    return { items: [], url, warning: { code: 'task-failed', severity: 'block', evidence: `fetch failed: ${String(e?.message || e).slice(0, 200)}` } };
+  }
+  const hits = extractAlgoliaHits(html);
+  return { items: compsFromAlgoliaHits(hits), url, warning: null, shapeMissing: aptDecoShapeMissing(html, hits.length) };
 }
 
 // ── Dice Public API ─────────────────────────────────────────────────────────
@@ -3427,12 +3454,17 @@ function extractMosaicJobs(html, options = {}) {
 }
 
 function extractDomJobs(html, { loggedPlaceholderKeys = null } = {}) {
-  let document;
+  let dom;
   try {
-    document = new JSDOM(String(html || '')).window.document;
+    dom = new JSDOM(String(html || ''));
   } catch {
     return [];
   }
+  try { return extractDomJobsFromDocument(dom.window.document, loggedPlaceholderKeys); }
+  finally { dom.window.close(); }
+}
+
+function extractDomJobsFromDocument(document, loggedPlaceholderKeys) {
 
   const cards = document.querySelectorAll('.job_seen_beacon, [data-testid="job-card-container"], [data-jk]');
   const jobs = [];
@@ -3580,8 +3612,6 @@ export function dicePostedBucket(maxAgeDays) {
   const n = Number.isFinite(maxAgeDays) ? Math.floor(maxAgeDays) : null;
   return { 1: 'ONE', 3: 'THREE', 7: 'SEVEN' }[n] || null;
 }
-const DICE_MAX_RETRIES = 3;
-const DICE_RETRY_DELAYS_MS = [1000, 2000, 4000];
 
 // Once we observe that a bundle scan returns the same key that was already
 // stored, we know the 500s are transient server errors (not key rotation).
@@ -3635,7 +3665,7 @@ function mapDiceListing(job) {
   // Use summary as a placeholder — a second enrichment pass fetches full descriptions
   // per-job via the detail endpoint after all queries are merged and deduped.
   const descFromHtml = job?.description
-    ? job.description.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+    ? tagStrippedText(job.description)
     : '';
   const descText = descFromHtml || (job?.summary || '').trim();
   const salary = cleanDiceSalary(job?.salary);
@@ -3647,7 +3677,7 @@ function mapDiceListing(job) {
     salaryProvenance: salary && !/\b(?:estimat(?:e|ed|ion)|projected|predicted|prediction)\b/iu.test(salary) ? 'posted' : 'unknown',
     snippet: descText,
     description: descText,
-    url: job?.detailsPageUrl || `https://www.dice.com/job-detail/${job?.guid || job?.id}`,
+    url: job?.detailsPageUrl || (job?.guid || job?.id ? `https://www.dice.com/job-detail/${job?.guid || job?.id}` : ''),
     posted: job?.postedDate || '',
     source: 'dice',
     remote: job?.workFromHomeAvailability === 'TRUE',
@@ -3892,15 +3922,11 @@ export async function fetchDiceListings(query, location = '', signal = null, max
       stopReasons.push({ page, stopReason: limits.jobsPerPlatform == null ? 'auto-jobs-per-platform' : 'jobs-per-platform' });
       // Auto's 10,000-row budget is a backstop, not a user choice: say so.
       if (limits.jobsPerPlatform == null) {
-        const guard = pushWalkGuard(walkGuards, {
-          ...walkGuard('job-backstop', {
-            page,
-            pages: pagesFetched,
-            newRows: items.length,
-            detail: `hit Auto's ${rowBudget}-row budget on page ${page}; kept ${items.length} in-window row(s) after ${pagesFetched} page(s)`,
-          }),
-          source: 'dice',
-          query: null,
+        const guard = pushBackstopGuard(walkGuards, 'dice', 'job-backstop', {
+          page,
+          pages: pagesFetched,
+          newRows: items.length,
+          detail: `hit Auto's ${rowBudget}-row budget on page ${page}; kept ${items.length} in-window row(s) after ${pagesFetched} page(s)`,
         });
         logger.warn(`[Dice API] ${guard.detail}`);
       }
@@ -3918,15 +3944,11 @@ export async function fetchDiceListings(query, location = '', signal = null, max
       stopReasons.push({ page, stopReason: stoppedByExplicitPageLimit ? 'pages-per-platform' : 'page-ceiling' });
       // An explicit Pages value is the user's own boundary — quiet, as before.
       if (!stoppedByExplicitPageLimit) {
-        const guard = pushWalkGuard(walkGuards, {
-          ...walkGuard('page-backstop', {
-            page,
-            pages: pagesFetched,
-            newRows: pageNewRows,
-            detail: `hit the ${pageCeiling}-page backstop on page ${page} without a short or empty page; kept ${items.length} in-window row(s)`,
-          }),
-          source: 'dice',
-          query: null,
+        const guard = pushBackstopGuard(walkGuards, 'dice', 'page-backstop', {
+          page,
+          pages: pagesFetched,
+          newRows: pageNewRows,
+          detail: `hit the ${pageCeiling}-page backstop on page ${page} without a short or empty page; kept ${items.length} in-window row(s)`,
         });
         logger.warn(`[Dice API] ${guard.detail}`);
       }
@@ -3999,8 +4021,7 @@ export async function warmDiceApiKey(signal = null) {
 // A related ItemList may precede the main posting in another script block.
 // Dice knows the fetched page URL, so bind both fields to one posting rather
 // than independently borrowing the first available field from another job.
-function pageJobPostingField(html, pageUrl, read) {
-  if (!pageUrl) return walkJsonLdJobPostings(html, read);
+function selectPageJobPosting(html, pageUrl) {
   const canonical = value => {
     try {
       const url = new URL(value, pageUrl);
@@ -4014,8 +4035,24 @@ function pageJobPostingField(html, pageUrl, read) {
   const nodes = walkJsonLdJobPostings(html);
   const bound = nodes.filter(node => node.url && canonical(node.url) === canonical(pageUrl));
   const unique = [...new Map(bound.map(node => [JSON.stringify(node), node])).values()];
-  const selected = unique.length === 1 ? unique[0] : !unique.length && nodes.length === 1 && !nodes[0].url ? nodes[0] : null;
+  return unique.length === 1 ? unique[0] : !unique.length && nodes.length === 1 && !nodes[0].url ? nodes[0] : null;
+}
+
+function pageJobPostingField(html, pageUrl, read) {
+  if (!pageUrl) return walkJsonLdJobPostings(html, read);
+  const selected = selectPageJobPosting(html, pageUrl);
   return selected ? read(selected) : undefined;
+}
+
+// Both Dice detail fields from one parse of the page. Same posting binding and
+// same results as calling the two exported extractors separately.
+function extractJobPostingDescriptionAndSalary(html, pageUrl) {
+  if (!pageUrl) return { description: extractJobPostingDescription(html), baseSalary: extractJobPostingBaseSalary(html) };
+  const node = selectPageJobPosting(html, pageUrl);
+  return {
+    description: node && typeof node.description === 'string' && node.description.trim() ? node.description : '',
+    baseSalary: node && node.baseSalary && typeof node.baseSalary === 'object' ? node.baseSalary : null,
+  };
 }
 
 /**
@@ -4240,13 +4277,14 @@ export async function enrichDiceDescriptions(jobs, signal) {
           // number.
           let salaryPatch = null;
           let salaryPatchProvenance = 'unknown';
+          const posting = extractJobPostingDescriptionAndSalary(html, url);
           if (parseSalaryToNumeric(job.salary) === 0) {
-            const structuredSalary = formatDiceBaseSalary(extractJobPostingBaseSalary(html, url));
+            const structuredSalary = formatDiceBaseSalary(posting.baseSalary);
             const formatted = structuredSalary || extractDiceSalaryBadge(html);
             if (formatted) { salaryPatch = formatted; salaryPatchProvenance = structuredSalary ? 'posted' : 'unknown'; salaryUpgraded += 1; }
           }
-          const descHtml = extractJobPostingDescription(html, url);
-          const descText = descHtml ? descHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '';
+          const descHtml = posting.description;
+          const descText = descHtml ? tagStrippedText(descHtml) : '';
           const rest = { ...job };
           delete rest._diceId;
           if (salaryPatch) { rest.salary = salaryPatch; rest.salaryProvenance = salaryPatchProvenance; }

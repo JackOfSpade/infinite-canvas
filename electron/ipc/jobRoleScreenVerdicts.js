@@ -30,9 +30,9 @@ const FILE_NAME = 'job-role-screen-verdicts.json';
 // under the older rules for such a title must not be replayed.
 const VERSION = 3;
 // Least recently used entries go first past this count, across all lists.
-export const ROLE_SCREEN_VERDICT_MAX_ENTRIES = 20_000;
+const ROLE_SCREEN_VERDICT_MAX_ENTRIES = 20_000;
 // A replayed mismatch needs this many DISTINCT employers behind it.
-export const ROLE_SCREEN_MISMATCH_MIN_COMPANIES = 2;
+const ROLE_SCREEN_MISMATCH_MIN_COMPANIES = 2;
 // Enough to prove a title is not one employer's quirk, few enough to bound
 // the row written to disk.
 const COMPANY_FINGERPRINT_CAP = 3;
@@ -42,13 +42,13 @@ export function normalizeRoleScreenTitle(title) {
   return String(title ?? '').normalize('NFC').toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 300);
 }
 
-export function normalizeRoleScreenCompany(company) {
+function normalizeRoleScreenCompany(company) {
   return String(company ?? '').normalize('NFC').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
 // Short, collision-resistant stand-in for an employer. An empty company
 // contributes nothing, so it can never count toward the two-employer rule.
-export function roleScreenCompanyFingerprint(company) {
+function roleScreenCompanyFingerprint(company) {
   const normalized = normalizeRoleScreenCompany(company);
   if (!normalized) return '';
   return crypto.createHash('sha256').update(normalized).digest('hex').slice(0, 12);
@@ -148,7 +148,10 @@ export function createJobRoleScreenVerdictStore(dir, { maxEntries = ROLE_SCREEN_
         found.set(title, { outcome: hit.outcome, reason: hit.reason });
       }
       // Persist the use times so eviction keeps the titles that keep coming back.
-      if (found.size > 0) await write(entries);
+      // This is best effort: a failed write must not discard the verdicts found.
+      if (found.size > 0) {
+        try { await write(entries); } catch { /* use times are only an eviction hint */ }
+      }
       return found;
     });
   }

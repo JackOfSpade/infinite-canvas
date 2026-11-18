@@ -13,10 +13,17 @@ const HTML_ATTRIBUTE_ESCAPES = {
 };
 
 function hasControlCharacter(value) {
-  return [...value].some((character) => {
-    const code = character.charCodeAt(0);
-    return code <= 0x1F || code === 0x7F;
-  });
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x1F || code === 0x7F) return true;
+  }
+  return false;
+}
+
+/** Returns the trimmed string form of a URL input, or '' when it is empty or has a control character. */
+function cleanUrlInput(value) {
+  const raw = String(value ?? '').trim();
+  return !raw || hasControlCharacter(raw) ? '' : raw;
 }
 
 export function escapeHtmlAttribute(value) {
@@ -24,8 +31,8 @@ export function escapeHtmlAttribute(value) {
 }
 
 function toUrl(value) {
-  const raw = String(value ?? '').trim();
-  if (!raw || hasControlCharacter(raw)) return null;
+  const raw = cleanUrlInput(value);
+  if (!raw) return null;
   try {
     return new URL(raw);
   } catch {
@@ -35,8 +42,8 @@ function toUrl(value) {
 
 /** Returns a canonical http(s) URL suitable for Electron's external browser dispatcher. */
 export function normalizeExternalHttpUrl(value) {
-  const raw = String(value ?? '').trim();
-  if (!raw || hasControlCharacter(raw)) return '';
+  const raw = cleanUrlInput(value);
+  if (!raw) return '';
 
   // LinkNode historically accepted a bare domain. Do this only when no URI
   // scheme is present; never turn an untrusted scheme into a safe-looking URL.
@@ -50,9 +57,11 @@ export function normalizeExternalHttpUrl(value) {
  * read-only local-file protocol. Attribute escaping remains mandatory.
  */
 export function normalizeMarkdownUrl(value) {
-  const raw = String(value ?? '').trim();
-  if (!raw || hasControlCharacter(raw)) return '';
-  if (raw.startsWith('#') || raw.startsWith('/') || raw.startsWith('./') || raw.startsWith('../')) return raw;
+  const raw = cleanUrlInput(value);
+  if (!raw) return '';
+  // A leading '//' or '/\\' is a protocol-relative host, not a path.
+  const isRootPath = raw.startsWith('/') && raw[1] !== '/' && raw[1] !== '\\';
+  if (raw.startsWith('#') || isRootPath || raw.startsWith('./') || raw.startsWith('../')) return raw;
 
   const url = toUrl(raw);
   if (!url) return '';

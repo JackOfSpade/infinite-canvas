@@ -75,30 +75,21 @@ export function classifyUnparseableSalary(s) {
 // duplication of the exact same C1-control-char test.
 export { hasMojibake };
 
-const MOJIBAKE_LOW_CODE = 0x80;
-const MOJIBAKE_HIGH_CODE = 0x9f;
 const REPLACEMENT_CHAR = String.fromCharCode(0xfffd);
+// The C1 control range, the same one hasMojibake tests.
+const C1_CONTROL = /[\x80-\x9f]/;
+const C1_CONTROLS = /[\x80-\x9f]/g;
 
 /**
  * First mojibake excerpt around the corruption (bad bytes replaced with the
  * Unicode replacement char), for a bug-report sample. Returns null if `text`
- * has no mojibake. Walks code points directly rather than a second C1-range
- * regex literal, reusing hasMojibake's own definition of "is corrupted."
+ * has no mojibake.
  */
 export function mojibakeExcerpt(text, radius = 18) {
   const blob = text || '';
-  if (!hasMojibake(blob)) return null;
-  let idx = -1;
-  for (let i = 0; i < blob.length; i++) {
-    const code = blob.charCodeAt(i);
-    if (code >= MOJIBAKE_LOW_CODE && code <= MOJIBAKE_HIGH_CODE) { idx = i; break; }
-  }
-  if (idx === -1) return null; // unreachable given the hasMojibake guard above
-  const slice = blob.slice(Math.max(0, idx - radius), idx + radius);
-  let out = '';
-  for (let i = 0; i < slice.length; i++) {
-    const code = slice.charCodeAt(i);
-    out += (code >= MOJIBAKE_LOW_CODE && code <= MOJIBAKE_HIGH_CODE) ? REPLACEMENT_CHAR : slice[i];
-  }
-  return out.replace(/\s+/g, ' ');
+  const idx = typeof blob === 'string' ? blob.search(C1_CONTROL) : -1;
+  if (idx === -1) return null;
+  return blob.slice(Math.max(0, idx - radius), idx + radius)
+    .replace(C1_CONTROLS, REPLACEMENT_CHAR)
+    .replace(/\s+/g, ' ');
 }

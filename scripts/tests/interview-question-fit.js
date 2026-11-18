@@ -113,4 +113,18 @@ export default [
       assert(problemRank[0].evidenceId === 'actual-problem', 'actual question shape ranks before keyword overlap');
     },
   },
+  {
+    name: 'interview question fit: cached ranking context follows a changed item text and a changed listing',
+    run() {
+      const item = career('a', 'Built React TypeScript interfaces.');
+      const first = interviewEvidenceRank('Walk me through a project.', [item], ['React'], 'React TypeScript role');
+      const again = interviewEvidenceRank('Describe a result.', [item], ['React'], 'React TypeScript role');
+      assert(first[0].roleScore === again[0].roleScore && first[0].roleScore > 0, 'the same context scores the same item the same');
+      item.text = 'Planned quarterly budgets.';
+      const changed = interviewEvidenceRank('Walk me through a project.', [item], ['React'], 'React TypeScript role');
+      assert(changed[0].roleScore === 0, 'an edited item is scored from its new text');
+      const other = interviewEvidenceRank('Walk me through a project.', [item], ['Budgets'], 'budget planning role');
+      assert(other[0].roleScore > 0, 'a different listing is not served from the previous context');
+    },
+  },
 ];

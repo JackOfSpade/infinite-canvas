@@ -13,7 +13,7 @@ import path from 'path';
 import electronPkg from 'electron';
 import { logger } from '../logger.js';
 import { findChromePath, findSystemChromePath, getUserDataDir, getSharedProfileReservationInfo, launchWithProfileLockRetry, reserveSharedProfile } from '../ipc/stealthBrowser.js';
-import { extractIndeedJobsFromHtml } from './apiExtractors.js';
+import { extractIndeedJobsFromHtml, pushWalkGuard } from './apiExtractors.js';
 import { indeedPageUnreadable, mostFirstPagesUnreadable } from '../ipc/jobSourcePageShape.js';
 import { normalizeJobCollectionLimits, resolveBrowserPageBudgets, resolveJobsPerPlatform, isUnlimitedPages, describeJobCollectionLimits } from '../../src/utils/jobCollectionLimits.js';
 import { makeJobPageStop } from '../ipc/jobPageStop.js';
@@ -90,6 +90,9 @@ const LAUNCH_ARGS = [
 
 const sleepMs = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+// A base wait plus a random extra of up to `spread` ms, so repeated waits do not look scripted.
+const jitterMs = (base, spread) => base + Math.round(Math.random() * spread);
+
 // Waits for `ms` milliseconds, calling onTick(secondsRemaining) every second.
 async function waitWithCountdown(ms, onTick, signal = null) {
   const deadline = Date.now() + ms;
@@ -97,7 +100,7 @@ async function waitWithCountdown(ms, onTick, signal = null) {
     const remaining = Math.ceil((deadline - Date.now()) / 1000);
     if (remaining <= 0) break;
     onTick(remaining);
-    await new Promise(r => setTimeout(r, Math.min(1000, deadline - Date.now())));
+    await sleepMs(Math.min(1000, deadline - Date.now()));
   }
 }
 
@@ -380,7 +383,14 @@ function logIndeedResidualEnrichmentDiagnostics(jobs) {
   }
 }
 
-function retainIndeedResidualDiagnostics(jobs) {
+// A row that is open, not deliberately deferred, and still short of usable description text.
+function canStillBeReEnriched(job) {
+  return !job.boardClosed
+    && (!job.descriptionDeferredReason || job.descriptionDeferredReason === 'description-pending-liveness')
+    && indeedDescriptionLength(job) < DESCRIPTION_EVIDENCE_MIN_CHARS;
+}
+
+function dropAttemptTrailsOfScoreSafeRows(jobs) {
   for (const job of Array.isArray(jobs) ? jobs : []) {
     if (isIndeedScoreSafeDescription(job)) delete job._enrichAttempts;
   }
@@ -466,7 +476,7 @@ async function humanClickCard(page, selector, jobKey) {
     box.y + (Math.random() * 8 - 4),
     { steps: 8 + Math.round(Math.random() * 8) },
   );
-  await new Promise(r => setTimeout(r, 60 + Math.round(Math.random() * 100)));
+  await sleepMs(jitterMs(60, 100));
   await page.mouse.click(box.x, box.y);
   return { clicked: true, covered: box.covered };
 }
@@ -573,7 +583,7 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
       covered = click.covered;
       const deadline = Date.now() + 4000;
       while (Date.now() < deadline) {
-        await new Promise(r => setTimeout(r, 200));
+        await sleepMs(200);
         const url = page.url();
         if (!url.includes('/jobs') && url.includes('/viewjob')) { navigatedAway = true; break; }
         const now = await readIndeedPanel(page);
@@ -608,13 +618,13 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
         recordIndeedEnrichmentAttempt(job, { stage: 'card-panel', outcome: 'blank', length: 0 });
       }
       await page.goBack({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-      await new Promise(r => setTimeout(r, 800 + Math.round(Math.random() * 400)));
+      await sleepMs(jitterMs(800, 400));
       continue;
     }
 
     // Keep the pace this scrape has always run at: a panel can answer in 200ms, but clicking through a page that fast is what bot scoring looks for.
     const dwellMs = PANEL_MIN_DWELL_MS + Math.round(Math.random() * 1500) - (Date.now() - clickedAt);
-    if (dwellMs > 0) await new Promise(r => setTimeout(r, dwellMs));
+    if (dwellMs > 0) await sleepMs(dwellMs);
 
     const settled = await readIndeedPanel(page);
     // The text can fill in during the wait, so prefer the later read unless another job has opened since.
@@ -644,7 +654,7 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
       recordIndeedEnrichmentAttempt(job, { stage: 'card-panel', outcome: 'blank', length: 0 });
     }
 
-    if (t < limit - 1) await new Promise(r => setTimeout(r, 800 + Math.round(Math.random() * 600)));
+    if (t < limit - 1) await sleepMs(jitterMs(800, 600));
   }
 
   if (enriched > 0) logger.info(`[Indeed/Browser] Enriched ${enriched}/${limit} jobs with full descriptions`);
@@ -760,17 +770,7 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
       if (signal?.aborted) break;
       const job = targets[index];
       const host = indeedHostForLocation(job.location || '');
-      let safeJobUrl = null;
-      if (job.url) {
-        try {
-          const parsed = new URL(job.url);
-          if (parsed.protocol === 'https:' && (parsed.hostname === 'indeed.com' || parsed.hostname.endsWith('.indeed.com'))) {
-            safeJobUrl = parsed.toString();
-          }
-        } catch {
-          // Fall through to the source-native key below.
-        }
-      }
+      const safeJobUrl = safeIndeedJobUrl(job);
       const safeJobKey = /^[a-z0-9_-]+$/i.test(String(job.jobkey || '')) ? String(job.jobkey) : '';
       const jobUrl = safeJobUrl || (safeJobKey ? `https://${host}/viewjob?jk=${encodeURIComponent(safeJobKey)}` : null);
       if (!jobUrl) continue;
@@ -784,7 +784,7 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
           count: index + 1,
           status: `${index + 1}/${targets.length}`,
         }).catch(() => {});
-        await (runtime?.sleep || sleepMs)(3000 + Math.round(Math.random() * 1000));
+        await (runtime?.sleep || sleepMs)(jitterMs(3000, 1000));
         const signals = await (runtime?.getChallengeSignals || getChallengeSignals)(page);
         if (signals.isChallenge) {
           challengeReason = signals.reason || 'challenge';
@@ -820,7 +820,7 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
         }
         await captureIndeedListingLiveness(page, job, { requestedUrl: jobUrl, httpStatus, descriptionText: description });
         if (index < targets.length - 1) {
-          await (runtime?.sleep || sleepMs)(1500 + Math.round(Math.random() * 1000));
+          await (runtime?.sleep || sleepMs)(jitterMs(1500, 1000));
         }
       } catch (error) {
         recordIndeedEnrichmentAttempt(job, { stage: 'exact-retry', outcome: 'error', reason: error.message });
@@ -832,7 +832,7 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
     // pass keeps or retires it. `unavailable` remains the observation record.
     const activeRows = rows.filter(job => !officialClosedKeys.has(sourceJobKey(job)));
     const remaining = activeRows.filter(needsIndeedDescriptionRetry).length;
-    retainIndeedResidualDiagnostics(activeRows);
+    dropAttemptTrailsOfScoreSafeRows(activeRows);
     logger.info(`[Indeed/Browser] Exact description retry complete: ${recovered}/${targets.length} recovered, ${unavailable.length} unavailable, ${remaining} still incomplete`);
     return { jobs: activeRows, attempted: targets.length, recovered, remaining, unavailable, challengeReason };
   } finally {
@@ -841,18 +841,32 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
   }
 }
 
+// The row's own link when it is an https Indeed page, else null. Anything else,
+// such as an ad redirect scraped from a card, must never be opened in the
+// profile-bearing browser.
+function safeIndeedJobUrl(job) {
+  if (!job.url) return null;
+  try {
+    const parsed = new URL(job.url);
+    if (parsed.protocol === 'https:' && (parsed.hostname === 'indeed.com' || parsed.hostname.endsWith('.indeed.com'))) return parsed.toString();
+  } catch {
+    // An unparseable link is treated as absent.
+  }
+  return null;
+}
+
 export async function runIndeedReEnrichPass(page, { jobs, stage, label, waitUntil, timeout, settleMs, gapMs,
   signal = null, host = 'www.indeed.com', officialClosedKeys = new Set(), runtime = null } = {}) {
   let recovered = 0;
   for (let ri = 0; ri < jobs.length; ri++) {
     if (signal?.aborted) break;
     const job = jobs[ri];
-    const jobUrl = job.url || (job.jobkey ? `https://${host}/viewjob?jk=${job.jobkey}` : null);
+    const jobUrl = safeIndeedJobUrl(job) || (job.jobkey ? `https://${host}/viewjob?jk=${job.jobkey}` : null);
     if (!jobUrl) continue;
     try {
       const navigationResponse = await page.goto(jobUrl, { waitUntil, timeout });
       const httpStatus = navigationResponse?.status?.() ?? null;
-      await (runtime?.sleep || sleepMs)(settleMs[0] + Math.round(Math.random() * settleMs[1]));
+      await (runtime?.sleep || sleepMs)(jitterMs(settleMs[0], settleMs[1]));
       const sigs = await (runtime?.getChallengeSignals || getChallengeSignals)(page);
       if (sigs.isChallenge) {
         recordIndeedEnrichmentAttempt(job, { stage, outcome: 'challenge', reason: sigs.reason });
@@ -886,7 +900,7 @@ export async function runIndeedReEnrichPass(page, { jobs, stage, label, waitUnti
       }
       await captureIndeedListingLiveness(page, job, { requestedUrl: jobUrl, httpStatus, descriptionText: desc });
       if (ri < jobs.length - 1) {
-        await (runtime?.sleep || sleepMs)(gapMs[0] + Math.round(Math.random() * gapMs[1]));
+        await (runtime?.sleep || sleepMs)(jitterMs(gapMs[0], gapMs[1]));
       }
     } catch (e) {
       recordIndeedEnrichmentAttempt(job, { stage, outcome: 'error', reason: e.message });
@@ -896,16 +910,6 @@ export async function runIndeedReEnrichPass(page, { jobs, stage, label, waitUnti
   return recovered;
 }
 
-/**
- * Fetch Indeed job listings using a real Chrome session with a persistent
- * auth'd profile. Replaces the Scrapfly-based fetchIndeedListings().
- *
- * @param {string[]} queries
- * @param {AbortSignal|null} signal
- * @param {number|null} maxAgeDays
- * @param {string} [profileDir] — override for the Puppeteer userDataDir
- * @returns {Promise<{ items: object[], warning: object|null, gathered: number }>}
- */
 /** Exclusive 0-based page end for an Indeed query, exported for resume tests. */
 export function indeedQueryPageEnd(startPage, pageBudget) {
   // `pageBudget` is the absolute lifetime ceiling for this generated query,
@@ -933,6 +937,25 @@ export function resolveIndeedPageBudgets(queryCount, collectionLimits, resumePag
   return isResume ? Array(count).fill(1) : defaults;
 }
 
+/**
+ * Fetch Indeed job listings using a real Chrome session with a persistent
+ * auth'd profile. Replaces the Scrapfly-based fetchIndeedListings().
+ *
+ * @param {string[]} queries
+ * @param {AbortSignal|null} signal
+ * @param {number|null} maxAgeDays
+ * @param {string} [profileDir] — override for the Puppeteer userDataDir
+ * @param {Function|null} [onProgress] — status text callback
+ * @param {number} [startPage] — 0-based page to resume each query from
+ * @param {Function|null} [onPageJobs] — receives each page's rows as they are read
+ * @param {string} [location] — search location
+ * @param {object|null} [collectionLimits] — user page and row limits
+ * @param {object|null} [resumePageBudgets] — per-query page ceilings carried across a resume
+ * @param {boolean} [isResume] — true when continuing an interrupted run
+ * @param {number[]|null} [originalQueryIndexes] — query positions in the original run
+ * @param {number|null} [collectionStartTimestamp] — posted-since cutoff for this run
+ * @returns {Promise<{ items: object[], warning: object|null, gathered: number }>}
+ */
 export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0, onPageJobs = null, location = '', collectionLimits = null, resumePageBudgets = null, isResume = false, originalQueryIndexes = null, collectionStartTimestamp = null) {
   if (isBackgroundE2E()) {
     const disabled = backgroundE2EDisabledError('Indeed browser extraction');
@@ -1063,7 +1086,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       };
     }
 
-    let page = await createBackgroundScrapePage(browser, { width: 1400, height: 900 });
+    const page = await createBackgroundScrapePage(browser, { width: 1400, height: 900 });
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
     await page.evaluateOnNewDocument(OVERLAY_SCRIPT);
 
@@ -1078,15 +1101,15 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     const landedUrl = page.url();
     await injectOverlay(page);
     await updateOverlay(page, { srcName: 'Indeed', srcLabel: 'Checking session…', count: 0, status: 'Verifying login…' });
-    await new Promise(r => setTimeout(r, 1200 + Math.round(Math.random() * 600)));
-    let cookies = await page.cookies(`https://${host}`, 'https://www.indeed.com', 'https://secure.indeed.com').catch(() => []);
-    let hasPPID = cookies.some(c => c.name === 'PPID' && (c.domain === 'indeed.com' || c.domain?.endsWith('.indeed.com')));
-    let hasCfClearance = cookies.some(c => c.name === 'cf_clearance');
-    let hasCfBm = cookies.some(c => c.name === '__cf_bm');
-    let cookieNameList = cookies.map(c => c.name);
-    let allCookieNames = cookieNameList.join(', ') || '(none)';
-    let preflightSignals = await getChallengeSignals(page);
-    let preflight = classifyIndeedSessionPreflight({
+    await sleepMs(jitterMs(1200, 600));
+    const cookies = await page.cookies(`https://${host}`, 'https://www.indeed.com', 'https://secure.indeed.com').catch(() => []);
+    const hasPPID = cookies.some(c => c.name === 'PPID' && (c.domain === 'indeed.com' || c.domain?.endsWith('.indeed.com')));
+    const hasCfClearance = cookies.some(c => c.name === 'cf_clearance');
+    const hasCfBm = cookies.some(c => c.name === '__cf_bm');
+    const cookieNameList = cookies.map(c => c.name);
+    const allCookieNames = cookieNameList.join(', ') || '(none)';
+    const preflightSignals = await getChallengeSignals(page);
+    const preflight = classifyIndeedSessionPreflight({
       hasPPID,
       authenticatedUrl: /^https:\/\/myjobs\.indeed\.com\/saved(?:[/?#]|$)/i.test(landedUrl),
       landedUrl,
@@ -1192,10 +1215,6 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     // budget), one entry per stop. jobs.js merges them per source so a run
     // stopped by a guard is never read as an exhausted one.
     const walkGuards = [];
-    const pushWalkGuard = (guard) => {
-      if (walkGuards.length < 20) walkGuards.push(guard);
-      return guard;
-    };
     // A bounded per-query retrieval budget protects explicit small requests
     // from multiplying into a large crawl. It is deliberately distinct from
     // the user-visible platform cap, which is applied centrally only when the
@@ -1213,7 +1232,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     // full picture fits in the 60-line ring buffer regardless of run length.
     const perQueryChallenges = {}; // qi → challenge count
 
-    const stopForIndeedChallenge = async ({ q, qi, p, reason, label, stage = 'search-page' }) => {
+    const stopForIndeedChallenge = ({ q, qi, p, reason, label, stage = 'search-page' }) => {
       totalChallenges++;
       perQueryChallenges[qi] = (perQueryChallenges[qi] || 0) + 1;
       const challengeUrl = page.url();
@@ -1324,7 +1343,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
 
         await injectOverlay(page);
         await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: `Loading page ${p + 1}…`, progressText: '0/0' });
-        await new Promise(r => setTimeout(r, 2000 + Math.round(Math.random() * 1000)));
+        await sleepMs(jitterMs(2000, 1000));
         if (signal?.aborted) break outer;
 
         const signals = await getChallengeSignals(page);
@@ -1347,7 +1366,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
             break outer;
           }
 
-          await stopForIndeedChallenge({
+          stopForIndeedChallenge({
             q, qi, p, reason: signals.reason, label: `Cloudflare challenge q="${q}" p=${p + 1}`,
           });
           break outer;
@@ -1444,7 +1463,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
             // stopForIndeedChallenge always sets manualChallenge and returns false —
             // it never clears a challenge in-place — so this always falls through
             // to the `if (manualChallenge) { break outer; }` below.
-            await stopForIndeedChallenge({
+            stopForIndeedChallenge({
               q, qi, p, reason: blankSignals.reason || 'cf-blank-enrichment', label: `Cloudflare description challenge q="${q}" p=${p + 1}`,
               stage: 'description-enrichment',
             });
@@ -1518,7 +1537,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           // plain stops (results exhausted, date window behind us) stay info.
           if (stopDecision.guard) {
             const guard = stopDecision.guard;
-            const entry = pushWalkGuard({
+            const entry = pushWalkGuard(walkGuards, {
               kind: guard.kind || 'pager-trickle',
               source: 'indeed',
               query: qi + 1,
@@ -1545,7 +1564,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           // is recorded and logged; an explicit Pages value stops quietly.
           if (isUnlimitedPages(limits)) {
             autoPageBudgetReached = true;
-            const guard = pushWalkGuard({
+            const guard = pushWalkGuard(walkGuards, {
               kind: 'page-backstop',
               source: 'indeed',
               query: qi + 1,
@@ -1560,14 +1579,12 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           break;
         }
 
-        const delay = PAGE_DELAY_MS[0] + Math.round(Math.random() * (PAGE_DELAY_MS[1] - PAGE_DELAY_MS[0]));
-        await new Promise(r => setTimeout(r, delay));
+        await sleepMs(jitterMs(PAGE_DELAY_MS[0], PAGE_DELAY_MS[1] - PAGE_DELAY_MS[0]));
       }
 
       // Pace the gap between queries so consecutive searches don't look scripted.
       if (!signal?.aborted) {
-        const delay = QUERY_DELAY_MS[0] + Math.round(Math.random() * (QUERY_DELAY_MS[1] - QUERY_DELAY_MS[0]));
-        await new Promise(r => setTimeout(r, delay));
+        await sleepMs(jitterMs(QUERY_DELAY_MS[0], QUERY_DELAY_MS[1] - QUERY_DELAY_MS[0]));
       }
 
       wi++;
@@ -1588,11 +1605,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     // navigating to job URLs — starting immediately after 90 challenges means
     // CF is still active and the re-enrichment gets blocked on the first request.
     // Heuristic: 30s per 10 challenges, capped at 120s.
-    const missingDescJobs = allJobs.filter(job =>
-      !job.boardClosed
-      && (!job.descriptionDeferredReason || job.descriptionDeferredReason === 'description-pending-liveness')
-      && indeedDescriptionLength(job) < DESCRIPTION_EVIDENCE_MIN_CHARS
-    );
+    const missingDescJobs = allJobs.filter(canStillBeReEnriched);
     let reEnriched = 0;
     if (missingDescJobs.length > 0 && !signal?.aborted && !manualChallenge) {
       if (totalChallenges > 0) {
@@ -1616,11 +1629,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       // one clean chance to settle before the caller has to ask the user whether
       // low-evidence rows should be scored. Keep it bounded to the residual set:
       // it is a recovery attempt, not another crawl of every result.
-      const residualDescJobs = missingDescJobs.filter(job =>
-        !job.boardClosed
-        && (!job.descriptionDeferredReason || job.descriptionDeferredReason === 'description-pending-liveness')
-        && indeedDescriptionLength(job) < DESCRIPTION_EVIDENCE_MIN_CHARS
-      );
+      const residualDescJobs = missingDescJobs.filter(canStillBeReEnriched);
       if (residualDescJobs.length > 0 && !signal?.aborted) {
         logger.info(`[Indeed/Browser] Slow re-enriching ${residualDescJobs.length} residual job(s)`);
         const slowRecovered = await runReEnrichPass({
@@ -1639,7 +1648,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     const retainedJobs = allJobs.filter(job => !officialClosedKeys.has(sourceJobKey(job)));
     logIndeedResidualEnrichmentDiagnostics(retainedJobs);
     const enrichment = summarizeIndeedEnrichmentAttempts(retainedJobs);
-    retainIndeedResidualDiagnostics(retainedJobs);
+    dropAttemptTrailsOfScoreSafeRows(retainedJobs);
 
     // Compact per-query summary — 1 line per query so the full run picture fits
     // within the 60-line ring buffer regardless of how long the scrape ran.
@@ -1664,7 +1673,6 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     const inWindow = collectionStartTimestamp != null
       ? filterJobsByPostedSince(retainedJobs, collectionStartTimestamp)
       : maxAgeDays ? filterJobsByAge(retainedJobs, maxAgeDays) : retainedJobs;
-    const items = inWindow;
 
     let warning = null;
     if (manualChallenge) {
@@ -1709,7 +1717,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           queryIndexes: queryIndexes.slice(challengedQi),
         },
       };
-    } else if (totalChallenges > 0 && items.length === 0) {
+    } else if (totalChallenges > 0 && inWindow.length === 0) {
       warning = {
         code: 'scrape-failed',
         severity: 'block',
@@ -1719,7 +1727,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     }
 
     return {
-      items,
+      items: inWindow,
       warning,
       gathered: inWindow.length,
       unavailableDetailDropped: officialClosedKeys.size,

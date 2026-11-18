@@ -79,6 +79,8 @@ export function loadResults(text) {
   return [...latest.values()];
 }
 
+const byCheck = (a, b) => a.company.localeCompare(b.company) || a.title.localeCompare(b.title) || a.criterion.localeCompare(b.criterion);
+
 /** One check per (company, title, criterion) carrying the outcome each Claude arm gave it. */
 export function buildChecks(rows) {
   const checks = new Map();
@@ -91,8 +93,6 @@ export function buildChecks(rows) {
   }
   return [...checks.values()].sort(byCheck);
 }
-
-const byCheck = (a, b) => a.company.localeCompare(b.company) || a.title.localeCompare(b.title) || a.criterion.localeCompare(b.criterion);
 
 // ---- Requests --------------------------------------------------------------
 
@@ -172,8 +172,6 @@ export function citationUrls(data) {
   }
   return urls.slice(0, MAX_CITATIONS);
 }
-
-export const decisionRowKey = row => checkKey(row.company, row.title, row.criterion);
 
 /** One output row per check of the plan; a failed request marks all of them 'error'. */
 export function decisionRows(plan, call, minProb = DEFAULT_MIN_PROB) {

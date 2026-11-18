@@ -334,7 +334,8 @@ export function useCanvasNavigation({
     const ids = Array.isArray(nodeIdOrIds) ? nodeIdOrIds : [nodeIdOrIds];
 
     // Filter out locked nodes - they cannot be extracted
-    const requestedNodes = nodesRef.current.filter(n => ids.includes(n.id) && !n.data?.locked);
+    const idSet = new Set(ids);
+    const requestedNodes = nodesRef.current.filter(n => idSet.has(n.id) && !n.data?.locked);
     if (requestedNodes.length === 0) return;
 
     // Mirror of the absorption path's closure (nestedCanvasAbsorption.js): a

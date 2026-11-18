@@ -81,26 +81,39 @@ export function computeTidiedNodes(nds, onlySelected) {
   });
 }
 
-/**
- * Returns true if placing the `nodesToAbsorb` cluster at `(anchorX, anchorY)`
- * (relative to `dropMinX`/`dropMinY`) overlaps any existing `childNodes`.
- */
-function placementOverlaps(anchorX, anchorY, nodesToAbsorb, dropMinX, dropMinY, childNodes, padding = 40) {
-  return childNodes.some(child => {
-    const cDims  = getNodeDims(child);
-    const cLeft  = child.position.x - padding;
-    const cRight = child.position.x + cDims.w + padding;
-    const cTop   = child.position.y - padding;
-    const cBottom = child.position.y + cDims.h + padding;
-    return nodesToAbsorb.some(dragged => {
-      const dDims   = getNodeDims(dragged);
-      const dLeft   = anchorX + (dragged.position.x - dropMinX);
-      const dRight  = dLeft + dDims.w;
-      const dTop    = anchorY + (dragged.position.y - dropMinY);
-      const dBottom = dTop + dDims.h;
-      return !(dRight <= cLeft || dLeft >= cRight || dBottom <= cTop || dTop >= cBottom);
-    });
+/** Padded rectangles of the existing children, measured once per placement search. */
+function paddedChildRects(childNodes, padding) {
+  return childNodes.map(child => {
+    const cDims = getNodeDims(child);
+    return {
+      left: child.position.x - padding,
+      right: child.position.x + cDims.w + padding,
+      top: child.position.y - padding,
+      bottom: child.position.y + cDims.h + padding,
+    };
   });
+}
+
+/** Offset of each dragged node inside the cluster, with its measured size. */
+function clusterParts(nodesToAbsorb, dropMinX, dropMinY) {
+  return nodesToAbsorb.map(dragged => {
+    const dDims = getNodeDims(dragged);
+    return { dx: dragged.position.x - dropMinX, dy: dragged.position.y - dropMinY, w: dDims.w, h: dDims.h };
+  });
+}
+
+/**
+ * Returns true if placing the cluster parts at `(anchorX, anchorY)` overlaps
+ * any of the padded child rectangles.
+ */
+function placementOverlaps(anchorX, anchorY, parts, childRects) {
+  return childRects.some(child => parts.some(part => {
+    const dLeft = anchorX + part.dx;
+    const dRight = dLeft + part.w;
+    const dTop = anchorY + part.dy;
+    const dBottom = dTop + part.h;
+    return !(dRight <= child.left || dLeft >= child.right || dBottom <= child.top || dTop >= child.bottom);
+  }));
 }
 
 /**
@@ -128,7 +141,9 @@ export function findNonOverlappingPlacement(nodesToAbsorb, childNodes) {
     anchorY = childCy - (dropHeight / 2);
 
     // Spiral search for non-overlapping placement
-    if (placementOverlaps(anchorX, anchorY, nodesToAbsorb, dropMinX, dropMinY, childNodes, padding)) {
+    const parts = clusterParts(nodesToAbsorb, dropMinX, dropMinY);
+    const childRects = paddedChildRects(childNodes, padding);
+    if (placementOverlaps(anchorX, anchorY, parts, childRects)) {
       let found = false;
       const radStep = spiralStep(dropWidth, dropHeight);
       let radius = radStep;
@@ -143,7 +158,7 @@ export function findNonOverlappingPlacement(nodesToAbsorb, childNodes) {
           const testX = anchorX + radius * Math.cos(angle);
           const testY = anchorY + radius * Math.sin(angle);
 
-          if (!placementOverlaps(testX, testY, nodesToAbsorb, dropMinX, dropMinY, childNodes, padding)) {
+          if (!placementOverlaps(testX, testY, parts, childRects)) {
             anchorX = testX;
             anchorY = testY;
             found = true;

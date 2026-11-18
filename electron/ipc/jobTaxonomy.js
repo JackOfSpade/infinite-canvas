@@ -1,7 +1,3 @@
-import { RESEARCH_MIN_FIT_SCORE } from './researchGate.js';
-import { validationFailure } from './validationFailure.js';
-import { collector, templatesFor } from './validationLines.js';
-export const TAXONOMY_CORRECTION_TEMPLATES = templatesFor('taxonomy.');
 /**
  * Bounded Job Board taxonomy orchestration.
  *
@@ -11,13 +7,17 @@ export const TAXONOMY_CORRECTION_TEMPLATES = templatesFor('taxonomy.');
  * frozen role vocabulary. Dependency-injecting callText keeps this module
  * executable without Electron or provider mocks.
  */
-
+import { RESEARCH_MIN_FIT_SCORE } from './researchGate.js';
+import { validationFailure } from './validationFailure.js';
+import { collector, templatesFor } from './validationLines.js';
 import { JOB_TAXONOMY_PLAN_SCHEMA, JOB_TAXONOMY_CLASSIFY_SCHEMA, JOB_TAXONOMY_ROLE_FAMILY_LIMIT } from './aiSchemas.js';
 import crypto from 'node:crypto';
 import { BATCH_OUTPUT_TOKEN_BUDGET } from './resultCaps.js';
 import { parseSalaryToNumeric } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { wrapUntrustedText } from './promptSafety.js';
 import { HANDOFF_CONCURRENCY, mapAutomaticHandoffs } from '../../src/utils/handoffScheduler.js';
+
+export const TAXONOMY_CORRECTION_TEMPLATES = templatesFor('taxonomy.');
 
 // One terse integer role index per compact row. The shared output estimator is
 // 1,024 + 32/row, so as many rows fit as BATCH_OUTPUT_TOKEN_BUDGET allows. The

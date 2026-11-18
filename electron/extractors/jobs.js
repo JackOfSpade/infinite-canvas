@@ -13,12 +13,15 @@
  *   - A site config object with waitFor, scrollFirst, referer, etc.
  */
 
+import { GOOGLE_POSTED_TEXT_PATTERN } from '../ipc/browser/googlePostedDate.js';
+
 // ── Site Configurations ─────────────────────────────────────────────────────
 // `timeoutMs` is a SEED / safety ceiling, not a fixed budget: scrapeBudget
 // learns each source's typical time-to-ready and derives a tighter working
-// timeout for fast sources (never looser than this seed). `waitMs` is now
-// vestigial — the readiness-stabilization loop in browserPool decides when
-// results are ready, and the pre-read beat is sized from learned timing.
+// timeout for fast sources (never looser than this seed). `waitMs` is ignored
+// for timing — the readiness-stabilization loop in browserPool decides when
+// results are ready, and the pre-read beat is sized from learned timing. It is
+// kept only as part of the cache key.
 
 // ── ZipRecruiter ────────────────────────────────────────────────────────────
 
@@ -225,18 +228,13 @@ export const GLASSDOOR_EXTRACTOR = `
 
   if (jobs.length === 0) {
     const bodyText = document.body?.innerText || '';
-    if (/no jobs found|0 jobs|no matching jobs|we couldn.t find/i.test(bodyText)) return [];
+    if (/no jobs found|(?:^|[^\\d])0 jobs\\b|no matching jobs|we couldn.t find/i.test(bodyText)) return [];
     throw new Error('SITE_CHANGED: glassdoor extractor returned 0 — __NEXT_DATA__ Apollo cache absent and DOM card selectors matched nothing');
   }
   return jobs;
 })()
 `;
 // ── Google Jobs ──────────────────────────────────────────────────────────────
-
-// The Google list-card date label vocabulary (shared with the detail-panel
-// reader in manualScraper.js). Imported, never re-declared, so the extractor and
-// the panel recovery can't drift apart.
-import { GOOGLE_POSTED_TEXT_PATTERN } from '../ipc/browser/googlePostedDate.js';
 
 export const GOOGLE_JOBS_CONFIG = {
   waitMs: 2500,

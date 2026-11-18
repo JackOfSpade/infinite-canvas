@@ -56,13 +56,14 @@ export default function InterviewHelperApp() {
     return () => { disposed = true; };
   }, []);
 
-  // Every change is written at once, in order; there is no separate Save.
+  // Every change is written in order; there is no separate Save. A queued write sends the newest
+  // state, so a burst of keystrokes ends in the last text rather than replaying every step.
   const commit = useCallback((update) => {
     const next = update(stateRef.current);
     if (next === stateRef.current) return;
     stateRef.current = next;
     setState(next);
-    writeQueue.current = writeQueue.current.then(() => window.interviewAppAPI.saveState(next)).catch(() => {
+    writeQueue.current = writeQueue.current.then(() => window.interviewAppAPI.saveState(stateRef.current)).catch(() => {
       setNotice('The last change could not be saved to disk. It is kept in this window; change something again to retry.');
     });
   }, []);

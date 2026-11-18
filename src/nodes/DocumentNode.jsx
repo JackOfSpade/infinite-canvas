@@ -79,9 +79,8 @@ const FADE_IN_SECONDS  = 0.04;
 const FADE_OUT_SECONDS = 0.01;
 const audioGraphCache = new WeakMap();
 
-function useMediaFade(mediaRef, isActive) {
+function useMediaFade(mediaRef) {
   useEffect(() => {
-    if (!isActive) return;
     const el = mediaRef.current;
     if (!el) return;
 
@@ -134,17 +133,16 @@ function useMediaFade(mediaRef, isActive) {
         ctx.close().catch(() => { /* already closed */ });
       }
     };
-  // mediaRef is stable; only re-run when isActive flips.
+  // mediaRef is stable.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive]);
+  }, []);
 }
 
 // ── Media event logger hook ────────────────────────────────────────────────────
 
 /** Attaches media event listeners that log playback lifecycle to the EventLogger. */
-function useMediaEventLogger(mediaRef, nodeId, isActive) {
+function useMediaEventLogger(mediaRef, nodeId) {
   useEffect(() => {
-    if (!isActive) return;
     const el = mediaRef.current;
     if (!el) return;
 
@@ -170,9 +168,9 @@ function useMediaEventLogger(mediaRef, nodeId, isActive) {
       el.removeEventListener('stalled', onStall);
       el.removeEventListener('seeked', onSeeked);
     };
-    // Re-attach if the active flag or nodeId changes; mediaRef itself is stable.
+    // Re-attach if nodeId changes; mediaRef itself is stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive, nodeId]);
+  }, [nodeId]);
 }
 
 // ── Video Player ───────────────────────────────────────────────────────────────
@@ -184,7 +182,7 @@ function useMediaEventLogger(mediaRef, nodeId, isActive) {
  * being interrupted by parent re-renders during resize.
  */
 const VideoPlayer = React.memo(function VideoPlayer({ mediaRef, src, hoveringMedia, onLoadedMetadata, nodeId }) {
-  useMediaEventLogger(mediaRef, nodeId, true);
+  useMediaEventLogger(mediaRef, nodeId);
 
   // errorInfo: { src, label } — pinned to the src that caused the error so the
   // overlay auto-clears when the src changes, without setState inside an effect.
@@ -266,8 +264,8 @@ const VideoPlayer = React.memo(function VideoPlayer({ mediaRef, src, hoveringMed
 
 /** Stable audio element wrapper — mirrors VideoPlayer for the same stability reasons. */
 const AudioPlayer = React.memo(function AudioPlayer({ mediaRef, src, themeText, hoveringMedia, nodeId }) {
-  useMediaEventLogger(mediaRef, nodeId, true);
-  useMediaFade(mediaRef, true);
+  useMediaEventLogger(mediaRef, nodeId);
+  useMediaFade(mediaRef);
   return (
     <div className="w-full h-full mt-2 px-6 py-4 bg-black/20 rounded-lg border border-white/5 flex flex-col flex-1 items-center justify-center gap-4 shadow-inner">
       <AudioLines className={`w-12 h-12 ${themeText} opacity-80 shrink-0 ${hoveringMedia ? 'text-white' : ''} transition-colors`} />
@@ -321,8 +319,7 @@ const StatusIndicator = React.memo(function StatusIndicator({ saveStatus, isDirt
  * A view onto the per-file session. Two duplicated nodes therefore receive the
  * same snapshot and dispatch edits into the same debounce/write lane.
  */
-const TextPreview = React.memo(function TextPreview({ filePath, filename, isLocked, initialFontSize, onFontSizeChange }) {
-  const isMd = String(filename ?? '').toLowerCase().endsWith('.md');
+const TextPreview = React.memo(function TextPreview({ filePath, filename, isMd, isLocked, initialFontSize, onFontSizeChange }) {
   const [sessionState, setSessionState] = useState(() => textDocumentSessions.getSnapshot(filePath));
   const [fontSize, setFontSizeLocal] = useState(initialFontSize || 12);
 
@@ -675,6 +672,7 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
             <TextPreview
               filePath={data.filePath}
               filename={data.filename}
+              isMd={isMarkdown}
               isLocked={!!data.locked}
               initialFontSize={data.editorFontSize}
               onFontSizeChange={handleFontSizeChange}

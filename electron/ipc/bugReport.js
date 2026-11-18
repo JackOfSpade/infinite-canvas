@@ -358,7 +358,7 @@ export function buildNativeChallengeSessionMarkdown(history) {
     const finishedAt = item.finishedAt ? new Date(item.finishedAt) : null;
     const finishedMs = finishedAt && !Number.isNaN(finishedAt.getTime()) ? finishedAt.getTime() : null;
     const finishedIso = finishedMs == null ? 'not recorded' : new Date(finishedMs).toISOString();
-    const age = finishedMs == null ? 'age not recorded' : `${Math.max(0, Math.round((Date.now() - finishedMs) / 1000))}s ago`;
+    const age = finishedMs == null ? 'age not recorded' : `${secondsAgo(finishedMs, true)}s ago`;
     const open = Number.isFinite(item.openMs) ? `${(item.openMs / 1000).toFixed(1)}s` : 'not recorded';
     const committed = item.cookieStoreCommitted == null ? 'not observed' : (item.cookieStoreCommitted ? 'yes' : 'NO');
     const native = item.nativeChallenge && typeof item.nativeChallenge === 'object' ? item.nativeChallenge : null;
@@ -404,6 +404,19 @@ ${body}${formatAuthHistoryTruncationNote(selection, 'native challenge handoff re
 }
 
 /**
+ * Whole seconds since a time (epoch milliseconds, Date or date string), or
+ * null when it is missing or not a valid time. `floorAtZero` stops a clock
+ * skew from printing a negative age.
+ */
+function secondsAgo(time, floorAtZero = false) {
+  if (time == null || time === '') return null;
+  const ms = typeof time === 'number' ? time : new Date(time).getTime();
+  if (!Number.isFinite(ms)) return null;
+  const seconds = Math.round((Date.now() - ms) / 1000);
+  return floorAtZero ? Math.max(0, seconds) : seconds;
+}
+
+/**
  * Renders getStealthBrowserInfo().activity — what the shared singleton is
  * DOING, not just whether it's alive. This is the difference between "our own
  * idle browser held the profile lock" and "something else did" (see the
@@ -415,9 +428,7 @@ ${body}${formatAuthHistoryTruncationNote(selection, 'native challenge handoff re
  */
 function formatStealthBrowserActivity(activity) {
   if (!activity || activity.livePageCount == null) return 'not observed';
-  const ageSec = Number.isFinite(activity.observedAt)
-    ? Math.max(0, Math.round((Date.now() - activity.observedAt) / 1000))
-    : null;
+  const ageSec = Number.isFinite(activity.observedAt) ? secondsAgo(activity.observedAt, true) : null;
   const ageBit = ageSec == null ? '' : ` (observed ${ageSec}s ago)`;
   if (activity.livePageCount === 0) return `idle — 0 live pages${ageBit}`;
   const urls = Array.isArray(activity.livePageUrls)
@@ -908,9 +919,7 @@ function buildMissingPreviewRelinkMarkdown() {
 
   const cell = (value) => String(value ?? '—').replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/`/g, '\\`');
   const rows = attempts.slice(-15).reverse().map((attempt) => {
-    const ageSeconds = Number.isFinite(attempt.ts)
-      ? `${Math.max(0, Math.round((Date.now() - attempt.ts) / 1000))}s ago`
-      : '—';
+    const ageSeconds = Number.isFinite(attempt.ts) ? `${secondsAgo(attempt.ts, true)}s ago` : '—';
     return (
       `| ${ageSeconds} | ${cell(attempt.status)} | ${cell(attempt.rootSource)} ` +
       `| \`${cell(attempt.searchRoot)}\` | \`${cell(attempt.missingPath)}\` ` +
@@ -1317,8 +1326,8 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
         } catch { previewParts.push(`listingUrl: ${String(d.listingUrl).slice(0, 50)}`); }
       }
       if (d.lastChecked) {
-        const ageS = Math.round((Date.now() - new Date(d.lastChecked).getTime()) / 1000);
-        if (Number.isFinite(ageS)) previewParts.push(`checked: ${ageS}s ago`);
+        const ageS = secondsAgo(d.lastChecked);
+        if (ageS !== null) previewParts.push(`checked: ${ageS}s ago`);
       }
       if (Array.isArray(d.attention) && d.attention.length > 0) {
         const high = d.attention.filter(a => a?.urgency === 'high').length;
@@ -1932,7 +1941,8 @@ function buildAuthWindowMarkdown() {
     const collisionTelemetry = getLaunchCollisions?.();
     if (entries.length > 0 || profileReservation || (collisionTelemetry?.total || 0) > 0) {
       const rows = entries.map(d => {
-        const age = d.updatedAt ? `${Math.round((Date.now() - new Date(d.updatedAt).getTime()) / 1000)}s ago` : '—';
+        const updatedAge = secondsAgo(d.updatedAt);
+        const age = updatedAge === null ? '—' : `${updatedAge}s ago`;
         return `| ${d.state} | \`${d.platformId || '—'}\` | ${d.mode || '—'} | \`${redactReportUrl(d.currentUrl || d.loginUrl) || '—'}\` | ${d.title ? 'captured' : '—'} | ${AUTH_RESULTS.has(d.result) ? d.result : d.result ? 'recorded' : '—'} | ${age} |`;
       }).join('\n');
       const argsRows = entries
@@ -1983,7 +1993,8 @@ function buildAuthWindowMarkdown() {
       const historySelection = selectAuthHistoryForReport(diag?.history);
       const historyRows = historySelection.rows
         .map(h => {
-          const age = h.finishedAt ? `${Math.round((Date.now() - new Date(h.finishedAt).getTime()) / 1000)}s ago` : '—';
+          const finishedAge = secondsAgo(h.finishedAt);
+          const age = finishedAge === null ? '—' : `${finishedAge}s ago`;
           const detected = formatAuthAttemptStatus(h);
           const title = h.title ? ', title=captured' : '';
           const open = Number.isFinite(h.openMs) ? ` · open ${(h.openMs / 1000).toFixed(1)}s` : '';
@@ -2008,7 +2019,8 @@ function buildAuthWindowMarkdown() {
       let stealthLine = '';
       try {
         const sb = getStealthBrowserInfo?.() || {};
-        const sbAge = sb.launchedAt ? `${Math.round((Date.now() - sb.launchedAt) / 1000)}s ago` : '—';
+        const sbLaunchedAge = secondsAgo(sb.launchedAt);
+        const sbAge = sbLaunchedAge === null ? '—' : `${sbLaunchedAge}s ago`;
         // A job browser scrape CLOSES this singleton and launches its own Chrome
         // on the same shared userDataDir, so `connected:false` proves only that
         // the singleton is down — not that the profile is free. Saying "profile
@@ -2022,7 +2034,7 @@ function buildAuthWindowMarkdown() {
           ? ` · app FIFO active: \`${truncateDiagnosticText(String(activeProfileWorkflow.label || 'unnamed workflow').replace(/`/g, "'"), 120)}\` for ${Number.isFinite(activeProfileWorkflow.since) ? `${Math.max(0, Math.round((Date.now() - activeProfileWorkflow.since) / 1000))}s` : 'an unknown duration'}${Number.isFinite(profileLock.queueDepth) ? ` (queue depth ${profileLock.queueDepth})` : ''}`
           : '';
         const lockNote = scrapeChrome
-          ? `⚪ singleton not running — but the job scraper's OWN Chrome is 🟢 running (pid ${scrapeChrome.pid ?? '—'}, launched ${scrapeChrome.launchedAt ? `${Math.round((Date.now() - scrapeChrome.launchedAt) / 1000)}s ago` : '—'}) on the shared profile, so the profile lock is **held**${fifoNote}`
+          ? `⚪ singleton not running — but the job scraper's OWN Chrome is 🟢 running (pid ${scrapeChrome.pid ?? '—'}, launched ${secondsAgo(scrapeChrome.launchedAt) === null ? '—' : `${secondsAgo(scrapeChrome.launchedAt)}s ago`}) on the shared profile, so the profile lock is **held**${fifoNote}`
           : activeProfileWorkflow
             ? `⚪ no owned Chrome process is currently reported; app FIFO ownership is active${fifoNote}`
             : '⚪ no owned Chrome process is currently reported (profile availability not independently verified)';
@@ -2034,7 +2046,7 @@ function buildAuthWindowMarkdown() {
       let profileReservationLine = '';
       if (profileReservation) {
         const age = Number.isFinite(profileReservation.since)
-          ? `${Math.max(0, Math.round((Date.now() - profileReservation.since) / 1000))}s ago`
+          ? `${secondsAgo(profileReservation.since, true)}s ago`
           : 'at an unknown time';
         const reason = closeReportDiagnostic(profileReservation.reason, 'visible-window');
         profileReservationLine = `\n- ⚠️ Shared profile reservation: \`${reason}\` (${age}) — a headless scrape must wait until that visible browser closes.\n`;
@@ -2055,7 +2067,8 @@ function buildAuthWindowMarkdown() {
           if (last) {
             let host = '';
             try { host = last.url ? ` ${new URL(last.url).host}` : ''; } catch { /* non-URL */ }
-            const ago = last.ts ? `, ${Math.round((Date.now() - last.ts) / 1000)}s ago` : '';
+            const lastAge = secondsAgo(last.ts);
+            const ago = lastAge === null ? '' : `, ${lastAge}s ago`;
             // Distinguishes "our own idle browser held it (and was asked to yield)"
             // from "something else held it and never yielded" — a visible window a
             // person left open, vs. the retained singleton. `null` (older event, or a
@@ -2933,8 +2946,8 @@ export function registerBugReportHandlers() {
     // buildFilterSummaryMarkdown) instead of re-deriving them from inside
     // generateMarkdown, which doesn't expose its internal event-line count.
     const filterCode = String(safePayload.filterCode || '').trim();
-    const statsEventsShown = Number(safePayload.filterStats?.eventsShown);
-    const eventLines = Number.isFinite(statsEventsShown) ? statsEventsShown : null;
+    const statsEventsShown = safePayload.filterStats?.eventsShown;
+    const eventLines = typeof statsEventsShown === 'number' && Number.isFinite(statsEventsShown) ? statsEventsShown : null;
     const generatedAt = new Date().toISOString();
     const description = safePayload.description;
 

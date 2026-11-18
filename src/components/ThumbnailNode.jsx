@@ -13,6 +13,11 @@ function stripMarkdown(str) {
     .trim();
 }
 
+/** The node's own background fill, with 'transparent' honoured and a per-type fallback. */
+function fillOf(data, fallback) {
+  return data?.backgroundColor === 'transparent' ? 'transparent' : (data?.backgroundColor || fallback);
+}
+
 /** Try to extract a short domain-or-label string from a LinkNode's data */
 function getLinkDisplay(data) {
   const raw = data?.label || data?.url || '';
@@ -21,7 +26,7 @@ function getLinkDisplay(data) {
 
 /**
  * Node renderer for the thumbnail SVG.
- * - text nodes: white SVG text lines (first 3, stripped of markdown)
+ * - text nodes: white SVG text lines (first 4, stripped of markdown)
  * - link nodes: muted blue background + domain/label text
  * - all others: solid-color rectangle (minimap palette)
  */
@@ -38,7 +43,7 @@ function ThumbnailNodeImpl({ r }) {
     const fontSize = Math.max(7, Math.min(11, lineH * 0.8));
     // Preserve user-chosen color and font family; fall back to sensible defaults
     const textFill = data?.textColor || (data?.isSticky ? 'rgba(30,30,30,0.85)' : 'rgba(255,255,255,0.70)');
-    const bgFill = data?.backgroundColor === 'transparent' ? 'transparent' : (data?.backgroundColor || (data?.isSticky ? '#fef08a' : 'rgba(255,255,255,0.05)'));
+    const bgFill = fillOf(data, (data?.isSticky ? '#fef08a' : 'rgba(255,255,255,0.05)'));
     const fontFam  = data?.fontFamily || 'Inter, ui-sans-serif, sans-serif';
 
     return (
@@ -74,7 +79,7 @@ function ThumbnailNodeImpl({ r }) {
     const maxChars = Math.floor(w / 8);
     const label    = display.length > maxChars ? display.slice(0, maxChars - 1) + '…' : display;
     const linkFill = data?.textColor || 'rgba(96,165,250,0.75)';
-    const bgFill = data?.backgroundColor === 'transparent' ? 'transparent' : (data?.backgroundColor || 'rgba(96,165,250,0.07)');
+    const bgFill = fillOf(data, 'rgba(96,165,250,0.07)');
     const fontFam  = data?.fontFamily || 'Inter, ui-sans-serif, sans-serif';
 
     return (
@@ -95,7 +100,7 @@ function ThumbnailNodeImpl({ r }) {
     const cy = y + h / 2;
     // Scale font to the thumbnail circle size; preserve user's color/family choices
     const titleColor  = data?.textColor  || 'rgba(255,255,255,0.60)';
-    const bgFill = data?.backgroundColor === 'transparent' ? 'transparent' : (data?.backgroundColor || 'rgba(96,165,250,0.06)');
+    const bgFill = fillOf(data, 'rgba(96,165,250,0.06)');
     const titleFamily = data?.fontFamily || 'Inter, ui-sans-serif, sans-serif';
     const fs = Math.max(4, Math.min(radius * 0.28, 9));
     const maxChars = radius > 0 ? Math.max(4, Math.floor((radius * 1.8) / (fs * 0.6))) : 8;
@@ -128,7 +133,7 @@ function ThumbnailNodeImpl({ r }) {
   if (type === 'document') {
     const { category, label, color, badge, Icon } = getFileCategoryInfo(data?.filename);
     const theme = THEME_COLORS[color];
-    const bgFill = data?.backgroundColor === 'transparent' ? 'transparent' : (data?.backgroundColor || 'rgba(24,24,27,0.85)');
+    const bgFill = fillOf(data, 'rgba(24,24,27,0.85)');
 
     const isImage = category === 'image';
     if (isImage && data?.filePath) {

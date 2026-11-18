@@ -10,6 +10,18 @@
 import { renderEvidenceResumeMainHtml, assertTrustedSourceRoles, isUnsafeControlCharacter, projectContactChannels, projectTrustedIdentity, renderStructuredResume } from './structuredResume.js';
 import { authorityProjectRoleOf, resolveAuthorityEvidence, resolveAuthorityRole } from './applicationCareerAuthority.js';
 import { verifyCareerCleanText } from './careerCleanLayer.js';
+
+/**
+ * The character ceiling this module grades a frozen source against.
+ *
+ * Exported because the queue WRITES those sources: localAiApplication.js
+ * rejects an oversized career corpus or listing before freezing it beside the
+ * job. The two numbers used to be chosen independently — 240,000 written,
+ * 120,000 accepted — so a corpus between them froze a job that no response
+ * could finish and that pressing Generate reproduced exactly. One constant
+ * read by the writer and by this grader keeps the accepted envelope aligned
+ * without silently omitting evidence.
+ */
 export { MAX_FROZEN_SOURCE_CHARS } from './applicationSourceLimits.js';
 import { MAX_FROZEN_SOURCE_CHARS } from './applicationSourceLimits.js';
 
@@ -151,18 +163,6 @@ export function assertAuthorityDraftSelection({ fullAuthority, selection, accept
   for (const paragraph of (Array.isArray(coverLetter?.paragraphs) ? coverLetter.paragraphs : [])) addEvidenceIds(paragraph, 'cover letter paragraph');
   if (citations.some(id => !selectedEvidence.has(id) && !acceptedNonAuthorityEvidence.has(id))) throw new Error('Application draft cites unselected authority evidence.');
 }
-
-/**
- * The character ceiling this module grades a frozen source against.
- *
- * Exported because the queue WRITES those sources: localAiApplication.js
- * rejects an oversized career corpus or listing before freezing it beside the
- * job. The two numbers used to be chosen independently — 240,000 written,
- * 120,000 accepted — so a corpus between them froze a job that no response
- * could finish and that pressing Generate reproduced exactly. One constant
- * read by the writer and by this grader keeps the accepted envelope aligned
- * without silently omitting evidence.
- */
 
 // `repairs` names what a defect requires a change to, in the host's repair
 // vocabulary, and travels on the error the way every other paste validator
@@ -314,7 +314,7 @@ export function normalizeBoundDocumentText(value) {
   return String(value ?? '').normalize('NFKC').replace(/\s+/g, ' ').trim();
 }
 
-export function boundDocumentTextMatches(a, b) {
+function boundDocumentTextMatches(a, b) {
   return normalizeBoundDocumentText(a) === normalizeBoundDocumentText(b);
 }
 
@@ -358,7 +358,7 @@ export function frozenSourceQuoteTest(source) {
  * still fails here. That is why this is the integrity class and not a repair
  * target, and why the answer must not depend on which surface noticed.
  */
-export function assertFrozenPlanQuoteOccursIn(occursInSource, quote, observation) {
+function assertFrozenPlanQuoteOccursIn(occursInSource, quote, observation) {
   frozenState(FROZEN_EVIDENCE_PLAN, () => {
     if (!occursInSource(quote)) throw new Error(`Paste application assembly: ${observation}`);
   });
@@ -453,7 +453,7 @@ export const FROZEN_JOB_LISTING = 'the job listing this job froze when it was qu
 // The plan is accepted in the first stage and no later stage can replace it:
 // a review response carries a résumé, a letter and its own review fields, and
 // the host never reads an evidencePlan back out of one.
-export const FROZEN_EVIDENCE_PLAN = 'the evidence plan this job accepted in its first stage';
+const FROZEN_EVIDENCE_PLAN = 'the evidence plan this job accepted in its first stage';
 // result.json, for a paste job: assembled by this app out of the frozen state
 // above and never written by a responder. It is its own subject because
 // reporting a value READ OUT OF IT as held in the input record asserts a

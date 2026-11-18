@@ -60,10 +60,6 @@ function providerTimeoutMs(value) {
   return Number.isFinite(value) && value > 0 ? value : DEFAULT_PROVIDER_TIMEOUT_MS;
 }
 
-function providerAbortController() {
-  return typeof AbortController === 'function' ? new AbortController() : null;
-}
-
 /**
  * Run the independent live-provider checks and return their report.
  *
@@ -73,7 +69,7 @@ function providerAbortController() {
  */
 export async function runJobApiProbe(extractors = DEFAULT_EXTRACTORS, {
   timeoutMs = DEFAULT_PROVIDER_TIMEOUT_MS,
-  createAbortController = providerAbortController,
+  createAbortController = () => new AbortController(),
   scheduleTimeout = setTimeout,
   cancelTimeout = clearTimeout,
 } = {}) {
@@ -81,14 +77,13 @@ export async function runJobApiProbe(extractors = DEFAULT_EXTRACTORS, {
   const deadlineMs = providerTimeoutMs(timeoutMs);
 
   const safeCall = async (name, fn) => {
-    let controller = null;
     let timer = null;
     try {
-      controller = createAbortController?.() || null;
-      const provider = Promise.resolve().then(() => fn(controller?.signal || null));
+      const controller = createAbortController();
+      const provider = Promise.resolve().then(() => fn(controller.signal));
       const timedOut = new Promise(resolve => {
         timer = scheduleTimeout(() => {
-          controller?.abort();
+          controller.abort();
           resolve(true);
         }, deadlineMs);
       });

@@ -293,6 +293,12 @@ export function consolidationClusterKey(job) {
   ].join('|');
 }
 
+// Grouping identity that cannot collide when a title or company contains the
+// diagnostic key's '|' delimiter.
+function clusterIdentity(job) {
+  return JSON.stringify([normalizeText(job?.title), normalizeText(job?.company), descriptionFingerprint(job)]);
+}
+
 /** Stable, input-order-local identifier for an AI-confirmable pair. */
 export function locationSimilarityPairId(leftIndex, rightIndex) {
   const left = Math.min(Number(leftIndex), Number(rightIndex));
@@ -314,7 +320,7 @@ export function findSimilarLocationCandidates(jobs, {
   input.forEach((job, index) => {
     if (job?.preferenceAssessment?.status === 'filtered') return;
     if (!isConsolidationCandidate(job)) return;
-    const key = [normalizeText(job.title), normalizeText(job.company)].join('|');
+    const key = JSON.stringify([normalizeText(job.title), normalizeText(job.company)]);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push({ job, index, terms: descriptionTerms(job), fingerprint: descriptionFingerprint(job) });
   });
@@ -484,7 +490,7 @@ export function consolidateJobLocations(jobs, options = {}) {
   input.forEach((job, index) => {
     if (!isConsolidationCandidate(job)) return;
     eligibleIndexes.add(index);
-    const key = consolidationClusterKey(job);
+    const key = clusterIdentity(job);
     if (!exactBuckets.has(key)) exactBuckets.set(key, { key, members: [], indices: [] });
     const bucket = exactBuckets.get(key);
     bucket.members.push(job);
@@ -638,9 +644,16 @@ export function jobFromProtectedCard(node) {
   };
 }
 
-/** True when a node is a child jobcard of the given board id. */
-function isBoardCardOf(node, boardId) {
-  return !!node && node.type === 'jobcard' && node.data?.hubId === boardId;
+/** Groups jobcard nodes by their board id, keeping node order inside each group. */
+function groupBoardCards(nodes) {
+  const byBoard = new Map();
+  for (const node of nodes) {
+    if (!node || node.type !== 'jobcard') continue;
+    const hubId = node.data?.hubId;
+    if (!byBoard.has(hubId)) byBoard.set(hubId, []);
+    byBoard.get(hubId).push(node);
+  }
+  return byBoard;
 }
 
 /**
@@ -658,9 +671,9 @@ export function attachProtectedCards(unionJobs, protectedCards) {
   const byId = new Map();
   const byKey = new Map();
   const byUrl = new Map();
-  const locationKey = (job) => [
+  const locationKey = (job) => JSON.stringify([
     normalizeText(job?.title), normalizeText(job?.company), normalizeText(job?.location),
-  ].join('|');
+  ]);
   const urlKey = (job) => normalizeText(safeUrl(job?.url) || safeUrl(job?.googleCardUrl));
   for (const card of cards) {
     const row = jobFromProtectedCard(card);
@@ -737,7 +750,7 @@ export function summarizeConsolidation(jobs) {
       continue;
     }
     if (!isConsolidationCandidate(job)) continue;
-    const key = consolidationClusterKey(job);
+    const key = clusterIdentity(job);
     if (!byCluster.has(key)) byCluster.set(key, { locations: new Set(), count: 0 });
     const bucket = byCluster.get(key);
     bucket.count += 1;
@@ -786,8 +799,9 @@ export function consolidateBoardCascadeNodes(nodes) {
   const affectedBoardIds = new Set();
   const boardStatsById = new Map();
 
+  const listCardsByBoard = groupBoardCards(list);
   for (const board of boards) {
-    const cards = list.filter(n => isBoardCardOf(n, board.id));
+    const cards = listCardsByBoard.get(board.id) || [];
     if (cards.length === 0) continue;
     const protectedCards = cards.filter(isProtectedJobCard);
     const protectedIds = new Set(protectedCards.map(card => card.id));
@@ -907,11 +921,12 @@ export function consolidateBoardCascadeNodes(nodes) {
   }
 
   // Recompute Board result counts / source counts / merge stats from survivors.
+  const outCardsByBoard = groupBoardCards(out);
   const finalized = out.map((node) => {
     if (node?.type !== 'jobboard') return node;
     const boardStats = boardStatsById.get(node.id);
     if (!boardStats) return node;
-    const cards = out.filter(n => isBoardCardOf(n, node.id));
+    const cards = outCardsByBoard.get(node.id) || [];
     if (cards.length === 0) return node;
     const sourceCounts = {};
     for (const card of cards) {

@@ -1,8 +1,9 @@
 // Interviewer track rebuilt from what the engine sent and what the helper
 // reported. Each utterance keeps its own PCM; events place the played spans on
 // the helper timeline. File I/O only happens in finalize.
+import { TWO_POW_15, wavHeader } from './wavFormat.js';
+
 const SILENCE = 0;
-const TWO_POW_15 = 32768;
 
 function toSamples(pcm16le) {
   if (pcm16le instanceof Int16Array) return Float32Array.from(pcm16le, value => value / TWO_POW_15);
@@ -18,24 +19,6 @@ function toSamples(pcm16le) {
 }
 
 const msToFrames = (ms, rate) => Math.round((ms * rate) / 1000);
-
-function wavHeader(dataBytes, sampleRate) {
-  const header = Buffer.alloc(44);
-  header.write('RIFF', 0, 'ascii');
-  header.writeUInt32LE(36 + dataBytes, 4);
-  header.write('WAVE', 8, 'ascii');
-  header.write('fmt ', 12, 'ascii');
-  header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20);
-  header.writeUInt16LE(1, 22);
-  header.writeUInt32LE(sampleRate, 24);
-  header.writeUInt32LE(sampleRate * 2, 28);
-  header.writeUInt16LE(2, 32);
-  header.writeUInt16LE(16, 34);
-  header.write('data', 36, 'ascii');
-  header.writeUInt32LE(dataBytes, 40);
-  return header;
-}
 
 export function writePcm16Wav(filePath, samples, sampleRate, { fs }) {
   const fd = fs.openSync(filePath, 'w');

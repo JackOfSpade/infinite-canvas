@@ -7308,5 +7308,12 @@ export default [
       resetManualScraperTelemetry();
       return { ok: true };
     },
-  }
+  },
+{
+    name: 'Eraser: a segment that only grazes the eraser circle keeps its whole outside run',
+    run: () => {
+      const pieces = pixelEraseStroke({ id: 'g', points: [{ x: -10, y: 5 }, { x: 10, y: 5 }, { x: 20, y: 5 }] }, { x: 0, y: 0 }, 5);
+      assert(pieces.length === 1 && pieces[0].points.length === 3, `a tangent touch must not cut the stroke, got ${JSON.stringify(pieces.map(p => p.points))}`);
+    },
+  },
 ];

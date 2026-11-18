@@ -24,21 +24,22 @@ export function ScrapeWarningsPanel({
   embedded = false,
 }) {
   const [open, setOpen] = useState(false);
-  if (!warnings || warnings.length === 0) return null;
+  const list = (warnings || []).filter(Boolean);
+  if (list.length === 0) return null;
 
-  const blockCount    = warnings.filter(w => w?.severity === 'block').length;
-  const throttleCount = warnings.length - blockCount;
+  const blockCount    = list.filter(w => w.severity === 'block').length;
+  const throttleCount = list.length - blockCount;
   const dominant      = blockCount > 0 ? 'block' : 'throttle';
   const accent        = dominant === 'block' ? '#ef4444' : '#f59e0b';
 
   const handleCopyAll = async (e) => {
     e.stopPropagation();
-    const text = warnings.map(w => (
+    const text = list.map(w => (
       `[${w.sourceId}] ${w.severity?.toUpperCase() || 'WARN'} ${w.code}\n  evidence: ${w.evidence}\n  suggestion: ${w.suggestion}`
     )).join('\n\n');
     try {
       await navigator.clipboard.writeText(text);
-      addToast?.({ title: 'Warnings copied', description: `${warnings.length} entry(ies) on clipboard.`, type: 'success' });
+      addToast?.({ title: 'Warnings copied', description: `${list.length} entry(ies) on clipboard.`, type: 'success' });
     } catch {
       addToast?.({ title: 'Copy failed', description: 'Clipboard unavailable', type: 'error' });
     }
@@ -50,7 +51,7 @@ export function ScrapeWarningsPanel({
       onPointerDown={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
     >
-      {warnings.map((w, i) => (
+      {list.map((w, i) => (
         <div
           key={`${w.sourceId}-${i}`}
           className="rounded border text-[9px] leading-snug p-1.5"
@@ -91,7 +92,7 @@ export function ScrapeWarningsPanel({
     return (
       <div className="space-y-1.5">
         <p className="text-[9px] font-medium" style={{ color: accent }}>
-          Source issues during this search ({warnings.length})
+          Source issues during this search ({list.length})
         </p>
         {details}
       </div>
@@ -113,7 +114,7 @@ export function ScrapeWarningsPanel({
         <ShieldAlert size={11} />
         <span className="flex-1 text-left">
           {resultMode
-            ? `Source issues during this search (${warnings.length})`
+            ? `Source issues during this search (${list.length})`
             : <>
               {blockCount > 0 && `${blockCount} blocked`}
               {blockCount > 0 && throttleCount > 0 && ' · '}

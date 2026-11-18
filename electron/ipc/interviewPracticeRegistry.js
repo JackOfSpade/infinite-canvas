@@ -84,7 +84,7 @@ export function createInterviewPracticeRegistry({ userDataPath, now = Date.now, 
     if (status === 'finished') return DUPLICATE;
     if (status !== 'armed') return { status, note: 'This practice session is no longer open. Tell the person to start practice again from Infinite Canvas.' };
     let feedback;
-    try { feedback = validatePracticeFeedback(payload); } catch (error) { return { status: 'rejected', note: `The feedback was not accepted: ${error.message} Fix it and call ${'finish_practice_interview'} again with the same session.` }; }
+    try { feedback = validatePracticeFeedback(payload); } catch (error) { return { status: 'rejected', note: `The feedback was not accepted: ${error.message} Fix it and call finish_practice_interview again with the same session.` }; }
     const stored = await store.recordInterviewPracticeFeedback({ userDataPath, nodeId: found.nodeId, feedback, receivedAt: new Date(now()).toISOString(), codeHash: found.session.codeHash });
     if (!stored) return DUPLICATE;
     notify({ nodeId: found.nodeId, kind: 'feedback' });

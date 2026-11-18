@@ -1,18 +1,7 @@
-export function codeIncludesFull(filterCode) {
-  return String(filterCode || '')
-    .trim()
-    .toUpperCase()
-    .split(/[+\s,]+/)
-    .includes('FULL');
-}
+import { reportFilterCodes } from './helpers.js';
 
-function codeIncludesApplicationOutput(filterCode) {
-  const codes = String(filterCode || '')
-    .trim()
-    .toUpperCase()
-    .split(/[+\s,]+/)
-    .filter(Boolean);
-  return codes.includes('APPOUTPUT');
+export function codeIncludesFull(filterCode) {
+  return reportFilterCodes(filterCode).includes('FULL');
 }
 
 function cleanInlineCode(value) {
@@ -30,7 +19,7 @@ export function buildFilterSummaryMarkdown(payload = {}) {
     ? stats.omittedSections.filter(Boolean)
     : [];
   const isFull = codeIncludesFull(filterCode);
-  const includesApplicationOutput = codeIncludesApplicationOutput(filterCode);
+  const includesApplicationOutput = reportFilterCodes(filterCode).includes('APPOUTPUT');
 
   const detailParts = [];
   if (stats) {

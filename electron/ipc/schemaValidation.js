@@ -131,6 +131,16 @@ export function auditResponseSchemaVocabulary(schema) {
   return problems;
 }
 
+const compiledPatterns = new Map();
+function compiledPattern(pattern) {
+  let regex = compiledPatterns.get(pattern);
+  if (!regex) {
+    regex = new RegExp(pattern);
+    compiledPatterns.set(pattern, regex);
+  }
+  return regex;
+}
+
 /**
  * Fail when this local validator cannot enforce part of the original response
  * contract, instead of silently accepting a pasted reply as though every
@@ -243,13 +253,15 @@ function validate(value, schema, path, errors) {
   }
 
   if (typeof value === 'string') {
-    if (schema.minLength !== undefined && value.length < schema.minLength) {
+    // JSON Schema string lengths count characters (code points), not UTF-16 units.
+    const length = schema.minLength !== undefined || schema.maxLength !== undefined ? [...value].length : 0;
+    if (schema.minLength !== undefined && length < schema.minLength) {
       errors.push({ path, message: `must contain at least ${schema.minLength} character${schema.minLength === 1 ? '' : 's'}` });
     }
-    if (schema.maxLength !== undefined && value.length > schema.maxLength) {
+    if (schema.maxLength !== undefined && length > schema.maxLength) {
       errors.push({ path, message: `must contain at most ${schema.maxLength} character${schema.maxLength === 1 ? '' : 's'}` });
     }
-    if (schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {
+    if (schema.pattern !== undefined && !compiledPattern(schema.pattern).test(value)) {
       errors.push({ path, message: `must match pattern ${JSON.stringify(schema.pattern)}` });
     }
   }

@@ -187,4 +187,13 @@ export default [
       }
     },
   },
+  {
+    name: 'Glassdoor extractor treats a count like "10 jobs" as a changed page, and a true zero count as empty',
+    run() {
+      assert.throws(() => extractGlassdoor('<html><body><p>Showing 10 jobs near you</p></body></html>'), /SITE_CHANGED/);
+      assert.throws(() => extractGlassdoor('<html><body><p>Over 150 jobs</p></body></html>'), /SITE_CHANGED/);
+      assert.deepEqual(extractGlassdoor('<html><body><p>0 jobs found</p></body></html>'), []);
+      assert.deepEqual(extractGlassdoor('<html><body><p>Sorry, 0 jobs here</p></body></html>'), []);
+    },
+  },
 ];

@@ -212,6 +212,27 @@ function connectedBoardIds(nodeId, nodes, edges) {
   return [...new Set([...edgeOwners, ...declaredOwners])];
 }
 
+function planActiveSourceIds(plan) {
+  return new Set([
+    plan?.activeSourceId,
+    ...(Array.isArray(plan?.activeSourceIds) ? plan.activeSourceIds : []),
+  ].filter(Boolean));
+}
+
+function planWaitingSourceIds(plan) {
+  return new Set([
+    plan?.awaitingSourceResolution?.sourceId,
+    ...(Array.isArray(plan?.awaitingSourceResolutions)
+      ? plan.awaitingSourceResolutions.map(entry => entry?.sourceId)
+      : []),
+  ].filter(Boolean));
+}
+
+function planIncompleteSourceIds(plan) {
+  return new Set((Array.isArray(plan?.incompleteSearches) ? plan.incompleteSearches : [])
+    .map(entry => entry?.sourceId).filter(Boolean));
+}
+
 function safeBackgroundBoardChildOwner(nodeId, nodes, edges, canvasFilePath) {
   let owner = findJobSearchBoardActiveRecoveryOwner(nodeId, nodes, edges);
   if (!owner) {
@@ -222,8 +243,7 @@ function safeBackgroundBoardChildOwner(nodeId, nodes, edges, canvasFilePath) {
     const preparedBoard = nodes.find((candidate) => {
       if (candidate?.type !== 'jobboard') return false;
       const plan = candidate.data?.boardScanResume;
-      const incomplete = new Set((Array.isArray(plan?.incompleteSearches) ? plan.incompleteSearches : [])
-        .map(entry => entry?.sourceId).filter(Boolean));
+      const incomplete = planIncompleteSourceIds(plan);
       return plan?.version === 1
         && plan.phase === 'searches'
         && plan.autoResumeEligible !== false
@@ -250,18 +270,9 @@ function safeBackgroundBoardChildOwner(nodeId, nodes, edges, canvasFilePath) {
   const board = nodes.find(node => node?.id === owner.orchestratorNodeId && node.type === 'jobboard');
   const data = board?.data || {};
   const plan = data.boardScanResume;
-  const activeSourceIds = new Set([
-    plan?.activeSourceId,
-    ...(Array.isArray(plan?.activeSourceIds) ? plan.activeSourceIds : []),
-  ].filter(Boolean));
-  const waitingSourceIds = new Set([
-    plan?.awaitingSourceResolution?.sourceId,
-    ...(Array.isArray(plan?.awaitingSourceResolutions)
-      ? plan.awaitingSourceResolutions.map(entry => entry?.sourceId)
-      : []),
-  ].filter(Boolean));
-  const incompleteSourceIds = new Set((Array.isArray(plan?.incompleteSearches) ? plan.incompleteSearches : [])
-    .map(entry => entry?.sourceId).filter(Boolean));
+  const activeSourceIds = planActiveSourceIds(plan);
+  const waitingSourceIds = planWaitingSourceIds(plan);
+  const incompleteSourceIds = planIncompleteSourceIds(plan);
   const preparedBetweenChildren = owner.preparedBetweenChildren === true || (
     activeSourceIds.size === 0
     && Array.isArray(plan?.selectedSearchModuleIds)
@@ -296,16 +307,8 @@ function safeBackgroundBoardChildOwner(nodeId, nodes, edges, canvasFilePath) {
 function hiddenBoardChildBootstrapEntry(board, nodes, edges, jobRunOffers, canvasFilePath) {
   const data = board?.data || {};
   const plan = data.boardScanResume;
-  const activeIds = new Set([
-    plan?.activeSourceId,
-    ...(Array.isArray(plan?.activeSourceIds) ? plan.activeSourceIds : []),
-  ].filter(Boolean));
-  const awaitingIds = new Set([
-    plan?.awaitingSourceResolution?.sourceId,
-    ...(Array.isArray(plan?.awaitingSourceResolutions)
-      ? plan.awaitingSourceResolutions.map(entry => entry?.sourceId)
-      : []),
-  ].filter(Boolean));
+  const activeIds = planActiveSourceIds(plan);
+  const awaitingIds = planWaitingSourceIds(plan);
   if (
     board?.type !== 'jobboard'
     || data.locked
@@ -321,8 +324,7 @@ function hiddenBoardChildBootstrapEntry(board, nodes, edges, jobRunOffers, canva
     || Object.keys(plan.cancellationCleanupsBySource || {}).length > 0
   ) return null;
   const completed = new Set(Object.keys(plan.completedSourceRuns || {}));
-  const incomplete = new Set((Array.isArray(plan.incompleteSearches) ? plan.incompleteSearches : [])
-    .map(entry => entry?.sourceId).filter(Boolean));
+  const incomplete = planIncompleteSourceIds(plan);
   const childId = (Array.isArray(plan.selectedSearchModuleIds) ? plan.selectedSearchModuleIds : [])
     .find(sourceId => !completed.has(sourceId) && !incomplete.has(sourceId));
   if (!childId || jobRunOffers.get(childId)?.found !== false) return null;

@@ -437,17 +437,9 @@ export function registerPendingApplicationWorkspace({
   // is still actively consuming the existing capability: doing so would let
   // both handlers promote the same bundle and race each other's callbacks.
   const existing = pendingApplicationArtifacts.get(resolvedWorkDir);
-  if (existing?.saveInFlight || existing?.cleanupInFlight) {
-    const error = new Error(existing?.cleanupInFlight
-      ? 'This generated application workspace is currently being cleaned up.'
-      : 'This generated application workspace is already being saved.');
-    error.code = existing?.cleanupInFlight ? 'APPLICATION_WORKSPACE_CLEANUP_IN_FLIGHT' : 'APPLICATION_SAVE_IN_FLIGHT';
-    throw error;
-  }
+  assertPendingWorkspaceIdle(existing, 'This generated application workspace is already being saved.');
   if (applicationWorkspacePruneClaims.has(resolvedWorkDir)) {
-    const error = new Error('This generated application workspace is being retired; retry the import from its current job state.');
-    error.code = 'APPLICATION_WORKSPACE_PRUNING';
-    throw error;
+    throw workspaceStateError('This generated application workspace is being retired; retry the import from its current job state.', 'APPLICATION_WORKSPACE_PRUNING');
   }
   pendingApplicationArtifacts.set(resolvedWorkDir, {
     attemptId, senderId, company: String(company || ''), location: typeof location === 'string' ? location.trim() : '', candidateName: String(candidateName || ''),
@@ -581,10 +573,18 @@ function releasePendingApplicationWorkspace(resolvedWorkDir, pending) {
   return true;
 }
 
-function applicationWorkspaceCleanupStateError(message, code = 'APPLICATION_WORKSPACE_CLEANUP_FAILED') {
+function workspaceStateError(message, code = 'APPLICATION_WORKSPACE_CLEANUP_FAILED') {
   const error = new Error(message);
   error.code = code;
   return error;
+}
+
+// A workspace that is being cleaned up or saved cannot be claimed again.
+function assertPendingWorkspaceIdle(pending, savingMessage) {
+  if (pending?.cleanupInFlight) {
+    throw workspaceStateError('This generated application workspace is currently being cleaned up.', 'APPLICATION_WORKSPACE_CLEANUP_IN_FLIGHT');
+  }
+  if (pending?.saveInFlight) throw workspaceStateError(savingMessage, 'APPLICATION_SAVE_IN_FLIGHT');
 }
 
 function cleanupRetirementPath(workDir) {
@@ -646,10 +646,10 @@ function retireTrustedApplicationWorkspaceForCleanup(workDir, pending) {
 
 async function discardPendingApplicationArtifacts(resolvedWorkDir, pending, reason = 'discarded') {
   if (pendingApplicationArtifacts.get(resolvedWorkDir) !== pending) {
-    throw applicationWorkspaceCleanupStateError('The generated application workspace changed ownership before cleanup could begin.', 'APPLICATION_WORKSPACE_OWNERSHIP_CHANGED');
+    throw workspaceStateError('The generated application workspace changed ownership before cleanup could begin.', 'APPLICATION_WORKSPACE_OWNERSHIP_CHANGED');
   }
   if (pending.cleanupInFlight) {
-    throw applicationWorkspaceCleanupStateError('This generated application workspace is already being cleaned up.', 'APPLICATION_WORKSPACE_CLEANUP_IN_FLIGHT');
+    throw workspaceStateError('This generated application workspace is already being cleaned up.', 'APPLICATION_WORKSPACE_CLEANUP_IN_FLIGHT');
   }
   pending.cleanupInFlight = true;
   try {
@@ -684,7 +684,7 @@ async function discardPendingApplicationArtifacts(resolvedWorkDir, pending, reas
         cleanupWorkDir = candidate;
       }
       if (pendingApplicationArtifacts.get(resolvedWorkDir) !== pending) {
-        throw applicationWorkspaceCleanupStateError('The generated application workspace changed ownership during cleanup preparation.', 'APPLICATION_WORKSPACE_OWNERSHIP_CHANGED');
+        throw workspaceStateError('The generated application workspace changed ownership during cleanup preparation.', 'APPLICATION_WORKSPACE_OWNERSHIP_CHANGED');
       }
     } catch (error) {
       if (error?.code === 'LOCAL_AI_RESULT_CHANGED') {
@@ -696,7 +696,7 @@ async function discardPendingApplicationArtifacts(resolvedWorkDir, pending, reas
         && error?.code !== 'APPLICATION_WORKSPACE_CLEANUP_FAILED'
         && error?.code !== 'APPLICATION_WORKSPACE_CLEANUP_IN_FLIGHT'
         && error?.code !== 'APPLICATION_WORKSPACE_OWNERSHIP_CHANGED') {
-        const cleanupError = applicationWorkspaceCleanupStateError(
+        const cleanupError = workspaceStateError(
           `Could not prepare the generated application workspace for cleanup after ${reason}.`,
         );
         cleanupError.cause = error;
@@ -707,7 +707,7 @@ async function discardPendingApplicationArtifacts(resolvedWorkDir, pending, reas
   }
   if (!shouldDeleteWorkspace) {
     if (!releasePendingApplicationWorkspace(resolvedWorkDir, pending)) {
-      throw applicationWorkspaceCleanupStateError('The generated application workspace changed ownership before cleanup completed.', 'APPLICATION_WORKSPACE_OWNERSHIP_CHANGED');
+      throw workspaceStateError('The generated application workspace changed ownership before cleanup completed.', 'APPLICATION_WORKSPACE_OWNERSHIP_CHANGED');
     }
     return true;
   }
@@ -748,7 +748,7 @@ async function discardPendingApplicationArtifacts(resolvedWorkDir, pending, reas
     throw cleanupError;
   }
   if (!releasePendingApplicationWorkspace(resolvedWorkDir, pending)) {
-    throw applicationWorkspaceCleanupStateError('The generated application workspace changed ownership after cleanup completed.', 'APPLICATION_WORKSPACE_OWNERSHIP_CHANGED');
+    throw workspaceStateError('The generated application workspace changed ownership after cleanup completed.', 'APPLICATION_WORKSPACE_OWNERSHIP_CHANGED');
   }
   return true;
   } finally {
@@ -1667,6 +1667,15 @@ function resumeCheckDetail(observations) {
   return `${visible.join('; ')}${omitted ? `; ${omitted} additional observation(s) omitted` : ''}`;
 }
 
+function resumeCheckResult(id, observations, passDetail) {
+  return observations.length
+    ? { id, passed: false, detail: resumeCheckDetail(observations) }
+    : { id, passed: true, detail: passDetail };
+}
+
+const resumeRoleLabel = (role, index) => role.company || role.title || `role ${index + 1}`;
+const resumeBulletText = bullet => String(bullet?.text || '').replace(/\s+/g, ' ').trim();
+
 /**
  * Résumé bullets are independently scanned by recruiters and ATS previews.
  * Reject only high-confidence backward references here; broader antecedent
@@ -1676,7 +1685,7 @@ export function checkResumeBulletSelfContainment(mainHtml, evidence = extractRes
   const observations = [];
   evidence.roles.forEach((role, roleIndex) => {
     (Array.isArray(role.bullets) ? role.bullets : []).forEach((bullet, bulletIndex) => {
-      const text = String(bullet?.text || '').replace(/\s+/g, ' ').trim();
+      const text = resumeBulletText(bullet);
       const dependent = DEPENDENT_RESUME_SYSTEM_REFERENCE.exec(text);
       const leading = LEADING_RESUME_REFERENCE.exec(text);
       const earlierText = dependent ? text.slice(0, dependent.index) : '';
@@ -1685,13 +1694,11 @@ export function checkResumeBulletSelfContainment(mainHtml, evidence = extractRes
         : false;
       const match = (!repeatedReferent && dependent?.[0]) || leading?.[0] || '';
       if (!match) return;
-      const label = role.company || role.title || `role ${roleIndex + 1}`;
+      const label = resumeRoleLabel(role, roleIndex);
       observations.push(`${label} bullet ${bulletIndex + 1} uses “${match}”; name the concrete referent inside the bullet`);
     });
   });
-  return observations.length
-    ? { id: 'resume-bullet-self-containment', passed: false, detail: resumeCheckDetail(observations) }
-    : { id: 'resume-bullet-self-containment', passed: true, detail: `${evidence.bulletTexts.length} résumé bullet(s) are self-contained` };
+  return resumeCheckResult('resume-bullet-self-containment', observations, `${evidence.bulletTexts.length} résumé bullet(s) are self-contained`);
 }
 
 // A bullet that ends in a comma-introduced participial clause which does
@@ -1767,16 +1774,14 @@ export function checkResumeBulletFocus(mainHtml, evidence = extractResumeEvidenc
   const observations = [];
   evidence.roles.forEach((role, roleIndex) => {
     (Array.isArray(role.bullets) ? role.bullets : []).forEach((bullet, bulletIndex) => {
-      const value = String(bullet?.text || '').replace(/\s+/g, ' ').trim();
+      const value = resumeBulletText(bullet);
       const inventory = indexedInventoryTail(value, items);
       if (!inventory) return;
-      const label = role.company || role.title || `role ${roleIndex + 1}`;
+      const label = resumeRoleLabel(role, roleIndex);
       observations.push(`${label} bullet ${bulletIndex + 1} ends in a clause that only chains ${inventory.terms.length} terms this résumé already indexes in Skills (“${inventory.clause}”); keep the principal claim, or retain detail only in a separate result-, constraint- or scope-bearing predicate`);
     });
   });
-  return observations.length
-    ? { id: 'resume-bullet-focus', passed: false, detail: resumeCheckDetail(observations) }
-    : { id: 'resume-bullet-focus', passed: true, detail: `${evidence.bulletTexts.length} résumé bullet(s) keep one principal achievement` };
+  return resumeCheckResult('resume-bullet-focus', observations, `${evidence.bulletTexts.length} résumé bullet(s) keep one principal achievement`);
 }
 
 // STYLE.md §5.4 states one number for every bullet, annotated or not: 180
@@ -1792,7 +1797,7 @@ export const RESUME_TRADEOFF_CHARACTER_BUDGET = 100;
 export function checkResumeBulletLength(mainHtml, evidence = extractResumeEvidence(mainHtml)) {
   const observations = [];
   evidence.roles.forEach((role, roleIndex) => {
-    const label = role.company || role.title || `role ${roleIndex + 1}`;
+    const label = resumeRoleLabel(role, roleIndex);
     (Array.isArray(role.bullets) ? role.bullets : []).forEach((bullet, bulletIndex) => {
       const visible = String(bullet?.budgetText ?? bullet?.text ?? '').replace(/\s+/g, ' ').trim();
       if (visible.length > RESUME_BULLET_CHARACTER_BUDGET) {
@@ -1806,9 +1811,7 @@ export function checkResumeBulletLength(mainHtml, evidence = extractResumeEviden
       }
     });
   });
-  return observations.length
-    ? { id: 'resume-bullet-length', passed: false, detail: resumeCheckDetail(observations) }
-    : { id: 'resume-bullet-length', passed: true, detail: `${evidence.bulletTexts.length} résumé bullet(s) fit the ${RESUME_BULLET_CHARACTER_BUDGET}-character budget` };
+  return resumeCheckResult('resume-bullet-length', observations, `${evidence.bulletTexts.length} résumé bullet(s) fit the ${RESUME_BULLET_CHARACTER_BUDGET}-character budget`);
 }
 
 // STYLE.md §5.3 / SKILL.md: "3–6 bullets per role. Fewer reads thin; more
@@ -1828,15 +1831,13 @@ export const MAX_RESUME_BULLET_OPENING_REPETITIONS = 2;
 export function checkResumeRoleBulletBudget(mainHtml, evidence = extractResumeEvidence(mainHtml)) {
   const observations = [];
   evidence.roles.forEach((role, roleIndex) => {
-    const label = role.company || role.title || `role ${roleIndex + 1}`;
+    const label = resumeRoleLabel(role, roleIndex);
     const count = Array.isArray(role.bullets) ? role.bullets.length : 0;
     if (count > RESUME_ROLE_BULLET_CEILING) {
       observations.push(`${label} carries ${count} bullets (ceiling ${RESUME_ROLE_BULLET_CEILING}); cut it to ${RESUME_ROLE_BULLET_CEILING} or fewer`);
     }
   });
-  return observations.length
-    ? { id: 'resume-role-bullet-budget', passed: false, detail: resumeCheckDetail(observations) }
-    : { id: 'resume-role-bullet-budget', passed: true, detail: `${evidence.roles.length} résumé role(s) fit the ${RESUME_ROLE_BULLET_CEILING}-bullet ceiling` };
+  return resumeCheckResult('resume-role-bullet-budget', observations, `${evidence.roles.length} résumé role(s) fit the ${RESUME_ROLE_BULLET_CEILING}-bullet ceiling`);
 }
 
 /** Rejects the high-confidence “Built … Built … Built …” résumé pattern. */
@@ -1845,7 +1846,7 @@ export function checkResumeBulletOpeningVariety(mainHtml, evidence = extractResu
   evidence.roles.forEach((role, roleIndex) => {
     const openings = new Map();
     (Array.isArray(role.bullets) ? role.bullets : []).forEach((bullet, bulletIndex) => {
-      const value = String(bullet?.text || '').replace(/\s+/g, ' ').trim();
+      const value = resumeBulletText(bullet);
       const match = /^[\s“”"'‘’([{]*([\p{L}][\p{L}’'-]*)/u.exec(value);
       if (!match) return;
       const opening = match[1].toLocaleLowerCase('en-US');
@@ -1858,15 +1859,13 @@ export function checkResumeBulletOpeningVariety(mainHtml, evidence = extractResu
       occurrences.push(bulletIndex + 1);
       openings.set(opening, occurrences);
     });
-    const label = role.company || role.title || `role ${roleIndex + 1}`;
+    const label = resumeRoleLabel(role, roleIndex);
     for (const [opening, bulletNumbers] of openings) {
       if (bulletNumbers.length <= MAX_RESUME_BULLET_OPENING_REPETITIONS) continue;
       observations.push(`${label} opens bullets ${bulletNumbers.join(', ')} with “${opening}” (${bulletNumbers.length} uses; ceiling ${MAX_RESUME_BULLET_OPENING_REPETITIONS}); use the most exact source-supported action verb for each distinct accomplishment without inventing a result`);
     }
   });
-  return observations.length
-    ? { id: 'resume-bullet-opening-variety', passed: false, detail: resumeCheckDetail(observations) }
-    : { id: 'resume-bullet-opening-variety', passed: true, detail: `${evidence.roles.length} résumé role(s) avoid a repeated opening-verb pattern` };
+  return resumeCheckResult('resume-bullet-opening-variety', observations, `${evidence.roles.length} résumé role(s) avoid a repeated opening-verb pattern`);
 }
 
 /**
@@ -2474,16 +2473,7 @@ export function registerJobApplicationHandlers() {
     const { resolvedWorkDir, pending } = resolvePendingApplicationWorkspaceForOwner(
       workDir, pendingApplicationArtifacts, event.sender.id,
     );
-    if (pending.cleanupInFlight) {
-      const error = new Error('This generated application workspace is currently being cleaned up.');
-      error.code = 'APPLICATION_WORKSPACE_CLEANUP_IN_FLIGHT';
-      throw error;
-    }
-    if (pending.saveInFlight) {
-      const error = new Error('This generated application workspace is currently being saved.');
-      error.code = 'APPLICATION_SAVE_IN_FLIGHT';
-      throw error;
-    }
+    assertPendingWorkspaceIdle(pending, 'This generated application workspace is currently being saved.');
     try {
       const options = { workspaceIdentity: pending.workspaceIdentity, encoding: 'utf8' };
       const [html, posting] = await Promise.all([
@@ -2526,16 +2516,7 @@ export function registerJobApplicationHandlers() {
     // Claim synchronously, before the first await below. Electron can dispatch
     // two invokes in the same turn; without this flag both resolve the same
     // one-shot Map entry and independently save/callback before cleanup runs.
-    if (pending.cleanupInFlight) {
-      const error = new Error('This generated application workspace is currently being cleaned up.');
-      error.code = 'APPLICATION_WORKSPACE_CLEANUP_IN_FLIGHT';
-      throw error;
-    }
-    if (pending.saveInFlight) {
-      const error = new Error('This generated application workspace is already being saved.');
-      error.code = 'APPLICATION_SAVE_IN_FLIGHT';
-      throw error;
-    }
+    assertPendingWorkspaceIdle(pending, 'This generated application workspace is already being saved.');
     pending.saveInFlight = true;
     resumeHtmlPath = pending.resumeHtmlPath;
     resumePdfPath = pending.resumePdfPath;
@@ -2946,9 +2927,7 @@ export function registerJobApplicationHandlers() {
     exportPhase = 'cleaning generated source workspace';
     const cleaned = await discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'successful save');
     if (!cleaned) {
-      const cleanupError = new Error('The generated application workspace changed ownership before cleanup could complete.');
-      cleanupError.code = 'APPLICATION_WORKSPACE_CLEANUP_FAILED';
-      throw cleanupError;
+      throw workspaceStateError('The generated application workspace changed ownership before cleanup could complete.');
     }
     // A cleanup guard is the final result-hash fence. Notify observers only
     // after it has succeeded; otherwise a newer retained result could lose

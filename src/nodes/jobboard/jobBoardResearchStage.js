@@ -8,7 +8,7 @@ import { officialPostingNeedsRefresh } from '../../utils/officialPostingDisplay.
 const RESCORED_FIELDS = ['matchScore', 'rawScore', 'adjustedScore', 'reasoning', 'careerDirection', 'requirementAssessments',
   'materialGaps', 'confidence', 'strengths', 'experienceAssessment', 'fitAssessment', 'scoreStatus', 'officialRescore'];
 const sourceKey = job => officialPostingPreparationSourceKey(projectOfficialPostingGenerationJob(job));
-const MAX_REMOVED_LOOKUPS = 256;
+export const MAX_BOARD_REMOVED_LOOKUPS = 256;
 // A collision would hand one job another job's lookup, so this is a real digest.
 async function sourceDigest(job) {
   const bytes = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(sourceKey(job)));
@@ -25,7 +25,6 @@ export async function removedLookupEntry(job) {
   const posting = finishedLookup(job?.officialPosting);
   return posting ? { key: await sourceDigest(job), officialPosting: posting, postedBy: job.postedBy } : null;
 }
-export const MAX_BOARD_REMOVED_LOOKUPS = MAX_REMOVED_LOOKUPS;
 const ruleKeys = assessment => (Array.isArray(assessment?.matches) ? assessment.matches : []).map(match => `${match?.preferenceId}\u0000${match?.criterion}`).sort().join('\u0001');
 
 /**
@@ -111,7 +110,7 @@ export async function runBoardResearchStage(union, {
   const nextRemovedLookups = [];
   for (const index of removed) {
     const posting = eligible.has(index) ? finishedLookup(settled.jobs[index]?.officialPosting) : null;
-    if (!posting || nextRemovedLookups.length >= MAX_REMOVED_LOOKUPS) continue;
+    if (!posting || nextRemovedLookups.length >= MAX_BOARD_REMOVED_LOOKUPS) continue;
     nextRemovedLookups.push({ key: await sourceDigest(rows[index]), officialPosting: posting, postedBy: settled.jobs[index].postedBy });
   }
   return { jobs: settled.jobs.filter((_job, index) => !removed.has(index)), counts: settled.counts, removed: removed.size,

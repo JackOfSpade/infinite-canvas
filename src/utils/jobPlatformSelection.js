@@ -30,7 +30,7 @@ export function getEnabledJobSourceIds(sourceIds, availableIds = ALL_JOB_SOURCE_
 export function getJobPlatformSelectionStatus(sourceId, collectionLimits = null, searchLocation = null) {
   const safety = getJobPlatformSafety(sourceId, collectionLimits);
   const country = getJobSourceCountryPolicy(sourceId, searchLocation);
-  if (!safety.enabled) return { ...safety, country, enabled: false, reason: safety.reason, code: safety.code };
+  if (!safety.enabled) return { ...safety, country, enabled: false };
   if (!country.include) {
     return {
       sourceId: String(sourceId || '').trim(),

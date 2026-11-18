@@ -279,44 +279,44 @@ export async function claimJobAnalysisOperationAuthority({ canvasFilePath, hubId
   return withRecoveryScope(canvasFilePath, hubId, async scopeValue => {
     if (!scopeValue) return { admitted: false, reason: 'invalid-operation-authority' };
     return withLock(scopeValue, async () => {
-    const priorState = await readState(scopeValue);
-    if (priorState.invalid) return { admitted: false, reason: 'invalid-operation-authority-record' };
-    const prior = priorState.record;
-    if (prior?.operationId === operation) {
-      if (!sameBase(prior.semanticBase, base)) return { admitted: false, reason: 'operation-id-conflict' };
-      // An idempotent resume claim is still a lineage assertion. Do not let an
-      // operation-id replay omit or substitute the immediate predecessor.
-      if (requiresPredecessor(base) && (!requestedPredecessor || !sameReceipt(prior.predecessor, requestedPredecessor))) {
-        return { admitted: false, reason: 'resume-predecessor-mismatch', receipt: receipt(prior) };
+      const priorState = await readState(scopeValue);
+      if (priorState.invalid) return { admitted: false, reason: 'invalid-operation-authority-record' };
+      const prior = priorState.record;
+      if (prior?.operationId === operation) {
+        if (!sameBase(prior.semanticBase, base)) return { admitted: false, reason: 'operation-id-conflict' };
+        // An idempotent resume claim is still a lineage assertion. Do not let an
+        // operation-id replay omit or substitute the immediate predecessor.
+        if (requiresPredecessor(base) && (!requestedPredecessor || !sameReceipt(prior.predecessor, requestedPredecessor))) {
+          return { admitted: false, reason: 'resume-predecessor-mismatch', receipt: receipt(prior) };
+        }
+        return prior.status === 'active' ? { admitted: true, idempotent: true, receipt: receipt(prior) } : { admitted: false, reason: 'operation-revoked' };
       }
-      return prior.status === 'active' ? { admitted: true, idempotent: true, receipt: receipt(prior) } : { admitted: false, reason: 'operation-revoked' };
-    }
-    if (expectedRevision != null && (prior?.revision || 0) !== expectedRevision) {
-      return { admitted: false, reason: 'admission-superseded', receipt: receipt(prior) };
-    }
-    // A resume is a one-step capability rebind, not a historical lookup. The
-    // caller must name the exact active/revoked receipt it is continuing; a
-    // clear tombstone deliberately has no admissible lineage.
-    if (requiresPredecessor(base)) {
-      if (!prior || prior.semanticBase?.kind === 'clear' || !requestedPredecessor
-        || !sameReceipt(prior, requestedPredecessor)) {
-        return { admitted: false, reason: 'resume-predecessor-mismatch', receipt: receipt(prior) };
+      if (expectedRevision != null && (prior?.revision || 0) !== expectedRevision) {
+        return { admitted: false, reason: 'admission-superseded', receipt: receipt(prior) };
       }
-    } else if (requestedPredecessor != null) {
-      return { admitted: false, reason: 'unexpected-predecessor' };
-    }
-    const record = {
-      version: VERSION, canvasFilePath: scopeValue.canvasFilePath, hubId: scopeValue.hubId,
-      operationId: operation, semanticBase: base, revision: (prior?.revision || 0) + 1,
-      status: 'active', updatedAt: new Date().toISOString(), publications: prior?.publications || {},
-      // A prior crash may have renamed artifacts after staging but before
-      // promotion. A new claim must not erase the only exact mapping before a
-      // reader/reconciliation can validate those bytes.
-      pendingPublications: prior?.pendingPublications || null,
-      predecessor: requiresPredecessor(base) ? receipt(prior) : null,
-    };
-    await atomicWrite(scopeValue.authorityPath, record);
-    return { admitted: true, receipt: receipt(record) };
+      // A resume is a one-step capability rebind, not a historical lookup. The
+      // caller must name the exact active/revoked receipt it is continuing; a
+      // clear tombstone deliberately has no admissible lineage.
+      if (requiresPredecessor(base)) {
+        if (!prior || prior.semanticBase?.kind === 'clear' || !requestedPredecessor
+          || !sameReceipt(prior, requestedPredecessor)) {
+          return { admitted: false, reason: 'resume-predecessor-mismatch', receipt: receipt(prior) };
+        }
+      } else if (requestedPredecessor != null) {
+        return { admitted: false, reason: 'unexpected-predecessor' };
+      }
+      const record = {
+        version: VERSION, canvasFilePath: scopeValue.canvasFilePath, hubId: scopeValue.hubId,
+        operationId: operation, semanticBase: base, revision: (prior?.revision || 0) + 1,
+        status: 'active', updatedAt: new Date().toISOString(), publications: prior?.publications || {},
+        // A prior crash may have renamed artifacts after staging but before
+        // promotion. A new claim must not erase the only exact mapping before a
+        // reader/reconciliation can validate those bytes.
+        pendingPublications: prior?.pendingPublications || null,
+        predecessor: requiresPredecessor(base) ? receipt(prior) : null,
+      };
+      await atomicWrite(scopeValue.authorityPath, record);
+      return { admitted: true, receipt: receipt(record) };
     });
   });
 }
@@ -331,30 +331,30 @@ export async function revokeJobAnalysisOperationAuthority({ canvasFilePath, hubI
   return withRecoveryScope(canvasFilePath, hubId, async scopeValue => {
     if (!scopeValue) return { revoked: false, reason: 'invalid-operation-authority' };
     return withLock(scopeValue, async () => {
-    const priorState = await readState(scopeValue);
-    if (priorState.invalid) return { revoked: false, reason: 'invalid-operation-authority-record' };
-    const prior = priorState.record;
-    // A stale caller may only revoke the exact receipt it observed.
-    if (!prior || prior.operationId !== operation || prior.revision !== revision || !sameBase(prior.semanticBase, base)) {
-      return { revoked: false, superseded: true, receipt: receipt(prior) };
-    }
-    const record = {
-      version: VERSION, canvasFilePath: scopeValue.canvasFilePath, hubId: scopeValue.hubId,
-      operationId: operation,
-      semanticBase: base,
-      // Stop changes only liveness, not identity: the manifest still carries
-      // this exact receipt and Resume must be able to name it without reading
-      // a hidden sidecar revision. Explicit Clear is the destructive boundary
-      // that advances revision and erases publications.
-      revision: prior.revision, status: 'revoked', updatedAt: new Date().toISOString(),
-      // Career-data Clear is a deliberately destructive boundary; ordinary
-      // cancel preserves earlier host-published recovery generations.
-      publications: prior?.publications || {},
-      pendingPublications: prior?.pendingPublications || null,
-      predecessor: prior?.predecessor || null,
-    };
-    await atomicWrite(scopeValue.authorityPath, record);
-    return { revoked: true, receipt: receipt(record) };
+      const priorState = await readState(scopeValue);
+      if (priorState.invalid) return { revoked: false, reason: 'invalid-operation-authority-record' };
+      const prior = priorState.record;
+      // A stale caller may only revoke the exact receipt it observed.
+      if (!prior || prior.operationId !== operation || prior.revision !== revision || !sameBase(prior.semanticBase, base)) {
+        return { revoked: false, superseded: true, receipt: receipt(prior) };
+      }
+      const record = {
+        version: VERSION, canvasFilePath: scopeValue.canvasFilePath, hubId: scopeValue.hubId,
+        operationId: operation,
+        semanticBase: base,
+        // Stop changes only liveness, not identity: the manifest still carries
+        // this exact receipt and Resume must be able to name it without reading
+        // a hidden sidecar revision. Explicit Clear is the destructive boundary
+        // that advances revision and erases publications.
+        revision: prior.revision, status: 'revoked', updatedAt: new Date().toISOString(),
+        // Career-data Clear is a deliberately destructive boundary; ordinary
+        // cancel preserves earlier host-published recovery generations.
+        publications: prior?.publications || {},
+        pendingPublications: prior?.pendingPublications || null,
+        predecessor: prior?.predecessor || null,
+      };
+      await atomicWrite(scopeValue.authorityPath, record);
+      return { revoked: true, receipt: receipt(record) };
     });
   });
 }
@@ -415,11 +415,11 @@ export async function currentJobAnalysisOperationAuthority({ canvasFilePath, hub
   return withRecoveryScope(canvasFilePath, hubId, async scopeValue => {
     if (!scopeValue) return false;
     return withLock(scopeValue, async () => {
-    const state = await readState(scopeValue);
-    if (state.invalid) return false;
-    const current = state.record;
-    return !!current && current.status === 'active' && current.operationId === operation
-      && current.revision === revision && sameBase(current.semanticBase, base);
+      const state = await readState(scopeValue);
+      if (state.invalid) return false;
+      const current = state.record;
+      return !!current && current.status === 'active' && current.operationId === operation
+        && current.revision === revision && sameBase(current.semanticBase, base);
     });
   });
 }
@@ -456,131 +456,131 @@ export async function withCurrentJobAnalysisOperationAuthority({
   return withRecoveryScope(canvasFilePath, hubId, async scopeValue => {
     if (!scopeValue) return { admitted: false, reason: 'invalid-operation-authority' };
     return withLock(scopeValue, async () => {
-    const state = await readState(scopeValue);
-    if (state.invalid) return { admitted: false, reason: 'invalid-operation-authority-record' };
-    let current = state.record;
-    if (!current || (current.status !== 'active' && !(allowRevoked && current.status === 'revoked')) || current.operationId !== operation
-      || current.revision !== revision || !sameBase(current.semanticBase, base)) {
-      return { admitted: false, reason: 'operation-superseded' };
-    }
-    const shouldTombstone = terminalTombstone || tombstoneAfterWrite;
-    const mayTombstone = value => tombstoneAfterWrite
-      ? value?.ok === true
-      // A terminal receipt is durable before cleanup, but an uncleared
-      // manifest must retain its active receipt so the exact cleanup retry can
-      // re-enter the normal manifest path.
-      : terminalTombstone && value?.ok === true && value?.cleared === true;
-    // An idempotent terminal cleanup may retry under the exact already-revoked
-    // receipt. It cannot publish (the callback has no stage capability), but
-    // it can finish its durable cleanup receipt safely.
-    if (shouldTombstone && current.status !== 'active' && !allowRevoked) {
-      return { admitted: false, reason: 'operation-not-active' };
-    }
-    // If a prior process crashed after all fixed-name renames but before map
-    // promotion, resolve that complete pending layout *before* another writer
-    // replaces it. This prevents D/A/B on disk being stranded by a new E/D/A
-    // plan that crashes before its first rename.
-    if (current.pendingPublications && await mapMatchesDisk(scopeValue, current.pendingPublications)) {
-      current = { ...current, publications: current.pendingPublications, pendingPublications: null };
-      await atomicWrite(scopeValue.authorityPath, { ...current, updatedAt: new Date().toISOString() });
-    }
-    let pending = null;
-    const stage = async ({ publications: proposed = [], rotateSuccessful = false, retainedSuccessfulPublications = null } = {}) => {
-      // Exact revoked receipt retries are cleanup-only. Never hand a tombstone
-      // a publication capability merely because a future callback happens to
-      // invoke the common transaction helper.
-      if (current.status !== 'active') throw new Error('Cannot publish with a revoked operation authority.');
-      // Pending is the most recent intended layout after a crash. Base a new
-      // rotation on it so old success:1 is not shifted from stale stable map.
-      // A composite authority transaction may stage its checkpoint and global
-      // artifact in separate locked writes. Accumulate its already-fsynced
-      // pending map rather than dropping the earlier sibling publication.
-      const nextPublications = { ...(pending || current.pendingPublications || current.publications || {}) };
-      if (retainedSuccessfulPublications != null) {
-        // The host rotation planner can compact missing/corrupt slots or retry
-        // the same run without shifting the remaining files. Its exact map
-        // must preserve already-sealed bytes/receipts, never manufacture a
-        // publication for an old or renderer-supplied snapshot.
-        if (!Array.isArray(retainedSuccessfulPublications) || retainedSuccessfulPublications.length > 2
-          || !proposed.some(item => item?.slot === 'success:1')) throw new Error('Invalid retained successful publications.');
-        const priorSuccessful = [current.publications, current.pendingPublications, pending]
-          .flatMap(map => Object.values(map || {})).filter(item => /^success:[1-3]$/.test(item.slot));
-        const retained = retainedSuccessfulPublications.map((raw, index) => {
-          const item = publication(raw);
-          if (!item || item.slot !== `success:${index + 2}`
-            || !priorSuccessful.some(prior => prior.digest === item.digest && sameReceipt(prior.receipt, item.receipt))) {
-            throw new Error('Retained successful publication is not already sealed.');
-          }
-          return item;
-        });
-        for (const slot of ['success:1', 'success:2', 'success:3']) delete nextPublications[slot];
-        for (const item of retained) nextPublications[item.slot] = item;
+      const state = await readState(scopeValue);
+      if (state.invalid) return { admitted: false, reason: 'invalid-operation-authority-record' };
+      let current = state.record;
+      if (!current || (current.status !== 'active' && !(allowRevoked && current.status === 'revoked')) || current.operationId !== operation
+        || current.revision !== revision || !sameBase(current.semanticBase, base)) {
+        return { admitted: false, reason: 'operation-superseded' };
       }
-      // Shift the old receipt map BEFORE overlaying newly-written success:1.
-      if (rotateSuccessful && retainedSuccessfulPublications == null) {
-        if (nextPublications['success:2']) nextPublications['success:3'] = { ...nextPublications['success:2'], slot: 'success:3' };
-        if (nextPublications['success:1']) nextPublications['success:2'] = { ...nextPublications['success:1'], slot: 'success:2' };
+      const shouldTombstone = terminalTombstone || tombstoneAfterWrite;
+      const mayTombstone = value => tombstoneAfterWrite
+        ? value?.ok === true
+        // A terminal receipt is durable before cleanup, but an uncleared
+        // manifest must retain its active receipt so the exact cleanup retry can
+        // re-enter the normal manifest path.
+        : terminalTombstone && value?.ok === true && value?.cleared === true;
+      // An idempotent terminal cleanup may retry under the exact already-revoked
+      // receipt. It cannot publish (the callback has no stage capability), but
+      // it can finish its durable cleanup receipt safely.
+      if (shouldTombstone && current.status !== 'active' && !allowRevoked) {
+        return { admitted: false, reason: 'operation-not-active' };
       }
-      for (const raw of proposed) {
-        const normalized = publication({ ...raw, receipt: { operationId: operation, semanticBase: base, revision } });
-        if (!normalized) throw new Error('Invalid durable analysis publication receipt.');
-        nextPublications[normalized.slot] = normalized;
+      // If a prior process crashed after all fixed-name renames but before map
+      // promotion, resolve that complete pending layout *before* another writer
+      // replaces it. This prevents D/A/B on disk being stranded by a new E/D/A
+      // plan that crashes before its first rename.
+      if (current.pendingPublications && await mapMatchesDisk(scopeValue, current.pendingPublications)) {
+        current = { ...current, publications: current.pendingPublications, pendingPublications: null };
+        await atomicWrite(scopeValue.authorityPath, { ...current, updatedAt: new Date().toISOString() });
       }
-      pending = nextPublications;
-      // Phase 1 is fsync'd before any artifact rename. If power fails during
-      // rotation, readers accept exact bytes named by either prior or pending.
-      await atomicWrite(scopeValue.authorityPath, { ...current, pendingPublications: pending, updatedAt: new Date().toISOString() });
-    };
-    const writeResult = await write(current, stage);
-    const value = writeResult?.value === undefined ? writeResult : writeResult.value;
-    // A scoped cancellation deletes an already-sealed artifact while holding
-    // this exact authority lock.  It may retire only the semantic slots the
-    // callback proved belonged to this receipt; this is deliberately not the
-    // global Clear operation and therefore preserves the authority floor and
-    // unrelated recovery generations.
-    const retireSlots = Array.isArray(writeResult?.retirePublications)
-      ? [...new Set(writeResult.retirePublications)]
-      : [];
-    if (retireSlots.length > 0) {
-      if (retireSlots.some(slot => typeof slot !== 'string' || !SLOT_PATTERN.test(slot))) {
-        throw new Error('Invalid scoped publication retirement.');
-      }
-      const removeMatching = (map) => {
-        if (!map) return map;
-        const copy = { ...map };
-        for (const slot of retireSlots) {
-          // Do not erase a retained predecessor/success publication merely
-          // because it shares a slot name with a newer cancelled operation.
-          if (sameReceipt(copy[slot]?.receipt, receipt(current))) delete copy[slot];
+      let pending = null;
+      const stage = async ({ publications: proposed = [], rotateSuccessful = false, retainedSuccessfulPublications = null } = {}) => {
+        // Exact revoked receipt retries are cleanup-only. Never hand a tombstone
+        // a publication capability merely because a future callback happens to
+        // invoke the common transaction helper.
+        if (current.status !== 'active') throw new Error('Cannot publish with a revoked operation authority.');
+        // Pending is the most recent intended layout after a crash. Base a new
+        // rotation on it so old success:1 is not shifted from stale stable map.
+        // A composite authority transaction may stage its checkpoint and global
+        // artifact in separate locked writes. Accumulate its already-fsynced
+        // pending map rather than dropping the earlier sibling publication.
+        const nextPublications = { ...(pending || current.pendingPublications || current.publications || {}) };
+        if (retainedSuccessfulPublications != null) {
+          // The host rotation planner can compact missing/corrupt slots or retry
+          // the same run without shifting the remaining files. Its exact map
+          // must preserve already-sealed bytes/receipts, never manufacture a
+          // publication for an old or renderer-supplied snapshot.
+          if (!Array.isArray(retainedSuccessfulPublications) || retainedSuccessfulPublications.length > 2
+            || !proposed.some(item => item?.slot === 'success:1')) throw new Error('Invalid retained successful publications.');
+          const priorSuccessful = [current.publications, current.pendingPublications, pending]
+            .flatMap(map => Object.values(map || {})).filter(item => /^success:[1-3]$/.test(item.slot));
+          const retained = retainedSuccessfulPublications.map((raw, index) => {
+            const item = publication(raw);
+            if (!item || item.slot !== `success:${index + 2}`
+              || !priorSuccessful.some(prior => prior.digest === item.digest && sameReceipt(prior.receipt, item.receipt))) {
+              throw new Error('Retained successful publication is not already sealed.');
+            }
+            return item;
+          });
+          for (const slot of ['success:1', 'success:2', 'success:3']) delete nextPublications[slot];
+          for (const item of retained) nextPublications[item.slot] = item;
         }
-        return copy;
+        // Shift the old receipt map BEFORE overlaying newly-written success:1.
+        if (rotateSuccessful && retainedSuccessfulPublications == null) {
+          if (nextPublications['success:2']) nextPublications['success:3'] = { ...nextPublications['success:2'], slot: 'success:3' };
+          if (nextPublications['success:1']) nextPublications['success:2'] = { ...nextPublications['success:1'], slot: 'success:2' };
+        }
+        for (const raw of proposed) {
+          const normalized = publication({ ...raw, receipt: { operationId: operation, semanticBase: base, revision } });
+          if (!normalized) throw new Error('Invalid durable analysis publication receipt.');
+          nextPublications[normalized.slot] = normalized;
+        }
+        pending = nextPublications;
+        // Phase 1 is fsync'd before any artifact rename. If power fails during
+        // rotation, readers accept exact bytes named by either prior or pending.
+        await atomicWrite(scopeValue.authorityPath, { ...current, pendingPublications: pending, updatedAt: new Date().toISOString() });
       };
-      current = {
-        ...current,
-        publications: removeMatching(current.publications),
-        pendingPublications: removeMatching(current.pendingPublications),
-        updatedAt: new Date().toISOString(),
-      };
-      await atomicWrite(scopeValue.authorityPath, current);
-    }
-    if (pending == null) {
-      // Writes that produced no artifact publication intentionally retain the
-      // prior map; they cannot make an unsealed artifact readable.
-      if (shouldTombstone && mayTombstone(value)) {
-        const tombstone = { ...current, status: 'revoked', updatedAt: new Date().toISOString() };
-        await atomicWrite(scopeValue.authorityPath, tombstone);
-        return { admitted: true, value, receipt: receipt(tombstone), terminalTombstoned: true };
+      const writeResult = await write(current, stage);
+      const value = writeResult?.value === undefined ? writeResult : writeResult.value;
+      // A scoped cancellation deletes an already-sealed artifact while holding
+      // this exact authority lock.  It may retire only the semantic slots the
+      // callback proved belonged to this receipt; this is deliberately not the
+      // global Clear operation and therefore preserves the authority floor and
+      // unrelated recovery generations.
+      const retireSlots = Array.isArray(writeResult?.retirePublications)
+        ? [...new Set(writeResult.retirePublications)]
+        : [];
+      if (retireSlots.length > 0) {
+        if (retireSlots.some(slot => typeof slot !== 'string' || !SLOT_PATTERN.test(slot))) {
+          throw new Error('Invalid scoped publication retirement.');
+        }
+        const removeMatching = (map) => {
+          if (!map) return map;
+          const copy = { ...map };
+          for (const slot of retireSlots) {
+            // Do not erase a retained predecessor/success publication merely
+            // because it shares a slot name with a newer cancelled operation.
+            if (sameReceipt(copy[slot]?.receipt, receipt(current))) delete copy[slot];
+          }
+          return copy;
+        };
+        current = {
+          ...current,
+          publications: removeMatching(current.publications),
+          pendingPublications: removeMatching(current.pendingPublications),
+          updatedAt: new Date().toISOString(),
+        };
+        await atomicWrite(scopeValue.authorityPath, current);
       }
-      return { admitted: true, value, receipt: receipt(current) };
-    }
-    // Phase 2 promotes only after every writer rename returned. A crash before
-    // here leaves the fsync'd pending map available for exact-digest recovery.
-    const committed = { ...current, publications: pending, pendingPublications: null, updatedAt: new Date().toISOString() };
-    const finalRecord = shouldTombstone && mayTombstone(value)
-      ? { ...committed, status: 'revoked', updatedAt: new Date().toISOString() }
-      : committed;
-    await atomicWrite(scopeValue.authorityPath, finalRecord);
-    return { admitted: true, value, receipt: receipt(finalRecord), ...(shouldTombstone && mayTombstone(value) ? { terminalTombstoned: true } : {}) };
+      if (pending == null) {
+        // Writes that produced no artifact publication intentionally retain the
+        // prior map; they cannot make an unsealed artifact readable.
+        if (shouldTombstone && mayTombstone(value)) {
+          const tombstone = { ...current, status: 'revoked', updatedAt: new Date().toISOString() };
+          await atomicWrite(scopeValue.authorityPath, tombstone);
+          return { admitted: true, value, receipt: receipt(tombstone), terminalTombstoned: true };
+        }
+        return { admitted: true, value, receipt: receipt(current) };
+      }
+      // Phase 2 promotes only after every writer rename returned. A crash before
+      // here leaves the fsync'd pending map available for exact-digest recovery.
+      const committed = { ...current, publications: pending, pendingPublications: null, updatedAt: new Date().toISOString() };
+      const finalRecord = shouldTombstone && mayTombstone(value)
+        ? { ...committed, status: 'revoked', updatedAt: new Date().toISOString() }
+        : committed;
+      await atomicWrite(scopeValue.authorityPath, finalRecord);
+      return { admitted: true, value, receipt: receipt(finalRecord), ...(shouldTombstone && mayTombstone(value) ? { terminalTombstoned: true } : {}) };
     });
   });
 }
@@ -593,12 +593,12 @@ export async function publishedJobAnalysisOperationAuthority({ canvasFilePath, h
   return withRecoveryScope(canvasFilePath, hubId, async scopeValue => {
     if (!scopeValue) return false;
     return withLock(scopeValue, async () => {
-    const state = await readState(scopeValue);
-    if (state.invalid) return false;
-    const current = state.record;
-    const matches = actual => !!actual && actual.digest === expected.digest && actual.receipt.operationId === expected.receipt.operationId
-      && actual.receipt.revision === expected.receipt.revision && sameBase(actual.receipt.semanticBase, expected.receipt.semanticBase);
-    return matches(current?.publications?.[expected.slot]) || matches(current?.pendingPublications?.[expected.slot]);
+      const state = await readState(scopeValue);
+      if (state.invalid) return false;
+      const current = state.record;
+      const matches = actual => !!actual && actual.digest === expected.digest && actual.receipt.operationId === expected.receipt.operationId
+        && actual.receipt.revision === expected.receipt.revision && sameBase(actual.receipt.semanticBase, expected.receipt.semanticBase);
+      return matches(current?.publications?.[expected.slot]) || matches(current?.pendingPublications?.[expected.slot]);
     });
   });
 }

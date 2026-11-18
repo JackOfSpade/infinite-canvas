@@ -22,6 +22,21 @@ import { applicationRequestId, applicationStageLabel, assignApplicationOrdinals,
 import { jobIntegrityFailureMessage } from '../utils/localAiFallback';
 import { claudeFailedOnLabel, claudeRetryLabel, claudeUpgradeLabel, setClaudeApplicationRun } from '../utils/claudeApplicationRuns';
 
+// The compact Discard bundle button the Claude-run states share.
+function DiscardBundleButton({ onClick, disabled, busy, title }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="rounded-md border border-red-400/25 px-2.5 py-1.5 text-[11px] font-medium text-red-200/80 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+      title={title}
+    >
+      {busy ? 'Discarding…' : 'Discard bundle'}
+    </button>
+  );
+}
+
 const applicationDraftKey = payload => JSON.stringify([payload.canvasFilePath, payload.jobId, payload.handoffCode]);
 const writeApplicationDraft = payload => trackApplicationDraftWrite(
   async () => {
@@ -153,6 +168,12 @@ const formatValidationDiagnostic = (value) => {
   return `Validation check: ${reason}${counts.length ? ` (${counts.join(', ')})` : ''}.`;
 };
 
+// How many submitted responses the dock remembers for its duplicate check.
+// Bounded because a long run sends hundreds; the mistake this catches — a
+// chat answered once and pasted back a second time — happens within a few
+// prompts of the first paste, never hundreds later.
+const SUBMITTED_RESPONSE_MEMORY = 40;
+
 // A pasted response carrying a well-formed HANDOFF-XXXXXX stamp that disagrees
 // with the code this prompt actually expects is the answer to a DIFFERENT
 // prompt (a sibling batch, or — for an application item — an unrelated
@@ -161,12 +182,6 @@ const formatValidationDiagnostic = (value) => {
 // a shared instance would carry `lastIndex` state across an early `break`
 // between unrelated calls (the push scan and the application scan both use
 // this), silently skipping matches on the next read of the same text.
-// How many submitted responses the dock remembers for its duplicate check.
-// Bounded because a long run sends hundreds; the mistake this catches — a
-// chat answered once and pasted back a second time — happens within a few
-// prompts of the first paste, never hundreds later.
-const SUBMITTED_RESPONSE_MEMORY = 40;
-
 const findMismatchedHandoffStamp = (text, expectedCode) => {
   const regex = /\bHANDOFF-([2-9A-HJ-NP-Z]{6})\b/gi;
   const normalizedExpected = String(expectedCode || '').trim().toUpperCase();
@@ -1198,11 +1213,7 @@ export function NonApiAiDialog() {
       // renderer, so even a close immediately after Paste retains the draft.
       void window.electronAPI?.updateNonApiAiDraft?.(activeRequestId, response).catch(() => {});
     }
-    setErrors(previous => {
-      if (!previous[activeRequestId]) return previous;
-      const { [activeRequestId]: _cleared, ...remaining } = previous;
-      return remaining;
-    });
+    setErrors(previous => withoutKey(previous, activeRequestId));
   }, [activeRequest, activeRequestId, isApplicationRequest, scheduleApplicationDraftSave]);
 
   const copyPrompt = useCallback(async () => {
@@ -1303,10 +1314,7 @@ export function NonApiAiDialog() {
       // and silently overwrite the next stage's draft under a now-stale code.
       flushApplicationDraftSave(requestId);
       setSubmittingRequestIds(previous => new Set(previous).add(requestId));
-      setErrors(previous => {
-        const { [requestId]: _cleared, ...remaining } = previous;
-        return remaining;
-      });
+      setErrors(previous => withoutKey(previous, requestId));
       try {
         const result = await window.electronAPI.submitLocalApplicationHandoff({
           jobId, canvasFilePath, handoffCode, response: activeResponse,
@@ -1384,10 +1392,7 @@ export function NonApiAiDialog() {
     const submittedIndex = mergedRequests.findIndex(item => item.requestId === requestId);
     actionRequestIdsRef.current.add(requestId);
     setSubmittingRequestIds(previous => new Set(previous).add(requestId));
-    setErrors(previous => {
-      const { [activeRequestId]: _cleared, ...remaining } = previous;
-      return remaining;
-    });
+    setErrors(previous => withoutKey(previous, activeRequestId));
     try {
       const result = await window.electronAPI.submitNonApiAiResponse({
         requestId,
@@ -1426,10 +1431,7 @@ export function NonApiAiDialog() {
     const requestId = activeRequestId;
     actionRequestIdsRef.current.add(requestId);
     setSteppingBackRequestIds(previous => new Set(previous).add(requestId));
-    setErrors(previous => {
-      const { [requestId]: _cleared, ...remaining } = previous;
-      return remaining;
-    });
+    setErrors(previous => withoutKey(previous, requestId));
     try {
       const result = await window.electronAPI.stepBackNonApiAiRequest(requestId);
       if (!result?.steppedBack) {
@@ -1817,9 +1819,10 @@ export function NonApiAiDialog() {
                 // hasError dot below: a correction round already turns that
                 // dot red, so a THIRD rejection of the same check would look
                 // identical to a first, which is exactly the invisibility
-                // this exists to fix (see this file's module header for the
-                // measured incident: 16 rounds on one check, nothing on
-                // screen told the person their loop was the same one).
+                // this exists to fix (the escalation notes in
+                // electron/ipc/localAiApplication.js describe the measured
+                // incident: 16 rounds on one check, nothing on screen told
+                // the person their loop was the same one).
                 const isEscalated = hasActiveEscalation(request.rejectionEscalation);
                 // A full handoff code is already shown in the prompt header.
                 // These controls only select a queued prompt, so one batch
@@ -2005,15 +2008,7 @@ export function NonApiAiDialog() {
             <ClaudeProgress run={activeClaudeRun} item={activeRequest} />
             <div className="flex flex-wrap items-center justify-end gap-2">
               {activeRequest.jobId && <ClaudePauseControl key={activeRequest.jobId} pauseKeys={[claudeApplicationPauseKey(activeRequest.jobId)]} />}
-              <button
-                type="button"
-                onClick={requestApplicationDiscardConfirm}
-                disabled={isDiscarding || !!cancelConfirmTarget}
-                className="rounded-md border border-red-400/25 px-2.5 py-1.5 text-[11px] font-medium text-red-200/80 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
-                title="Delete this application bundle and its private job folder"
-              >
-                {isDiscarding ? 'Discarding…' : 'Discard bundle'}
-              </button>
+              <DiscardBundleButton onClick={requestApplicationDiscardConfirm} disabled={isDiscarding || !!cancelConfirmTarget} busy={isDiscarding} title="Delete this application bundle and its private job folder" />
             </div>
             </>
           ) : claudeRunState === 'failed' ? (
@@ -2057,14 +2052,7 @@ export function NonApiAiDialog() {
                       {claudeUpgradeLabel(activeClaudeRun)}
                     </button>
                   )}
-                  <button
-                    type="button"
-                    onClick={requestApplicationDiscardConfirm}
-                    disabled={isDiscarding || !!cancelConfirmTarget}
-                    className="rounded-md border border-red-400/25 px-2.5 py-1.5 text-[11px] font-medium text-red-200/80 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {isDiscarding ? 'Discarding…' : 'Discard bundle'}
-                  </button>
+                  <DiscardBundleButton onClick={requestApplicationDiscardConfirm} disabled={isDiscarding || !!cancelConfirmTarget} busy={isDiscarding} />
                 </div>
               </div>
             </div>
@@ -2085,25 +2073,14 @@ export function NonApiAiDialog() {
                             : null}
                       />
                     )}
-                    {isApplicationRequest ? (
-                      <button
-                        type="button"
-                        onClick={requestApplicationDiscardConfirm}
-                        disabled={isDiscarding || !!cancelConfirmTarget}
-                        className="rounded-md border border-red-400/25 px-2.5 py-1.5 text-[11px] font-medium text-red-200/80 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        {isDiscarding ? 'Discarding…' : 'Discard bundle'}
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={requestCancelConfirm}
-                        disabled={isCancelling || !!cancelConfirmTarget}
-                        className="rounded-md border border-red-400/25 px-2.5 py-1.5 text-[11px] font-medium text-red-200/80 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        {isCancelling ? 'Cancelling…' : 'Cancel task'}
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      onClick={requestCancelConfirm}
+                      disabled={isCancelling || !!cancelConfirmTarget}
+                      className="rounded-md border border-red-400/25 px-2.5 py-1.5 text-[11px] font-medium text-red-200/80 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {isCancelling ? 'Cancelling…' : 'Cancel task'}
+                    </button>
                   </div>
                 </>
               )}
@@ -2230,11 +2207,11 @@ export function NonApiAiDialog() {
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="flex flex-wrap items-center gap-2">
                     <label htmlFor="non-api-ai-prompt" className="text-xs font-medium text-white/65 uppercase tracking-wider">
-                      {isApplicationRequest && showingApplicationCorrection
+                      {showingApplicationCorrection
                         ? (showingFullRestartPrompt ? 'Full stage prompt' : 'Correction prompt')
                         : 'Prompt'}
                     </label>
-                    {isApplicationRequest && showingApplicationCorrection && !showingFullRestartPrompt && (
+                    {showingApplicationCorrection && !showingFullRestartPrompt && (
                       <span className="inline-flex rounded border border-amber-400/30 bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-100">
                         {activeApplicationCorrections.length === 1 ? '1 fix to send' : `${activeApplicationCorrections.length} fixes to send`}
                       </span>
@@ -2260,7 +2237,7 @@ export function NonApiAiDialog() {
                     )}
                   </div>
                   <div className="flex flex-wrap items-center gap-3">
-                    {isApplicationRequest && showingApplicationCorrection && (
+                    {showingApplicationCorrection && (
                       <button
                         type="button"
                         onClick={() => setFullPromptRequestIds(previous => {

@@ -324,7 +324,7 @@ function checkCards(cards, evidence, { resume, verifyResume = false, selectionEv
       const grounded = interest ? { ...statement, text: researchFact } : statement;
       const intro = card.question === INTERVIEW_INTRO_QUESTION;
       for (const failure of interviewClaimFailures(grounded, sources, { intro, roleEvidence: selectionEvidence || evidence })) add(failure.rule, here, failure.instruction);
-      const presentation = field === 'headline' ? interviewHeadlineFailures(statement.text, { intro }) : bullet ? interviewBulletFailures(statement.text) : [];
+      const presentation = field === 'headline' ? interviewHeadlineFailures(statement.text) : bullet ? interviewBulletFailures(statement.text) : [];
       for (const failure of presentation) {
         if ((narrowRequired || narrowWhy) && (failure.rule === 'INTERVIEW_ANSWER_HEADLINE_LENGTH' || narrowWhy && failure.rule === 'INTERVIEW_ANSWER_BULLET_LENGTH')) continue;
         if (field === 'headline' && (

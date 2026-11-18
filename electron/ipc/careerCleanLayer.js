@@ -203,7 +203,7 @@ function layerPath(root, snapshotId) {
   return path.join(path.resolve(root), 'clean-layers', `${snapshotId}.json`);
 }
 
-export async function writeCareerCleanLayer(root, layer) {
+export async function writeCareerCleanLayer(root, layer, catalog = null) {
   const destination = layerPath(root, layer.snapshotId);
   await fs.promises.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
   const temporary = `${destination}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`;
@@ -211,8 +211,13 @@ export async function writeCareerCleanLayer(root, layer) {
     await fs.promises.writeFile(temporary, `${JSON.stringify(layer)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
     // First verified publisher wins. A second compile of the same immutable
     // snapshot must not change the spelling hand during an application job.
+    // A stored file that no longer verifies against the catalog is not a
+    // publication, so it is replaced.
     try { await fs.promises.link(temporary, destination); }
-    catch (error) { if (error?.code !== 'EEXIST') throw error; }
+    catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      if (catalog && !await readCareerCleanLayer(root, layer.snapshotId, catalog)) await fs.promises.rename(temporary, destination);
+    }
   } finally { await fs.promises.unlink(temporary).catch(error => { if (error?.code !== 'ENOENT') throw error; }); }
   return destination;
 }
@@ -263,7 +268,7 @@ export async function produceCareerCleanLayer({ snapshotId, catalog, root, callT
     { signal },
   );
   const layer = buildCareerCleanLayer(snapshotId, catalog, [{ items: retained }, ...responses]);
-  await writeCareerCleanLayer(root, layer);
+  await writeCareerCleanLayer(root, layer, catalog);
   const published = await readCareerCleanLayer(root, snapshotId, catalog);
   if (!published) throw new Error('The career clean layer could not be verified after publication.');
   return { reused: false, layer: published.layer, reusedItems: retained.length, processedItems: pending.length };

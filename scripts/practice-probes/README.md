@@ -36,21 +36,7 @@ Verdict: `local` (recall >= 0.8), `cloud` (recall < 0.8), or `INCONCLUSIVE`
 Note: the SDK's SpeechTranscriber has no disfluency option (only
 `etiquetteReplacements`), so the probe passes no transcription options.
 
-## B. ElevenLabs Flash time-to-first-audio
-
-Reads the key from `ELEVENLABS_API_KEY` only and never prints it. Pull it from
-the Keychain for one command:
-
-```sh
-ELEVENLABS_API_KEY=$(security find-generic-password -a "$USER" -s infinite-canvas-elevenlabs-api-key -w) node scripts/practice-probes/voice-latency.mjs --trials 10
-```
-
-Optional `--voice <voiceId>`. Output is a JSON summary (p50/p95 TTFA, connect
-time, time to final, whether alignment arrived, audio length) on stdout and
-per-trial progress on stderr. The WebSocket parameter names are constants at the
-top of `voice-latency.mjs`; correct them there if ElevenLabs' docs differ.
-
-## C. A whole live call from source, answered by chat
+## B. A whole live call from source, answered by chat
 
 `live-call.mjs` runs the real call service with a stand-in for the microphone helper, so a full
 call (ring, interviewer, voice, models, hang-up, recording, review) can be driven from a terminal.
@@ -67,5 +53,5 @@ need a spoken call in the built app.
 ## Tests (no network, no microphone)
 
 ```sh
-node --test scripts/practice-probes/filler-score.test.mjs scripts/practice-probes/voice-latency.test.mjs
+node --test scripts/practice-probes/filler-score.test.mjs
 ```

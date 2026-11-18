@@ -1,5 +1,8 @@
 import { collector, templatesFor } from './validationLines.js';
-export const GAP_REVIEW_CORRECTION_TEMPLATES = templatesFor('gap.');
+import { JOB_GAP_REVIEW_SCHEMA } from './aiSchemas.js';
+import { isMaterialGap, isUnscored as isUnscoredStatus, recalibrateAuditedFitAssessment, text } from './jobFitAssessment.js';
+
+const GAP_REVIEW_CORRECTION_TEMPLATES = templatesFor('gap.');
 /**
  * Targeted gap review: a second, independent check of ONLY the requirement
  * gaps that pulled a job's calibrated hiring-fit score from at or above the
@@ -29,8 +32,6 @@ export const GAP_REVIEW_CORRECTION_TEMPLATES = templatesFor('gap.');
  * Nothing in this module reads candidate or posting text except to ground a
  * quote; it stores ids, labels, statuses and short verbatim quotes only.
  */
-import { JOB_GAP_REVIEW_SCHEMA } from './aiSchemas.js';
-import { isMaterialGap, recalibrateAuditedFitAssessment } from './jobFitAssessment.js';
 
 export { JOB_GAP_REVIEW_SCHEMA };
 
@@ -44,11 +45,7 @@ const PRIORITY_RANK = Object.freeze({ critical: 3, important: 2, preferred: 1 })
 const REVIEW_PRIORITY_TO_ROW = Object.freeze({ required: 'critical', important: 'important', preferred: 'preferred' });
 const ROW_PRIORITY_TO_REVIEW = Object.freeze({ critical: 'required', important: 'important', preferred: 'preferred' });
 
-function text(value) {
-  return typeof value === 'string' ? value.trim() : '';
-}
-
-export function normalizeGroundingText(value) {
+function normalizeGroundingText(value) {
   return text(value).normalize('NFC').replace(/\s+/gu, ' ').toLocaleLowerCase();
 }
 
@@ -59,7 +56,7 @@ export function quoteIsGrounded(source, quote) {
 }
 
 function isUnscored(job) {
-  return typeof job?.scoreStatus === 'string' && job.scoreStatus.startsWith('unscored');
+  return isUnscoredStatus(job?.scoreStatus);
 }
 
 function auditedRows(job) {
@@ -163,8 +160,7 @@ export function buildGapReviewPrompt({ jobs, candidateText }) {
  * 'Invalid job-gap-review response:' and names the job index, the row id and
  * the exact observation (what was found or not found), never the goal.
  *
- * Implemented in the gap-review work package; see the tests in
- * scripts/tests/job-gap-review.js.
+ * The tests are in scripts/tests/job-gap-review.js.
  */
 export function validateGapReviewSubmission(value, batch) {
   const issues = collector();
@@ -222,8 +218,6 @@ export function validateGapReviewSubmission(value, batch) {
  * displayed fields (matchScore, adjustedScore, reasoning, requirementAssessments,
  * materialGaps, strengths, confidence) mirror the recalibrated audit the same
  * way calibratedScoreForJob in jobs.js maps them.
- *
- * Implemented in the gap-review work package.
  */
 export function applyGapReview(scoredJob, review, { candidateText = '', jobText = '', threshold, reviewedAt = Date.now() } = {}) {
   const priorAudit = scoredJob?.fitAssessment;
@@ -313,8 +307,6 @@ export function applyGapReview(scoredJob, review, { candidateText = '', jobText 
 
 /**
  * Count-only summary for telemetry and the run report.
- *
- * Implemented in the gap-review work package.
  */
 export function summarizeGapReviews(scoredJobs, { threshold } = {}) {
   const bar = Number.isFinite(Number(threshold)) ? Number(threshold) : null;

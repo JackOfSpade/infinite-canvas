@@ -722,9 +722,11 @@ function validateTestRegistry(groups) {
   const registeredFiles = groups.map(([file]) => file);
   const registeredSet = new Set(registeredFiles);
   const problems = [];
+  const discoveredSet = new Set(discoveredFiles);
   const unregistered = discoveredFiles.filter((file) => !registeredSet.has(file));
-  const stale = registeredFiles.filter((file) => !discoveredFiles.includes(file));
-  const duplicateFiles = registeredFiles.filter((file, index) => registeredFiles.indexOf(file) !== index);
+  const stale = registeredFiles.filter((file) => !discoveredSet.has(file));
+  const seenFiles = new Set();
+  const duplicateFiles = registeredFiles.filter((file) => (seenFiles.has(file) ? true : (seenFiles.add(file), false)));
 
   if (unregistered.length) problems.push(`unregistered test file(s): ${unregistered.join(', ')}`);
   if (stale.length) problems.push(`missing test file(s): ${stale.join(', ')}`);

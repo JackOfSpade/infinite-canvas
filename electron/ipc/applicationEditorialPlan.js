@@ -4,8 +4,8 @@ import { COVER_LETTER_EVIDENCE_SELECTION_RULE } from './applicationWriterGuidanc
 
 export const EDITORIAL_PLAN_VERSION = 'application-editorial-plan.v1';
 export const EDITORIAL_PLAN_MAX_BYTES = 64 * 1024;
-export const EDITORIAL_PLAN_MAX_PARAGRAPHS = 8;
-export const EDITORIAL_PLAN_MAX_OMISSIONS = 12;
+const EDITORIAL_PLAN_MAX_PARAGRAPHS = 8;
+const EDITORIAL_PLAN_MAX_OMISSIONS = 12;
 const MAX_TEXT_CHARS = 8192;
 const MAX_IDS_PER_ROW = 32;
 const CATALOG_ID = /^host\.career\.[a-z]+\.[a-z0-9-]+\.[0-9]+$/u;

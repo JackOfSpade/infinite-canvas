@@ -5,6 +5,7 @@ import { execFile as execFileCb } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { PRACTICE_AUDIO_MESSAGES } from '../interviewPracticeAudio.js';
+import { logNote, logWarn } from './logNote.js';
 
 const execFile = promisify(execFileCb);
 const CALL_CHANNELS = Object.freeze({ start: 'practice-call:start', openReplay: 'practice-call:open-replay', list: 'practice-call:list' });
@@ -72,6 +73,13 @@ const DEFAULTS = Object.freeze({
   registryStatus: lazily(async () => async () => ({ order: [] })),
   afconvert: lazily(async () => args => execFile('/usr/bin/afconvert', args)),
 });
+/** Download sizes by model name from the store's specs, for a store whose status() carries none. */
+async function defaultModelSizes() {
+  try {
+    const { MODEL_SPECS } = await import('./models/modelStore.js');
+    return Object.fromEntries(MODELS.map(name => [name, MODEL_SPECS[name]?.bytes]));
+  } catch { return null; }
+}
 /** Whole modules, kept apart so every DEFAULTS entry resolves to a function. */
 const MODULES = Object.freeze({
   prompts: lazily(() => import('../interviewPracticeCallPrompt.js')),
@@ -229,6 +237,7 @@ function errorState(code, message) {
  */
 export function createPracticeCallService(deps = {}) {
   if (!deps.store || typeof deps.store.ensure !== 'function') throw new TypeError('Practice call service requires a call store.');
+  const warn = message => logWarn(deps.logger, message);
   const userDataPath = deps.userDataPath;
   if (typeof userDataPath !== 'string' || !userDataPath) throw new TypeError('Practice call service requires the user data path.');
   const clock = deps.clock ?? { now: () => Date.now(), setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: handle => clearTimeout(handle) };
@@ -372,7 +381,7 @@ export function createPracticeCallService(deps = {}) {
   }
   const fail = (code, cause, detail = cause) => {
     // The window shows a plain message; the cause goes to the app log so a failed call can be diagnosed.
-    try { deps.logger?.warn?.(`[PracticeCall] ${code}: ${detail?.message || detail?.userMessage || 'no detail'}`); } catch { /* logging is best effort */ }
+    warn(`[PracticeCall] ${code}: ${detail?.message || detail?.userMessage || 'no detail'}`);
     const message = cause?.userMessage || (code === 'voice-key-missing' ? 'The ElevenLabs key is not available on this computer.' : cause?.message);
     const failed = call;
     call = null;
@@ -431,7 +440,7 @@ export function createPracticeCallService(deps = {}) {
         const name = await loadName({ snapshotId: args.snapshotId, userDataPath });
         return typeof name === 'string' ? name.trim() : '';
       } catch (error) {
-        try { deps.logger?.warn?.(`[PracticeCall] candidate name unavailable: ${error?.code || error?.name || 'error'}`); } catch { /* logging is best effort */ }
+        warn(`[PracticeCall] candidate name unavailable: ${error?.code || error?.name || 'error'}`);
         return '';
       }
     })();
@@ -445,7 +454,7 @@ export function createPracticeCallService(deps = {}) {
         if (!read || typeof read !== 'object') throw new Error('no application text');
         loaded = { resume: typeof read.resume === 'string' ? read.resume : '', coverLetter: typeof read.coverLetter === 'string' ? read.coverLetter : '' };
       } catch (error) {
-        try { deps.logger?.warn?.(`[PracticeCall] application text unavailable: ${error?.code || error?.name || 'error'}`); } catch { /* logging is best effort */ }
+        warn(`[PracticeCall] application text unavailable: ${error?.code || error?.name || 'error'}`);
       }
       if (loaded.resume.trim() || loaded.coverLetter.trim()) return loaded;
       // No application (a typed job): the interviewers get the career documents this session
@@ -456,7 +465,7 @@ export function createPracticeCallService(deps = {}) {
         const text = await loadCareer({ snapshotId: args.snapshotId, userDataPath });
         if (typeof text === 'string' && text.trim()) return { resume: text, coverLetter: '', source: 'career-documents' };
       } catch (error) {
-        try { deps.logger?.warn?.(`[PracticeCall] career documents unavailable: ${error?.code || error?.name || 'error'}`); } catch { /* logging is best effort */ }
+        warn(`[PracticeCall] career documents unavailable: ${error?.code || error?.name || 'error'}`);
       }
       return loaded;
     })();
@@ -470,7 +479,7 @@ export function createPracticeCallService(deps = {}) {
       const read = await history.counts(args.nodeId);
       if (read && typeof read === 'object') counts = read;
     } catch (error) {
-      try { deps.logger?.warn?.(`[PracticeCall] question history unavailable: ${error?.message || error}`); } catch { /* logging is best effort */ }
+      warn(`[PracticeCall] question history unavailable: ${error?.message || error}`);
     }
     const timesAskedOf = id => { const n = Number(counts[id]); return Number.isInteger(n) && n > 0 ? n : 0; };
     return {
@@ -540,8 +549,9 @@ export function createPracticeCallService(deps = {}) {
     const sessions = self.sessions ? Object.values(self.sessions) : [];
     await Promise.all(sessions.map(session => {
       try {
-        const closed = session?.close?.() ?? session?.cancel?.() ?? session?.stop?.();
-        return Promise.resolve(closed).catch(() => {});
+        // Only the first of these a session has is called: a synchronous close() must not also be cancelled and stopped.
+        const method = ['close', 'cancel', 'stop'].find(name => typeof session?.[name] === 'function');
+        return Promise.resolve(method ? session[method]() : undefined).catch(() => {});
       } catch { return Promise.resolve(); }
     }));
   }
@@ -579,11 +589,11 @@ export function createPracticeCallService(deps = {}) {
         made = createCodec({ sampleRate: rate, onError: error => {
           if (codecWarned) return;
           codecWarned = true;
-          try { deps.logger?.warn?.(`[PracticeCall] call codec unavailable, audio left untreated: ${error?.message || error}`); } catch { /* logging is best effort */ }
+          warn(`[PracticeCall] call codec unavailable, audio left untreated: ${error?.message || error}`);
         } }) ?? null;
       } catch (error) {
         made = null;
-        if (!codecWarned) { codecWarned = true; try { deps.logger?.warn?.(`[PracticeCall] call codec unavailable, audio left untreated: ${error?.message || error}`); } catch { /* logging is best effort */ } }
+        if (!codecWarned) { codecWarned = true; warn(`[PracticeCall] call codec unavailable, audio left untreated: ${error?.message || error}`); }
       }
       codecs.set(id, made);
       return made;
@@ -628,7 +638,7 @@ export function createPracticeCallService(deps = {}) {
         let buffer = raw;
         const codec = codecFor(id, rate);
         if (codec) {
-          try { const coded = codec.process(raw); if (coded && coded.length === raw.length) buffer = Buffer.from(coded); } catch (error) { codecs.set(id, null); if (!codecWarned) { codecWarned = true; try { deps.logger?.warn?.(`[PracticeCall] call codec unavailable, audio left untreated: ${error?.message || error}`); } catch { /* logging is best effort */ } } }
+          try { const coded = codec.process(raw); if (coded && coded.length === raw.length) buffer = Buffer.from(coded); } catch (error) { codecs.set(id, null); if (!codecWarned) { codecWarned = true; warn(`[PracticeCall] call codec unavailable, audio left untreated: ${error?.message || error}`); } }
         }
         record(id, buffer, rate);
         return helper.pushAudio?.(id, buffer, sampleRate);
@@ -737,7 +747,7 @@ export function createPracticeCallService(deps = {}) {
   const warnRoom = error => {
     if (roomWarned) return;
     roomWarned = true;
-    try { deps.logger?.warn?.(`[PracticeCall] call sound unavailable, audio left untreated: ${error?.message || error}`); } catch { /* logging is best effort */ }
+    warn(`[PracticeCall] call sound unavailable, audio left untreated: ${error?.message || error}`);
   };
   async function roomTools(owner) {
     let createCallSound = null;
@@ -812,14 +822,14 @@ export function createPracticeCallService(deps = {}) {
    * fewer: the lead alone is enough for a call. No voice is made or warmed here: the planner
    * chooses among them, and only the chosen ones are used.
    */
-  async function drawExtraVoices({ pool, catalog, fetchImpl, key, random, personaOf, taken, leadName, builtIn = { voiceIds: [], names: [] } }) {
+  async function drawExtraVoices({ pool, catalog, fetchImpl, key, random, personaOf, taken, leadName, builtIn = { voiceIds: [], names: [] }, pageCache }) {
     const voices = new Set(taken.filter(Boolean));
     // Every first name and surname already on the call.
     const names = new Set(String(leadName || '').toLowerCase().split(/\s+/u).filter(Boolean));
     const found = [];
     for (let at = 0; at < MAX_COLLEAGUES; at += 1) {
       try {
-        const drawn = await pool.library.drawVoice({ fetch: fetchImpl, key, random, excludeVoiceIds: [...voices, ...builtIn.voiceIds], excludeNames: builtIn.names });
+        const drawn = await pool.library.drawVoice({ fetch: fetchImpl, key, random, excludeVoiceIds: [...voices, ...builtIn.voiceIds], excludeNames: builtIn.names, pageCache });
         if (!drawn?.voice) continue;
         // The name is drawn again a few times when it repeats a first name or a surname already on
         // the call: two interviewers called Cohen read as relatives (seen in the built app).
@@ -854,9 +864,7 @@ export function createPracticeCallService(deps = {}) {
   }
 
   /** Best-effort log line: info when the logger has it, else warn. A logging fault never reaches the call. */
-  function note(message) {
-    try { (deps.logger?.info ?? deps.logger?.warn)?.call(deps.logger, `[PracticeCall] ${message}`); } catch { /* logging is best effort */ }
-  }
+  function note(message) { logNote(deps.logger, message); }
 
   /**
    * The careful planning step: one structured call that decides the cast, the questions, their order
@@ -1060,15 +1068,17 @@ export function createPracticeCallService(deps = {}) {
         builtIn = { voiceIds: Array.isArray(listed?.voiceIds) ? listed.voiceIds : [], names: Array.isArray(listed?.names) ? listed.names : [] };
       }
     } catch (error) {
-      try { deps.logger?.warn?.(`[PracticeCall] built-in voice list unavailable: ${error?.message || error}`); } catch { /* logging is best effort */ }
+      warn(`[PracticeCall] built-in voice list unavailable: ${error?.message || error}`);
     }
     if (call !== self || self.finished) return snapshot();
     let drawn = null;
+    // The draws of one setup share the library pages already read.
+    const pageCache = new Map();
     try {
       if (pool?.library && typeof pool.library.drawVoice === 'function') {
         drawn = await pool.library.drawVoice({
           fetch: fetchImpl, key, random,
-          excludeVoiceIds: [...(recentVoiceId ? [recentVoiceId] : []), ...builtIn.voiceIds], excludeNames: builtIn.names,
+          excludeVoiceIds: [...(recentVoiceId ? [recentVoiceId] : []), ...builtIn.voiceIds], excludeNames: builtIn.names, pageCache,
         });
       }
     } catch { drawn = null; }
@@ -1087,7 +1097,7 @@ export function createPracticeCallService(deps = {}) {
     const leadBase = personaOf(chosen, 'library');
     // Up to four more voices for the planner to choose among; the planner makes do with these.
     const extras = pool?.library && typeof pool.library.drawVoice === 'function'
-      ? await drawExtraVoices({ pool, catalog, fetchImpl, key, random, personaOf, taken: [recentVoiceId, leadBase.voiceId], leadName: leadBase.name, builtIn })
+      ? await drawExtraVoices({ pool, catalog, fetchImpl, key, random, personaOf, taken: [recentVoiceId, leadBase.voiceId], leadName: leadBase.name, builtIn, pageCache })
       : [];
     if (call !== self || self.finished) return snapshot();
     const drawnVoices = [{ persona: leadBase, chosen, raw: drawn.voice }, ...extras].map((item, at) => ({
@@ -1138,7 +1148,7 @@ export function createPracticeCallService(deps = {}) {
     const helper = helperFactory({ onEvent: onHelperEvent });
     self.helper = helper;
     let createCodec = null;
-    try { createCodec = await resolve('callCodec'); } catch (error) { try { deps.logger?.warn?.(`[PracticeCall] call codec unavailable, audio left untreated: ${error?.message || error}`); } catch { /* logging is best effort */ } }
+    try { createCodec = await resolve('callCodec'); } catch (error) { warn(`[PracticeCall] call codec unavailable, audio left untreated: ${error?.message || error}`); }
     self.audioMirror = createMirror(helper, self.track, createCodec);
     const candidatePath = path.join(self.dir, 'candidate.wav');
     self.candidatePath = candidatePath;
@@ -1208,7 +1218,7 @@ export function createPracticeCallService(deps = {}) {
     const started = promise => { const work = Promise.resolve(promise); work.catch(() => {}); return work; }; // still awaited below; this only covers an earlier failure
     const classifierReady = started(classifier.start({ instructions: CLASSIFIER_INSTRUCTIONS }));
     const mainReady = started(main.start({ instructions: self.instructions.main }));
-    let openerReady = started(opener.start({ instructions: self.instructions.opener }));
+    const openerReady = started(opener.start({ instructions: self.instructions.opener }));
     // Each colleague gets the same warm-up line as the lead, beside the session starts. One whose
     // voice does not answer cannot speak, so they are left out rather than heard in the lead's voice.
     const warmed = await Promise.all((self.panel || []).map(entry => warmUpVoice({ factory: entry.factory, clock })));
@@ -1224,14 +1234,24 @@ export function createPracticeCallService(deps = {}) {
       // over to someone who cannot speak. A fresh session starts from the cast as it now is,
       // and so does the acknowledgement session.
       settle();
-      const fresh = await create('main');
-      await fresh.start({ instructions: self.instructions.main });
+      // A replacement that fails to start is closed here, since it is not yet one of self.sessions.
+      const startFresh = async (kind, instructions) => {
+        const session = await create(kind);
+        try {
+          await session.start({ instructions });
+        } catch (error) {
+          try { await session.close?.(); } catch { /* already closed */ }
+          throw error;
+        }
+        return session;
+      };
+      const fresh = await startFresh('main', self.instructions.main);
       try { await main.close?.(); } catch { /* already closed */ }
       main = fresh;
+      // The new lead session is owned from here on; the stale acknowledgement session is still listed and closes with them.
+      self.sessions = { opener, main, classifier };
       const stale = opener;
-      opener = await create('opener');
-      openerReady = started(opener.start({ instructions: self.instructions.opener }));
-      await openerReady;
+      opener = await startFresh('opener', self.instructions.opener);
       try { await stale.close?.(); } catch { /* already closed */ }
       self.sessions = { opener, main, classifier };
     }
@@ -1484,7 +1504,11 @@ export function createPracticeCallService(deps = {}) {
       state.elapsedMs = engineState.elapsedMs || onScreenMs(self);
       setPhase('ended');
       try { await self.helper?.stop?.(); } catch { /* audio owner already stopped */ }
-      try { await Promise.race([self.recordingClosedPromise, new Promise(resolveWait => clock.setTimeout(resolveWait, 5000))]); } catch { /* bounded wait */ }
+      let recordingWait;
+      try {
+        await Promise.race([self.recordingClosedPromise, new Promise(resolveWait => { recordingWait = clock.setTimeout(resolveWait, 5000); })]);
+      } catch { /* bounded wait */ }
+      if (recordingWait !== undefined) clock.clearTimeout?.(recordingWait);
       await settleNotes(self);
       const durationMs = Math.max(0, Math.round(clock.now() - self.startedAt));
       const interviewerPath = path.join(self.dir, 'interviewer.wav');
@@ -1508,7 +1532,7 @@ export function createPracticeCallService(deps = {}) {
           await trimStart({ paths: [self.candidatePath, interviewerPath], startMs: leadMs, fs: audioFs });
           trimmedMs = leadMs;
         } catch (error) {
-          try { deps.logger?.warn?.(`[PracticeCall] recording lead not trimmed: ${error?.message || error}`); } catch { /* logging is best effort */ }
+          warn(`[PracticeCall] recording lead not trimmed: ${error?.message || error}`);
         }
       }
       // The pad as it stands at hang-up, and the screen still shown, close on the call's own timeline.
@@ -1521,9 +1545,10 @@ export function createPracticeCallService(deps = {}) {
       // Plan numbers the engine counted as asked (a missing value reads as none), and the question ids behind them.
       const asked = [...new Set((Array.isArray(engineState.askedQuestions) ? engineState.askedQuestions : []).filter(n => Number.isInteger(n) && n >= 1 && n <= (self.plan?.length || 0)))];
       const askedIds = asked.map(n => self.plan[n - 1]?.id).filter(id => typeof id === 'string' && id);
+      const unprepared = unpreparedOf(self);
       const record = {
         callId: self.callId, nodeId: self.args.nodeId, startedAt: self.startedAt, endedAt: Date.now(), durationMs,
-        ...(self.pausedMs ? { pausedMs: self.pausedMs } : { pausedMs: 0 }),
+        pausedMs: self.pausedMs || 0,
         ...(self.endedBySilence ? { endedBy: 'silence' } : {}),
         persona: self.persona ? { ...self.persona } : null,
         panel: (self.panel || []).map(entry => ({
@@ -1533,7 +1558,7 @@ export function createPracticeCallService(deps = {}) {
         pickedQuestions: Array.isArray(self.picked) ? self.picked.slice() : [],
         // What the planning step decided and which drawn voices it used, so a setup that went wrong can be read back.
         ...(self.setup ? { setup: self.setup } : {}),
-        ...(unpreparedOf(self) ? { unpreparedQuestion: unpreparedOf(self) } : {}),
+        ...(unprepared ? { unpreparedQuestion: unprepared } : {}),
         askedQuestions: asked, askedQuestionIds: askedIds,
         steering: self.steering || null, transcript: onCallClock(engineState.transcript || []),
         screens: onCallClock((self.screens || []).map(entry => ({ ...entry }))),
@@ -1548,7 +1573,7 @@ export function createPracticeCallService(deps = {}) {
       // no AI call and a failure here never fails the hang-up.
       if (askedIds.length) {
         try { await (await questionHistory()).record(self.args.nodeId, askedIds); } catch (error) {
-          try { deps.logger?.warn?.(`[PracticeCall] question history not saved: ${error?.message || error}`); } catch { /* logging is best effort */ }
+          warn(`[PracticeCall] question history not saved: ${error?.message || error}`);
         }
       }
       // The window shows these steps while the review is prepared.
@@ -1571,7 +1596,7 @@ export function createPracticeCallService(deps = {}) {
         audio = !!produced && produced.isFile() && !produced.isSymbolicLink();
         await store.writeRecord(self.callId, record);
       } catch (error) {
-        try { deps.logger?.warn?.(`[PracticeCall] recording-failed: ${error?.message || error}`); } catch { /* logging is best effort */ }
+        warn(`[PracticeCall] recording-failed: ${error?.message || error}`);
         state.error = errorState('recording-failed', 'The call recording could not be finished.');
       }
       let analysis = { status: 'failed', error: 'analysis unavailable' };
@@ -1604,7 +1629,7 @@ export function createPracticeCallService(deps = {}) {
           ? { ...report, ...(feedback ? { feedback } : {}), status: report.status === 'failed' ? 'failed' : 'ready' }
           : { status: 'failed', error: 'The call review could not be written.' };
       } catch (error) {
-        try { deps.logger?.warn?.(`[PracticeCall] analysis-failed: ${error?.message || error}`); } catch { /* logging is best effort */ }
+        warn(`[PracticeCall] analysis-failed: ${error?.message || error}`);
         analysis = { status: 'failed', error: 'The call review could not be written.' };
         state.error = errorState('analysis-failed', analysis.error);
       }
@@ -1647,7 +1672,7 @@ export function createPracticeCallService(deps = {}) {
             }
           }
         } catch (error) {
-          try { deps.logger?.warn?.(`[PracticeCall] practice history not updated: ${error?.message || error}`); } catch { /* logging is best effort */ }
+          warn(`[PracticeCall] practice history not updated: ${error?.message || error}`);
           emitEvent({ type: 'feedback-error', message: 'The practice history could not be updated.' });
         }
       }
@@ -1724,7 +1749,7 @@ export function createPracticeCallService(deps = {}) {
         const status = await modelStatus(modelStore);
         if (call !== self) return snapshot();
         const needs = MODELS.some(name => status[name] !== 'ready');
-        self.modelSizes = status.sizes ?? null;
+        self.modelSizes = status.sizes ?? await defaultModelSizes();
         if (needs) {
           state.modelDownload = { receivedBytes: 0, totalBytes: 0, sizes: self.modelSizes };
           setPhase('consent');

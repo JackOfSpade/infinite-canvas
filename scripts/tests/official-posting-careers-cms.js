@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { extractOfficialCareersCmsFacts as extract, phenomSearchForm, phenomSearchJobLinks } from '../../electron/ipc/officialPostingCareersCms.js';
+import { extractOfficialCareersCmsFacts as extract } from '../../electron/ipc/officialPostingCareersCms.js';
+import { phenomSearchForm, phenomSearchJobLinks } from '../../electron/ipc/officialPostingPhenom.js';
 
 const id = '30000000-0000-4000-8000-000000000001';
 const url = 'https://synthetic.test/us/eng/careers';

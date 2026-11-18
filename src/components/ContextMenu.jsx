@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { updateModalCount } from './modalStack';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
@@ -37,15 +37,16 @@ export function ContextMenu({ x, y, items, onClose }) {
 
   // ── Viewport clamping ─────────────────────────────────────────────────────
   const [adjustedPos, setAdjustedPos] = useState({ left: x, top: y });
-  useEffect(() => {
-    if (menuRef.current) {
-      const rect = menuRef.current.getBoundingClientRect();
-      const newPos = { left: x, top: y };
-      if (rect.right > window.innerWidth)  newPos.left = window.innerWidth  - rect.width  - 8;
-      if (rect.bottom > window.innerHeight) newPos.top = window.innerHeight - rect.height - 8;
-      const rafId = requestAnimationFrame(() => setAdjustedPos(newPos));
-      return () => cancelAnimationFrame(rafId);
-    }
+  // Measured before paint from the menu's own size (offset sizes ignore the
+  // entrance animation's scale), so the first frame is already inside the viewport.
+  useLayoutEffect(() => {
+    const menu = menuRef.current;
+    if (!menu) return;
+    const width = menu.offsetWidth;
+    const height = menu.offsetHeight;
+    const left = x + width > window.innerWidth ? window.innerWidth - width - 8 : x;
+    const top = y + height > window.innerHeight ? window.innerHeight - height - 8 : y;
+    setAdjustedPos(previous => (previous.left === left && previous.top === top ? previous : { left, top }));
   }, [x, y]);
 
   // ── Render ────────────────────────────────────────────────────────────────

@@ -1,11 +1,8 @@
 // LIVE end-to-end probe of the practice-call interviewer persona pipeline:
-// ElevenLabs voice pick -> derived name/gender/accent -> temperament -> interviewer prompt -> spoken greeting.
+// ElevenLabs voice pick -> derived name/gender/accent -> interviewer prompt voice line -> spoken greeting.
 //
 //   node scripts/practice-probes/persona-e2e.mjs [--draws N] [--seed S] [--speak K] [--speak-all]
-//                                               [--claude K] [--library-draws N] [--out DIR]
-//
-// --claude K starts K real interviewer sessions (Claude CLI, Opus low) on distinct voices and
-// records which temperament each one chose for its voice.
+//                                               [--library-draws N] [--out DIR]
 //
 // --library-draws N (default 40) chains N real full-library draws, each avoiding the previous pick,
 // and proves every request behind them is a GET to /v1/shared-voices. Step 10 then warms one drawn
@@ -30,8 +27,7 @@ import {
 } from '../../electron/practiceCall/eleven/voiceCatalog.js';
 import { DIVERSE_POOL, NAME_POOLS, NEUTRAL_FIRST_NAMES } from '../../electron/practiceCall/eleven/voiceNames.js';
 import { drawVoice } from '../../electron/practiceCall/eleven/voiceLibrary.js';
-import { buildInterviewerInstructions, temperamentFromReady } from '../../electron/interviewPracticeCallPrompt.js';
-import { createInterviewerSession } from '../../electron/interviewPracticeTransport.js';
+import { buildInterviewerInstructions } from '../../electron/interviewPracticeCallPrompt.js';
 
 const SPEAK_TIMEOUT_MS = 20000;
 const greetingFor = firstName => `Hi, I'm ${firstName}. Thanks for making the time today. Shall we get started?`;
@@ -79,7 +75,6 @@ function parseCliArgs(argv) {
       seed: { type: 'string', default: '1' },
       speak: { type: 'string', default: '3' },
       'speak-all': { type: 'boolean', default: false },
-      claude: { type: 'string', default: '0' },
       out: { type: 'string' },
       'library-draws': { type: 'string', default: '40' },
     },
@@ -90,7 +85,6 @@ function parseCliArgs(argv) {
     seed: countOption('seed', values.seed, 0),
     speak: countOption('speak', values.speak, 0),
     speakAll: values['speak-all'] === true,
-    claude: countOption('claude', values.claude, 0),
     out,
     libraryDraws: countOption('library-draws', values['library-draws'], 1),
   };
@@ -521,16 +515,16 @@ async function step6ForcedTemperament({ pool, seed }) {
 
 // ---------------------------------------------------------------- step 7
 
-async function step7PromptAlignment({ pool, seed, claude }) {
-  heading('7. voice described to Claude, temperament chosen by Claude');
+async function step7PromptAlignment({ pool, seed }) {
+  heading('7. voice described to Claude');
   if (!pool.length) {
     check('prompt: pool available', false, 'no conversational voices');
     return;
   }
   const random = mulberry32(seed + 3);
-  const voices = shuffle(pool, random).slice(0, Math.max(3, claude));
+  const voices = shuffle(pool, random).slice(0, 3);
   const brief = { company: 'Example Co', role: 'Software Engineer', roleSummary: '', roleThemes: [], companyFacts: [], recentContext: [] };
-  for (const [index, voice] of voices.entries()) {
+  for (const voice of voices) {
     const draw = pickPersonaVoice({ voices: [voice], random });
     const persona = {
       name: draw.name, role: 'Hiring Manager', team: 'Platform', temperament: null,
@@ -542,23 +536,9 @@ async function step7PromptAlignment({ pool, seed, claude }) {
     const firstName = String(voice.voiceName ?? '').split(/\s[-\u2013\u2014]\s/)[0].trim();
     const leaksName = firstName.length >= 2
       && new RegExp(`(?<![\\p{L}])${firstName.replace(/[^\p{L}'-]/gu, '')}(?![\\p{L}])`, 'iu').test(voiceLine);
-    check(`prompt: ${draw.name} has a voice line and a temperament choice`,
-      text.startsWith(`You are ${draw.name}, `) && Boolean(voiceLine) && text.includes('Choose your temperament now')
-        && text.endsWith('READY neutral') && !leaksName,
+    check(`prompt: ${draw.name} has a voice line that does not leak the voice name`,
+      text.startsWith(`You are ${draw.name}, `) && Boolean(voiceLine) && !leaksName,
       `voiceLine=${Boolean(voiceLine)} leaksVoiceName=${leaksName}`);
-    if (index >= claude) continue;
-    const session = await createInterviewerSession({ model: 'opus', effort: 'low' });
-    try {
-      const startedAt = performance.now();
-      const ready = await withTimeout(session.start({ instructions: text }), 120000);
-      const chosen = temperamentFromReady(ready?.reply);
-      console.log(`  Claude chose: ${ready?.reply} (${fmtMs(performance.now() - startedAt)})`);
-      check(`claude: ${voice.voiceName} -> ${chosen ?? '(none)'}`, Boolean(chosen), `reply=${ready?.reply}`);
-    } catch (error) {
-      check(`claude: ${voice.voiceName}`, false, describeError(error));
-    } finally {
-      await session.close?.();
-    }
   }
 }
 
@@ -888,7 +868,7 @@ async function main() {
   await step4Draws({ pool, draws: args.draws, seed: args.seed });
   await step5Chaining({ pool, draws: args.draws, seed: args.seed });
   await step6ForcedTemperament({ pool, seed: args.seed });
-  await step7PromptAlignment({ pool, seed: args.seed, claude: args.claude });
+  await step7PromptAlignment({ pool, seed: args.seed });
   await step8Speech({ key: state.key, tier: account.tier, pool, args });
   const libraryDraw = await step9FullLibraryDraw({ key: state.key, args });
   await step10WarmUpThenSpeak({ key: state.key, tier: account.tier, args, draw: libraryDraw });

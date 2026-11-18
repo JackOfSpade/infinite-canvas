@@ -1722,6 +1722,23 @@ test('model download progress is cumulative over both models and names the curre
   for (let i = 1; i < bars.length; i += 1) assert.equal(bars[i][1] >= bars[i - 1][1], true);
 });
 
+test('model download bar keeps one total across both models when the store reports no sizes', async () => {
+  const seen = [];
+  const { tmp, service } = await startOf({ modelReady: false, deps: {
+    modelStore: () => ({
+      status: () => ({ smartTurn: 'missing', tone: 'missing' }),
+      ensure: async (name, { onProgress }) => { onProgress?.({ receivedBytes: 5, totalBytes: 10 }); },
+      pathOf: name => path.join(tmp, 'practice-models', `${name}.onnx`),
+    }),
+  } });
+  service.onState(state => { if (state.phase === 'downloading' && state.modelDownload) seen.push(state.modelDownload); });
+  await service.start(ARGS);
+  await service.agreeModelDownload();
+  const totals = new Set(seen.map(item => item.totalBytes).filter(total => total > 0));
+  assert.equal(totals.size, 1, 'the total does not change when the second model begins');
+  assert.equal([...totals][0] > 600 * 1000 * 1000, true, 'the total is both model sizes');
+});
+
 test('chat is ignored once the interviewer has left', async () => {
   const typed = [];
   const { service, engine } = await liveCall({ deps: {
@@ -2317,6 +2334,37 @@ test('panel: when a chosen colleague cannot speak, a fresh lead starts from the 
   assert.deepEqual(record.panel, []);
   const dropped = record.setup.voices.find(voice => voice.key === 'V2');
   assert.deepEqual([dropped.used, dropped.dropped, dropped.id], [false, true, null], 'the record says the drawn voice was not used');
+});
+
+test('panel: a replacement session that fails to start is closed and does not stay running', async () => {
+  const setup = panelHarness({ silent: ['lib-2'], plan: drawn => soloPlan(drawn, {
+    panel: [{ voice: 'V2', role: 'Engineer', focus: 'api', stability: 0.3, room: 0.4, manner: 'Plain.' }],
+    questions: [{ number: 1, askedBy: 'V1', minutes: 5, probes: [] }, { number: 2, askedBy: 'V2', minutes: 5, probes: ['a vague number'] }],
+  }) });
+  setup.overrides.loadCards = async () => PLAN_CARDS;
+  const sessions = [];
+  setup.overrides.sessionsFactory = () => {
+    const at = sessions.length;
+    const session = { closed: 0, start: async () => { if (at === 4) throw new Error('replacement failed to start'); return { reply: 'READY' }; }, close() { session.closed += 1; } };
+    sessions.push(session);
+    return session;
+  };
+  const { state } = await panelStart(setup);
+  assert.notEqual(state.phase, 'ringing');
+  assert.equal(sessions.length, 5, 'the three sessions, a fresh lead and the replacement that failed');
+  assert.equal(sessions[4].closed, 1, 'the replacement that failed to start was closed');
+});
+
+test('closing the warm sessions calls only the first of close, cancel and stop that a session has', async () => {
+  const calls = [];
+  const { service } = await liveCall({ deps: {
+    sessionsFactory: () => ({ start: async () => ({ reply: 'READY' }), close() { calls.push('close'); }, cancel() { calls.push('cancel'); }, stop() { calls.push('stop'); } }),
+  } });
+  await service.start(ARGS);
+  await service.answer();
+  await service.hangUp({ feedback: false });
+  assert.equal(calls.length > 0, true);
+  assert.equal(calls.every(name => name === 'close'), true, `only close is called, got ${calls.join(',')}`);
 });
 
 // Quitting the app (or asking again) while a call is already being saved must wait for that save.

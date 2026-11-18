@@ -62,7 +62,7 @@ const DEFAULT_SOFT_WALL_SIGNALS = [
 // not-connected verify still overwrites it (real logouts are caught); only an
 // inconclusive verify preserves the restored value, and it expires after
 // STATUS_CACHE_MAX_AGE_MS so a long-dead session can't linger forever.
-let _statusCache = {};
+const _statusCache = {};
 
 const STATUS_CACHE_STORE_KEY = 'marketplaceSessionCache';
 const STATUS_CACHE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
@@ -505,7 +505,7 @@ export async function invalidatePlatformSessionStatus(platformId, reason = 'Sess
 /** Clear every cached verdict after an explicitly global profile reset. */
 export function clearAllSessionStatusCache() {
   loadPersistedStatusCache();
-  _statusCache = {};
+  for (const id of Object.keys(_statusCache)) delete _statusCache[id];
   persistStatusCache();
 }
 
@@ -987,20 +987,24 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
   // This is the same ownership + safety rule used by the post-login cookie
   // survival check above; without it a clean startup verify leaves Chrome
   // holding browser-data's OS lock for the rest of the app session.
-  await withSharedProfileLock(async () => {
-    const stealthAfter = getStealthBrowserInfo();
-    const weStartedIt = stealthAfter.connected
-      && (!stealthBefore.connected || stealthAfter.generation !== stealthBefore.generation);
-    if (weStartedIt) {
-      const busy = await getBrowserSessionResetBlocker();
-      if (busy) {
-        logger.info(`[Accounts] Leaving the shared browser up after startup verify — ${busy}`);
-      } else {
-        await closeStealthBrowser(false);
-        logger.info('[Accounts] Released idle shared browser after startup verify');
+  try {
+    await withSharedProfileLock(async () => {
+      const stealthAfter = getStealthBrowserInfo();
+      const weStartedIt = stealthAfter.connected
+        && (!stealthBefore.connected || stealthAfter.generation !== stealthBefore.generation);
+      if (weStartedIt) {
+        const busy = await getBrowserSessionResetBlocker();
+        if (busy) {
+          logger.info(`[Accounts] Leaving the shared browser up after startup verify — ${busy}`);
+        } else {
+          await closeStealthBrowser(false);
+          logger.info('[Accounts] Released idle shared browser after startup verify');
+        }
       }
-    }
-  }, null, 'accounts startup verify cleanup');
+    }, null, 'accounts startup verify cleanup');
+  } catch (err) {
+    logger.warn(`[Accounts] Startup verify cleanup failed: ${err?.message || err}`);
+  }
 
   const finishedAt = Date.now();
   _lastVerifyRun = {
@@ -1143,8 +1147,8 @@ export function registerAccountsHandlers() {
   // verify) lives in the exported runPlatformLoginFlow above so the Job
   // Search source card's "Log in" action can call the exact same flow
   // directly, without going through IPC or duplicating this logic.
-  handleSafe('open-login-window', async (_event, { platformId }, signal) => {
-    return await runPlatformLoginFlow(platformId, _event.sender, { signal });
+  handleSafe('open-login-window', async (event, { platformId }, signal) => {
+    return await runPlatformLoginFlow(platformId, event.sender, { signal });
   });
 
   // Check-and-login flow: check session → if not logged in, open login → verify
@@ -1153,7 +1157,7 @@ export function registerAccountsHandlers() {
   // Both pre- and post-login checks use the disk cache + verifySellMonitorLogin
   // path — never the broken getSessionStatus cookie heuristic, which false-
   // positives on anonymous tracking cookies (see note on `check-sell-monitor-auth`).
-  handleSafe('check-and-login', async (_event, { platformId }, signal) => {
+  handleSafe('check-and-login', async (event, { platformId }, signal) => {
     // Step 1: Quick cache lookup. If we already have a positive verdict
     // from a prior verified login, trust it and skip Chrome entirely.
     const cache = await readStatusCache();
@@ -1167,8 +1171,8 @@ export function registerAccountsHandlers() {
     // That shared flow performs completeLoginWindowVerification(platformId, loginResult)
     // after the visible window closes; do not replace it with a raw verifier here.
     logger.info(`[Accounts] ${platformId} not in verified-login cache — opening login window`);
-    const verified = await runPlatformLoginFlow(platformId, _event.sender, { signal });
-    if (_event.sender.isDestroyed()) {
+    const verified = await runPlatformLoginFlow(platformId, event.sender, { signal });
+    if (event.sender.isDestroyed()) {
       return { platform: platformId, connected: !!verified.connected, loginOpened: true };
     }
     return { platform: platformId, connected: !!verified.connected, loginOpened: true, reason: verified.reason, ...(verified.inconclusive ? { inconclusive: true } : {}) };

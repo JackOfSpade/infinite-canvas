@@ -17,15 +17,6 @@ import {
 } from '../../utils/priceDropReminder';
 
 /**
- * Per-item price-drop plan stored on the hub and read by its marketplace cards.
- * The cadence enables the pulse. An optional must-sell date + target price walk
- * the listing from the selected Quick/Best/Max tier down to that target by the
- * date — the final reminder on or before the date reaches the exact target.
- *
- * Plain-text input with blur-commit (useSyncWhileFocused) so decimals like
- * "1.5" type naturally and there are no number-spinner artifacts.
- */
-/**
  * Must-sell date — uncontrolled (defaultValue + ref-synced while unfocused) so
  * background re-renders never reconcile its value and snap the open native
  * calendar popup shut. A controlled `<input type="date" value=…>` here flickered
@@ -60,6 +51,90 @@ function MustSellDateInput({ value, onChange, locked }) {
   );
 }
 
+/** One button per marketplace; platforms the AI flagged as a poor fit sit behind a toggle. */
+function MarketplaceButtons({ platformFit, spawnedMarketplaceIds, locked, showUnfit, onToggleUnfit, onSpawnMarketplaceCard }) {
+  // Partition by AI fit verdict. Without a verdict (assessment failed),
+  // treat every platform as "good" — never hide options when we don't
+  // have data to justify hiding them.
+  const fitGood = [];
+  const fitUnfit = [];
+  for (const p of SELL_PLATFORMS) {
+    const verdict = platformFit?.[p.id]?.fit;
+    const alreadySpawned = spawnedMarketplaceIds.includes(p.id);
+    // Already-spawned cards stay in the primary list even if the AI
+    // would mark them unfit — the user already committed, and hiding
+    // the card behind a toggle would be disorienting.
+    if (verdict === 'unfit' && !alreadySpawned) fitUnfit.push(p);
+    else fitGood.push(p);
+  }
+  const renderButton = (p, { unfit } = {}) => {
+    const spawned = spawnedMarketplaceIds.includes(p.id);
+    const reason = platformFit?.[p.id]?.reason;
+    const title = spawned
+      ? `${p.name} card already on canvas`
+      : unfit
+        ? `AI flagged ${p.name} as a poor fit${reason ? `: ${reason}` : ''} — click to add anyway`
+        : `Add ${p.name} marketplace card`;
+    return (
+      <button
+        key={p.id}
+        onClick={locked || spawned ? undefined : () => onSpawnMarketplaceCard?.(p.id)}
+        disabled={locked || spawned}
+        onPointerDown={(e) => e.stopPropagation()}
+        title={title}
+        className={`nodrag flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors border ${
+          spawned
+            ? 'bg-emerald-500/10 text-emerald-400/70 border-emerald-500/20 cursor-default'
+            : locked
+              ? 'bg-white/5 text-white/20 border-white/5 cursor-default'
+              : unfit
+                ? 'bg-white/[0.02] text-white/35 border-white/5 hover:bg-white/5 hover:text-white/60'
+                : 'bg-white/5 text-white/60 border-white/10 hover:bg-white/10 hover:text-white/90'
+        }`}
+        style={spawned ? undefined : { borderLeftColor: p.color, borderLeftWidth: 2, opacity: unfit ? 0.7 : 1 }}
+      >
+        {spawned ? <Check size={8} /> : <Plus size={8} />}
+        {p.name}
+      </button>
+    );
+  };
+  return (
+    <>
+      <div className="flex flex-wrap gap-1">
+        {fitGood.map(p => renderButton(p))}
+      </div>
+      {fitUnfit.length > 0 && (
+        <div className="pt-1">
+          <button
+            onClick={onToggleUnfit}
+            onPointerDown={(e) => e.stopPropagation()}
+            className="nodrag flex items-center gap-1 text-white/30 text-[9px] hover:text-white/50 transition-colors"
+            title="Platforms the AI flagged as a poor fit for this item — still selectable if you disagree"
+          >
+            {showUnfit ? <ChevronDown size={9} /> : <ChevronRight size={9} />}
+            <Sparkles size={8} />
+            {showUnfit ? 'Hide' : 'Show'} {fitUnfit.length} AI-flagged poor fit
+          </button>
+          {showUnfit && (
+            <div className="flex flex-wrap gap-1 mt-1">
+              {fitUnfit.map(p => renderButton(p, { unfit: true }))}
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * Per-item price-drop plan stored on the hub and read by its marketplace cards.
+ * The cadence enables the pulse. An optional must-sell date + target price walk
+ * the listing from the selected Quick/Best/Max tier down to that target by the
+ * date — the final reminder on or before the date reaches the exact target.
+ *
+ * Plain-text input with blur-commit (useSyncWhileFocused) so decimals like
+ * "1.5" type naturally and there are no number-spinner artifacts.
+ */
 function PriceDropReminderPlan({ plan, locked, onChange, applyTargetCount = 0, onApplyToAll, excluded = false, onToggleExcluded }) {
   const weeksEditor = useSyncWhileFocused(plan.weeks > 0 ? String(plan.weeks) : '');
   const targetEditor = useSyncWhileFocused(plan.targetPrice != null ? String(plan.targetPrice) : '');
@@ -556,79 +631,16 @@ export function SellHubPricedState({
             <Activity size={10} className="animate-pulse" />
             Selecting best marketplaces for this item…
           </div>
-        ) : (() => {
-          // Partition by AI fit verdict. Without a verdict (assessment failed),
-          // treat every platform as "good" — never hide options when we don't
-          // have data to justify hiding them.
-          const fitGood = [];
-          const fitUnfit = [];
-          for (const p of SELL_PLATFORMS) {
-            const verdict = platformFit?.[p.id]?.fit;
-            const alreadySpawned = spawnedMarketplaceIds.includes(p.id);
-            // Already-spawned cards stay in the primary list even if the AI
-            // would mark them unfit — the user already committed, and hiding
-            // the card behind a toggle would be disorienting.
-            if (verdict === 'unfit' && !alreadySpawned) fitUnfit.push(p);
-            else fitGood.push(p);
-          }
-          const renderButton = (p, { unfit } = {}) => {
-            const spawned = spawnedMarketplaceIds.includes(p.id);
-            const reason = platformFit?.[p.id]?.reason;
-            const title = spawned
-              ? `${p.name} card already on canvas`
-              : unfit
-                ? `AI flagged ${p.name} as a poor fit${reason ? `: ${reason}` : ''} — click to add anyway`
-                : `Add ${p.name} marketplace card`;
-            return (
-              <button
-                key={p.id}
-                onClick={locked || spawned ? undefined : () => onSpawnMarketplaceCard?.(p.id)}
-                disabled={locked || spawned}
-                onPointerDown={(e) => e.stopPropagation()}
-                title={title}
-                className={`nodrag flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors border ${
-                  spawned
-                    ? 'bg-emerald-500/10 text-emerald-400/70 border-emerald-500/20 cursor-default'
-                    : locked
-                      ? 'bg-white/5 text-white/20 border-white/5 cursor-default'
-                      : unfit
-                        ? 'bg-white/[0.02] text-white/35 border-white/5 hover:bg-white/5 hover:text-white/60'
-                        : 'bg-white/5 text-white/60 border-white/10 hover:bg-white/10 hover:text-white/90'
-                }`}
-                style={spawned ? undefined : { borderLeftColor: p.color, borderLeftWidth: 2, opacity: unfit ? 0.7 : 1 }}
-              >
-                {spawned ? <Check size={8} /> : <Plus size={8} />}
-                {p.name}
-              </button>
-            );
-          };
-          return (
-            <>
-              <div className="flex flex-wrap gap-1">
-                {fitGood.map(p => renderButton(p))}
-              </div>
-              {fitUnfit.length > 0 && (
-                <div className="pt-1">
-                  <button
-                    onClick={() => setShowUnfit(v => !v)}
-                    onPointerDown={(e) => e.stopPropagation()}
-                    className="nodrag flex items-center gap-1 text-white/30 text-[9px] hover:text-white/50 transition-colors"
-                    title="Platforms the AI flagged as a poor fit for this item — still selectable if you disagree"
-                  >
-                    {showUnfit ? <ChevronDown size={9} /> : <ChevronRight size={9} />}
-                    <Sparkles size={8} />
-                    {showUnfit ? 'Hide' : 'Show'} {fitUnfit.length} AI-flagged poor fit
-                  </button>
-                  {showUnfit && (
-                    <div className="flex flex-wrap gap-1 mt-1">
-                      {fitUnfit.map(p => renderButton(p, { unfit: true }))}
-                    </div>
-                  )}
-                </div>
-              )}
-            </>
-          );
-        })()}
+        ) : (
+          <MarketplaceButtons
+            platformFit={platformFit}
+            spawnedMarketplaceIds={spawnedMarketplaceIds}
+            locked={locked}
+            showUnfit={showUnfit}
+            onToggleUnfit={() => setShowUnfit(v => !v)}
+            onSpawnMarketplaceCard={onSpawnMarketplaceCard}
+          />
+        )}
         <PriceDropReminderPlan
           plan={{
             ...priceDropPlan,

@@ -169,7 +169,7 @@ export function buildPausedReanalysisRestore(canvas, {
   if (data.manualAiResume && !data.manualAiResume.retirementPending) {
     throw new Error('The matching jobhub already has a saved manual-AI recovery marker; refusing to replace it.');
   }
-  if (data.manualAiResume?.retirementPending || data.terminalFinalizationRecovery) {
+  if (data.manualAiResume || data.terminalFinalizationRecovery) {
     throw new Error('The matching jobhub has unfinished cleanup/recovery; finish it before preparing a restored copy.');
   }
 
@@ -230,7 +230,7 @@ async function readRegularFile(filePath, label) {
   const stat = await fs.promises.lstat(filePath).catch(error => {
     throw new Error(`Could not read ${label}: ${error.message}`);
   });
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label} must be a regular non-symlink file.`);
+  if (!stat.isFile()) throw new Error(`${label} must be a regular non-symlink file.`);
   return fs.promises.readFile(filePath);
 }
 

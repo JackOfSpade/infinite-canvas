@@ -1607,7 +1607,11 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
       }
       return { brief: published.brief, briefRecordId: published.briefRecordId, ...answerSummary, ...(qaWarning ? { qaWarning } : {}) };
     }
-    catch (error) { if (signal?.aborted) throw error; throw new Error('The interview brief could not be prepared safely.'); }
+    catch (error) {
+      if (signal?.aborted) throw error;
+      logWarning(`[Interview] brief preparation failed: ${String(error?.code || 'no code')} ${String(error?.message || error).slice(0, 300)}`);
+      throw new Error('The interview brief could not be prepared safely.');
+    }
     finally { standaloneClaudeActivity.remove(interviewActivityKey(args.manualAiRunId)); }
   }, { validateArgs: validateInterviewBriefRequestArgs });
 }

@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import os from 'node:os';
+import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 const OUTPUT_LIMIT = 8 * 1024 * 1024;
@@ -231,7 +233,7 @@ function warmClaude(binary, args, options) {
 
 export const OFFLOAD_ROUTES = ['deepseek-flash', 'deepseek-pro'];
 export const OFFLOAD_REASONING = ['off', 'low', 'medium', 'high', 'max'];
-const DEFAULT_OFFLOAD_BIN = '/Users/jack/.local/bin/offload';
+const DEFAULT_OFFLOAD_BIN = path.join(os.homedir(), '.local/bin/offload');
 const OFFLOAD_MAX_TOKENS = 400;
 
 export const offloadReasoning = level => level === 'off' ? { enabled: false } : { enabled: true, effort: level };

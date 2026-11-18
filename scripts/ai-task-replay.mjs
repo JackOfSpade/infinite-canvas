@@ -347,7 +347,6 @@ export async function replayTask({ task, outDir, startFlow, materialize, execute
       try {
         const reply = await execute({ config, rep, call });
         const text = typeof reply?.text === 'string' ? reply.text : '';
-        writePrivate(path.join(outDir, 'texts', `${call.batch}-${safeName(config.id)}-${rep}.txt`), text);
         let answer = null;
         let code = null;
         try { answer = validate(call, text); } catch (error) { code = codeOf(error); }
@@ -357,6 +356,8 @@ export async function replayTask({ task, outDir, startFlow, materialize, execute
           // Which search answered a Claude call on a web task: the profile's, or the one a comparison config forces.
           ...(searchOf ? { search: searchOf } : {}), ...(reply?.toolCalls ? { toolCalls: reply.toolCalls } : {}),
           answer: code === null ? answer : null };
+        try { writePrivate(path.join(outDir, 'texts', `${call.batch}-${safeName(config.id)}-${rep}.txt`), text); }
+        catch (error) { process.stderr.write(`Could not write the reply text for batch ${call.batch}: ${codeOf(error)}\n`); }
       } catch (error) {
         if (error?.code === 'OFFLOAD_CREDIT_EXHAUSTED') { fatal = error; return null; }
         row = { ...base, ok: false, valid: false, code: codeOf(error), costUsd: Number.isFinite(error?.costUsd) ? error.costUsd : null,
@@ -563,8 +564,7 @@ async function buildFlow({ task, opts, node, rows, signal }) {
       rows: selectRowsForTask(task, rows).slice(0, cap), signal });
   }
   if (task === 'job-preference-evaluation') {
-    const { evaluateJobPreferences } = await import(new URL('../electron/ipc/jobPreferences.js', import.meta.url).href);
-    const { normalizeJobPreferencePlan } = await import(new URL('../electron/ipc/jobPreferences.js', import.meta.url).href);
+    const { evaluateJobPreferences, normalizeJobPreferencePlan } = await import(new URL('../electron/ipc/jobPreferences.js', import.meta.url).href);
     const plan = node.data.preferenceEvaluation.preferencePlan;
     const jobs = selectRowsForTask(task, rows).slice(0, cap).map(row => { const rest = { ...row }; delete rest.preferenceAssessment; return rest; });
     const strictPreferenceIds = normalizeJobPreferencePlan(plan).strictRequirements.map(item => item.id);
@@ -657,7 +657,7 @@ async function replayMain(opts, outDir, journal) {
       throw Object.assign(new Error(`${searchConfig.id} needs a task whose profile has web tools; ${task} has none.`), { userFacing: true });
     }
     const controller = new AbortController();
-    const flow = await buildFlow({ task, opts, node, rows, app, signal: controller.signal });
+    const flow = await buildFlow({ task, opts, node, rows, signal: controller.signal });
     writePrivate(path.join(outDir, 'meta.json'), `${JSON.stringify(flow.meta)}\n`);
     const { calls, results } = await replayTask({
       task, outDir, startFlow: flow.startFlow, materialize: appMaterialize(app), execute: appExecute(app, task, controller.signal), validate: appValidate(app),

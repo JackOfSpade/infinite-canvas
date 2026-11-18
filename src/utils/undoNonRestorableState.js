@@ -4,7 +4,7 @@ import { hasActiveJobBoardCareerOverrideRun } from './jobBoardCareerOverride.js'
 // External-lifecycle data must not participate in undo. It is stripped from
 // fingerprints and merged from the live nodes on restore so Undo cannot revive
 // a retired provider request, queue lease, Board transaction, rollback fence,
-// reminder clock, or legacy marketplace status check.
+// reminder clock, or marketplace status check.
 const MARKETPLACE_STATUS_FIELDS = [
   'status',
   'statusMessage',
@@ -106,12 +106,12 @@ const JOB_SEARCH_UNDOABLE_SETTING_FIELDS = [
   'locked',
 ];
 
-// FIX 11: once the two-pass role resolver has locked a Search Brief hub,
+// Once the two-pass role resolver has locked a Search Brief hub,
 // JobSearchNode.jsx freezes every Search setup field (brief, location, remote
-// residences, first-scan lookback, the two collection limits, and platforms) —
-// but 'locked' here is a DIFFERENT, unrelated field: the
-// generic canvas-wide "Lock Node" toggle (see useCanvasContextMenu.js),
-// which stays ordinarily undo-restorable regardless of role-lock state.
+// residences, first-scan lookback, the two collection limits, and platforms).
+// 'locked' is a different, unrelated field: the canvas-wide "Lock Node" toggle
+// (see useCanvasContextMenu.js), which stays undo-restorable regardless of
+// role-lock state.
 const JOB_SEARCH_FROZEN_SETTING_FIELDS = new Set(
   JOB_SEARCH_UNDOABLE_SETTING_FIELDS.filter(field => field !== 'locked'),
 );
@@ -127,14 +127,18 @@ function hasResolvedRoleLock(source) {
     && source.resolvedRolesMeta && typeof source.resolvedRolesMeta === 'object');
 }
 
+function hasManualAiOrQueuedRun(data) {
+  return !!(data.manualAiResume
+    || (Array.isArray(data.manualAiCleanupReceipts) && data.manualAiCleanupReceipts.length > 0)
+    || data.queuedModuleRun);
+}
+
 function hasExternallyOwnedJobSearchState(data) {
   if (!data || typeof data !== 'object') return false;
   return ACTIVE_JOB_SEARCH_STATES.has(data.hubState)
     || data.hubState === 'sources-ready'
-    || data.manualAiResume
-    || (Array.isArray(data.manualAiCleanupReceipts) && data.manualAiCleanupReceipts.length > 0)
+    || hasManualAiOrQueuedRun(data)
     || data.terminalFinalizationRecovery
-    || data.queuedModuleRun
     || data.pendingJobs
     || data.pendingCareerData
     || data.pendingJobPreferences
@@ -256,9 +260,7 @@ export function hasActiveExternalRunState(nodes, { recursive = true } = {}) {
     if (node?.type === 'jobboard' && (
       data.boardScanResume
       || data.boardCancellation
-      || data.manualAiResume
-      || (Array.isArray(data.manualAiCleanupReceipts) && data.manualAiCleanupReceipts.length > 0)
-      || data.queuedModuleRun
+      || hasManualAiOrQueuedRun(data)
       || hasActiveJobBoardCareerOverrideRun(data)
     )) return true;
     if (node?.type === 'jobhub' && hasExternallyOwnedJobSearchState(data)) return true;
@@ -305,20 +307,23 @@ function nonRestorableFields(node) {
   return null;
 }
 
+function pickFields(source, fields) {
+  const picked = {};
+  for (const field of fields) {
+    if (Object.prototype.hasOwnProperty.call(source, field)) picked[field] = source[field];
+  }
+  return picked;
+}
+
 function pickNonRestorableData(node) {
   const fields = nonRestorableFields(node);
   if (!fields) return null;
   const nodeData = node?.data || {};
   const picked = {
     fields,
-    values: {},
+    values: pickFields(nodeData, fields),
     ...((node?.type === 'jobhub' || node?.type === 'interviewhelper') ? { completeData: nodeData } : {}),
   };
-  for (const field of fields) {
-    if (Object.prototype.hasOwnProperty.call(nodeData, field)) {
-      picked.values[field] = nodeData[field];
-    }
-  }
   // Store an entry even when every field is absent. Absence in the live node is
   // authoritative: Undo must delete a marker found only in the old snapshot.
   return picked;
@@ -326,20 +331,10 @@ function pickNonRestorableData(node) {
 
 export function stripNonRestorableNodeDataForUndo(node) {
   if (node?.type === 'jobhub') {
-    const source = node.data || {};
-    const settings = {};
-    for (const field of JOB_SEARCH_UNDOABLE_SETTING_FIELDS) {
-      if (Object.prototype.hasOwnProperty.call(source, field)) settings[field] = source[field];
-    }
-    return settings;
+    return pickFields(node.data || {}, JOB_SEARCH_UNDOABLE_SETTING_FIELDS);
   }
   if (node?.type === 'interviewhelper') {
-    const source = node.data || {};
-    const settings = {};
-    for (const field of INTERVIEW_HELPER_UNDOABLE_SETTING_FIELDS) {
-      if (Object.prototype.hasOwnProperty.call(source, field)) settings[field] = source[field];
-    }
-    return settings;
+    return pickFields(node.data || {}, INTERVIEW_HELPER_UNDOABLE_SETTING_FIELDS);
   }
   const fields = nonRestorableFields(node);
   if (!fields || !node?.data) return node?.data;
@@ -456,16 +451,11 @@ function mergeNonRestorableData(nodes, byId) {
       // just visibly processing states, but a retired `sources-ready` snapshot
       // whose pending tuple must never be resurrected after Solve/Skip.
       const mergedData = { ...liveData.completeData };
-      // FIX 11: make the settings freeze atomic with the role lock. Once
-      // resolvedRoles/searchBriefPlan/resolvedRolesMeta are locked, those
-      // three fields are already excluded from this allow-list (never
-      // undo-restorable), but the eight settings they were DERIVED FROM
-      // were still being overlaid from the pre-lock undo snapshot on every
-      // pass through here. That desynced the visible settings (reverted)
-      // from the durable lock (unchanged) while the UI stayed frozen and
-      // gave the user no way to reconcile the two. Skip the overlay for the
-      // frozen subset once locked; 'locked' itself (the unrelated canvas
-      // Lock Node toggle) stays undo-restorable either way.
+      // The settings freeze is atomic with the role lock. Once resolvedRoles,
+      // searchBriefPlan and resolvedRolesMeta are locked, the settings they
+      // were derived from are not overlaid from the undo snapshot, so the
+      // visible settings never diverge from the durable lock. 'locked' (the
+      // unrelated canvas Lock Node toggle) stays undo-restorable either way.
       const roleLockEngaged = hasResolvedRoleLock(liveData.completeData);
       for (const field of JOB_SEARCH_UNDOABLE_SETTING_FIELDS) {
         if (roleLockEngaged && JOB_SEARCH_FROZEN_SETTING_FIELDS.has(field)) continue;

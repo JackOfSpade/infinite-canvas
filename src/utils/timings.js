@@ -2,19 +2,13 @@
  * Centralized UI timing — one source of truth for debounce windows, transient
  * feedback durations, and interaction delays.
  *
- * Before this they were scattered across the frontend with inconsistent values
- * for the same concept (copy confirmations at both 1500ms and 2000ms, "saved"
- * dots and save-status resets at 1500ms, three different autosave numbers, …).
- * Consolidating them makes similar interactions feel the same and makes the
- * timing easy to tune in one place.
- *
- * Two values are content-/device-aware (the "dynamic" win): autosave and
- * per-document save debounces grow gently with workspace/doc size (bigger =
- * costlier to serialize + write, so coalesce a burst of edits a little longer),
- * and undo history depth scales down on low-memory devices (each snapshot is a
- * full canvas clone). Everything is clamped to stay in a sane range, and the
- * helpers never return a value *shorter* than the old fixed one for the common
- * (small) case — so this can't make saves more eager than before.
+ * Three helpers are content- or device-aware: autosaveDebounceMs and
+ * docSaveDebounceMs grow gently with workspace and document size (bigger means
+ * costlier to serialize and write, so a burst of edits coalesces a little
+ * longer), and maxUndoHistory scales down on low-memory devices (each snapshot
+ * is a full canvas clone). Results are clamped to a sane range and never fall
+ * below the fixed value used for small workspaces. The save-failure retry
+ * constants are exported separately from TIMINGS.
  */
 import { clamp } from './mathUtils.js';
 
@@ -47,7 +41,6 @@ export const TIMINGS = {
   // ── Interaction delays ────────────────────────────────────────────────────
   FOCUS_DELAY_MS:     100, // let an element mount/expand before focusing it
   SEARCH_AUTODIVE_MS: 700, // grace period before auto-diving into a matched sub-canvas
-  SUBMENU_CLOSE_MS:   120, // bridge the mouse gap before closing a context submenu
   MODAL_RESOLVE_GUARD_MS: 200, // keep modal shield mounted through a rapid second click
 
   // ── Background polling ────────────────────────────────────────────────────

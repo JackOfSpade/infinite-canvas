@@ -3,10 +3,9 @@ import { createPortal } from 'react-dom';
 import { updateModalCount } from './modalStack';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { InterviewQaBadges } from './InterviewQaBadges';
-import { InterviewCardPreview, InterviewQaMatchTester } from './InterviewQaCardPreview';
+import { InterviewCardPreview, InterviewQaMatchTester, inputClass } from './InterviewQaCardPreview';
 
 const buttonClass = 'rounded-md border border-white/15 px-2 py-1 text-xs hover:bg-blue-500/10 disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-blue-400';
-const inputClass = 'mt-1 w-full rounded-md border border-white/15 bg-[#0f0e14] px-2 py-1.5 text-xs text-white';
 const emptyQa = () => ({ foundation: { status: 'missing', cards: [] }, company: { status: 'missing', company: '', cards: [], foundationLinks: [] } });
 const sameQuestion = (left, right) => String(left || '').trim().toLocaleLowerCase() === String(right || '').trim().toLocaleLowerCase();
 
@@ -43,7 +42,7 @@ function CardForm({ card, scope, onSave, onCancel, busy }) {
         </div>)}
         <button type="button" className={buttonClass} onClick={() => field('extensions', [...draft.extensions, { id: `user-${Date.now()}-${++nextExtension.current}`, text: '' }])}>Add extension</button>
       </fieldset>
-      <label className="block text-xs">Approach reminders (one per line, optional)<textarea className={inputClass} rows={3} placeholder="For how-do-you-work questions, e.g. Split work into small tasks" value={draft.approach.map(item => item.text).join('\n')} onChange={event => field('approach', event.target.value.split('\n').map(line => ({ text: line, example: draft.approach.find(item => item.text === line)?.example || '' })))} /><span className="mt-1 block text-white/60">When a card has these, the cue card shows them instead of the lines above; you supply the real example as you speak.</span></label>
+      <label className="block text-xs">Approach reminders (one per line, optional)<textarea className={inputClass} rows={3} placeholder="For how-do-you-work questions, e.g. Split work into small tasks" value={draft.approach.map(item => item.text).join('\n')} onChange={event => { const lines = event.target.value.split('\n'); const byPosition = lines.length === draft.approach.length; field('approach', lines.map((line, index) => ({ text: line, example: (byPosition ? draft.approach[index]?.example : draft.approach.find(item => item.text === line)?.example) || '' }))); }} /><span className="mt-1 block text-white/60">When a card has these, the cue card shows them instead of the lines above; you supply the real example as you speak.</span></label>
       {error && <p role="alert" className="text-xs text-amber-500">{error}</p>}
       <section aria-label="Interview card preview" className="space-y-2"><h4 className="text-xs font-medium">On the interview card</h4><InterviewCardPreview card={draft} scope={scope} /></section>
       <div className="flex gap-2"><button type="submit" className={buttonClass}>Save</button><button type="button" className={buttonClass} onClick={onCancel}>Cancel</button></div>

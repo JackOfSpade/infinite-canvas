@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 // so the settings panel and any future surface cannot drift apart.
 export const CLAUDE_ACCOUNTS_HELP = 'The app uses the first signed-in account that has usage left and switches automatically when one reaches its limit.';
 
-export const CLAUDE_ACCOUNT_ADD_UNAVAILABLE = 'Adding Claude accounts is not available in this build.';
+const CLAUDE_ACCOUNT_ADD_UNAVAILABLE = 'Adding Claude accounts is not available in this build.';
 
 const isObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const emailOf = value => (typeof value === 'string' && value ? value : null);

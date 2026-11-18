@@ -40,6 +40,47 @@ export const HEADLINE_CLASS = Object.freeze({
   problem: 'text-red-100',
 });
 
+const CLAUDE_PAUSED_HEADLINE = 'Paused';
+const CLAUDE_PAUSED_DETAIL = 'Finished work is saved. No new Claude calls will start until you resume.';
+const CLAUDE_PAUSING_NOTE = 'Pausing after this call finishes';
+const TASK_STEP_LIMIT = 8;
+const titleCase = value => value ? `${value[0].toUpperCase()}${value.slice(1)}` : '';
+
+function taskToolHeadline(task) {
+  if (task.tool === 'WebSearch' || task.tool === 'mcp__parallel__web_search') return 'Searching the web';
+  if (task.tool === 'WebFetch' || task.tool === 'mcp__parallel__web_fetch') return 'Reading a page';
+  // web_decisions, find_verticals, search_vertical and image_search all search.
+  if (typeof task.tool === 'string' && task.tool.startsWith('mcp__parallel__')) return 'Searching the web';
+  return task.tool ? `Using ${task.tool}` : 'Using a tool';
+}
+
+function taskRunningCopy(task) {
+  switch (task.phase) {
+    case 'waiting': return ['Waiting for Claude to respond', ''];
+    case 'thinking': return ['Claude is thinking', ''];
+    case 'writing': return ['Claude is writing the answer', ''];
+    case 'tool': return [taskToolHeadline(task), task.target || ''];
+    case 'api-retry': {
+      const retry = task.apiRetry || {};
+      const parts = [Number.isSafeInteger(retry.attempt) ? `Attempt ${retry.attempt}${Number.isSafeInteger(retry.maxRetries) ? ` of ${retry.maxRetries}` : ''}` : '',
+        Number.isSafeInteger(retry.delayMs) ? `waiting ${formatProgressDuration(retry.delayMs)}` : '',
+        Number.isSafeInteger(retry.status) ? `(HTTP ${retry.status})` : ''].filter(Boolean);
+      return ["Claude's service asked to retry", parts.length ? `${parts.join(', ').replace(', (', ' (')}.` : ''];
+    }
+    default: return ['Starting Claude', ''];
+  }
+}
+
+const taskSteps = task => (Array.isArray(task.steps) ? task.steps : []).slice(-TASK_STEP_LIMIT);
+
+function taskLiveCounts(task) {
+  const countOf = (value, words) => Number.isSafeInteger(value) && value > 0 ? `${value.toLocaleString('en-US')} ${words}` : '';
+  return [
+    Number.isSafeInteger(task.rejections) && task.rejections > 0 ? `${task.rejections} rejected` : '',
+    Number.isSafeInteger(task.maxTurns) ? `Web research turn ${task.toolTurns || 0} of ${task.maxTurns}` : countOf(task.toolTurns, 'tool turns'),
+  ].filter(Boolean);
+}
+
 function deriveInner(input) {
   const run = object(input.run), item = object(input.item);
   const stage = applicationProgressStageLabel(run.stage) ? run.stage : item.stage;
@@ -85,47 +126,6 @@ export function deriveClaudeJobProgress(input) {
   try { return deriveInner(object(input)); }
   catch { return { kind: 'claude-writing', steps: [], tone: 'working', contextLabel: 'Application generation',
     summary: '', headline: 'Preparing application', detail: '', since: null, startedAt: null, lastHeard: null, action: null, actionLabel: null }; }
-}
-
-const CLAUDE_PAUSED_HEADLINE = 'Paused';
-const CLAUDE_PAUSED_DETAIL = 'Finished work is saved. No new Claude calls will start until you resume.';
-const CLAUDE_PAUSING_NOTE = 'Pausing after this call finishes';
-const TASK_STEP_LIMIT = 8;
-const titleCase = value => value ? `${value[0].toUpperCase()}${value.slice(1)}` : '';
-
-function taskToolHeadline(task) {
-  if (task.tool === 'WebSearch' || task.tool === 'mcp__parallel__web_search') return 'Searching the web';
-  if (task.tool === 'WebFetch' || task.tool === 'mcp__parallel__web_fetch') return 'Reading a page';
-  // web_decisions, find_verticals, search_vertical and image_search all search.
-  if (typeof task.tool === 'string' && task.tool.startsWith('mcp__parallel__')) return 'Searching the web';
-  return task.tool ? `Using ${task.tool}` : 'Using a tool';
-}
-
-function taskRunningCopy(task) {
-  switch (task.phase) {
-    case 'waiting': return ['Waiting for Claude to respond', ''];
-    case 'thinking': return ['Claude is thinking', ''];
-    case 'writing': return ['Claude is writing the answer', ''];
-    case 'tool': return [taskToolHeadline(task), task.target || ''];
-    case 'api-retry': {
-      const retry = task.apiRetry || {};
-      const parts = [Number.isSafeInteger(retry.attempt) ? `Attempt ${retry.attempt}${Number.isSafeInteger(retry.maxRetries) ? ` of ${retry.maxRetries}` : ''}` : '',
-        Number.isSafeInteger(retry.delayMs) ? `waiting ${formatProgressDuration(retry.delayMs)}` : '',
-        Number.isSafeInteger(retry.status) ? `(HTTP ${retry.status})` : ''].filter(Boolean);
-      return ["Claude's service asked to retry", parts.length ? `${parts.join(', ').replace(', (', ' (')}.` : ''];
-    }
-    default: return ['Starting Claude', ''];
-  }
-}
-
-const taskSteps = task => (Array.isArray(task.steps) ? task.steps : []).slice(-TASK_STEP_LIMIT);
-
-function taskLiveCounts(task) {
-  const countOf = (value, words) => Number.isSafeInteger(value) && value > 0 ? `${value.toLocaleString('en-US')} ${words}` : '';
-  return [
-    Number.isSafeInteger(task.rejections) && task.rejections > 0 ? `${task.rejections} rejected` : '',
-    Number.isSafeInteger(task.maxTurns) ? `Web research turn ${task.toolTurns || 0} of ${task.maxTurns}` : countOf(task.toolTurns, 'tool turns'),
-  ].filter(Boolean);
 }
 
 function deriveTaskInner({ activity, requestId }) {

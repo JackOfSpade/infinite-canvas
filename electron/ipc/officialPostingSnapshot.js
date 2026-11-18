@@ -72,14 +72,14 @@ function jobBoardsInMarkup(body, known = []) {
 // that holds the board: /careers/positions, /about/open-positions.aspx.
 const JOBS_PAGE_PATH = /(?:^|[/_-])(?:positions?|openings?|open-roles|job-openings|jobs)(?:[/._-]|$)/iu;
 const MAX_FOLLOWED_JOBS_PAGES = 2;
-const htmlBoards = (body, finalUrl) => {
-  const plain = [...new Set(scanOfficialCareersPage(body, finalUrl).links
+const htmlBoards = (body, finalUrl, links = scanOfficialCareersPage(body, finalUrl).links) => {
+  const plain = [...new Set(links
     .filter(link => link.tag === 'a' || link.tag === 'iframe').map(link => link.url).filter(url => extractAtsTenant(url)))];
   return [...new Set([...plain, ...jobBoardsInMarkup(body, plain)])].slice(0, MAX_BOARD_LINKS);
 };
-async function boardsOnJobsPage(body, finalUrl, { fetch, signal }) {
+async function boardsOnJobsPage(links, finalUrl, { fetch, signal }) {
   const domain = registrableDomain(normalizedSourceHost(finalUrl));
-  const pages = [...new Set(scanOfficialCareersPage(body, finalUrl).links.filter(link => link.tag === 'a').map(link => link.url))]
+  const pages = [...new Set(links.filter(link => link.tag === 'a').map(link => link.url))]
     .filter(url => url !== finalUrl && registrableDomain(normalizedSourceHost(url)) === domain && JOBS_PAGE_PATH.test(new URL(url).pathname))
     .slice(0, MAX_FOLLOWED_JOBS_PAGES);
   for (const url of pages) {
@@ -157,9 +157,10 @@ export async function snapshotOfficialPostingLead(lead, { fetch, signal } = {}) 
   let boardLinks = []; let boardLinksFrom = '';
   if (lead.kind === 'careers' && /html/iu.test(result.page.contentType || '')) {
     try {
-      boardLinks = htmlBoards(body, finalUrl);
+      const { links } = scanOfficialCareersPage(body, finalUrl);
+      boardLinks = htmlBoards(body, finalUrl, links);
       if (!boardLinks.length) {
-        const followed = await boardsOnJobsPage(body, finalUrl, { fetch, signal });
+        const followed = await boardsOnJobsPage(links, finalUrl, { fetch, signal });
         if (followed) { boardLinks = followed.links; boardLinksFrom = followed.url; }
       }
     } catch { boardLinks = []; boardLinksFrom = ''; }

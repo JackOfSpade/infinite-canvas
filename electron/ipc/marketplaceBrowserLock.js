@@ -1,41 +1,24 @@
-// Marketplace browser mutex — serializes every sell-side operation that takes
-// over the ONE shared stealth browser / Chrome profile: a price-check comp
+// Marketplace browser lock. Every sell-side operation that takes over the one
+// shared stealth browser / Chrome profile runs through it: a price-check comp
 // scrape (`scrape-price-comps`), a single-source captcha-resolved rescrape
-// (`rescrape-source`), AND a captcha-resolve window (`resolve-captcha`, which
+// (`rescrape-source`), and a captcha-resolve window (`resolve-captcha`, which
 // closes the stealth browser to hand its userDataDir to a visible Chrome).
 //
-// WHY: all of these drive the single shared stealth browser. Without
-// serialization, a captcha-resolve on node A calls closeStealthBrowser() while
-// node B's comp scrape still has pages in flight on that same browser — every
-// one of B's pages dies with "Navigating frame was detached" and is mis-reported
-// as a per-source anti-bot block (`task-failed`). The shared Chrome profile ALSO
-// physically forbids a headless scrape while a visible captcha window holds the
-// userDataDir, so these can never truly run in parallel anyway; serializing just
-// makes the contention ORDERLY (queue + wait) instead of DESTRUCTIVE (detach +
-// false block). The user's symptom for the un-serialized version: "queue went
-// next before the previous price check was completely done."
+// These are not a separate queue. They share the profile-wide FIFO in
+// sharedProfileLock.js with the job scrapers, because job work owns a fresh
+// Chrome process while marketplace work uses the retained browser, yet both
+// touch the same userDataDir and either can close or release it for a visible
+// challenge window. Without that ordering a captcha-resolve on one node would
+// close the browser while another node's scrape still had pages in flight, and
+// every one of those pages would die with "Navigating frame was detached" and
+// be reported as a per-source anti-bot block.
 //
-// DELIBERATELY separate from the status-check queue:
-//   - statusCheckLock (buy-side listing status checks) settles on bounded fetch
-//     timeouts and must NOT wait behind an indefinite captcha-wait — see
-//     statusCheckLock.js for exactly why those two were kept apart.
-// Marketplace and job work DO share the profile FIFO below. Job scrapers own a
-// fresh Chrome PROCESS while marketplace work uses the retained browser, but
-// both touch the same userDataDir and either can close/release it for a visible
-// challenge window.
-//
-// Unlike statusCheckLock, THIS queue CAN be held across an indefinite captcha
-// wait (a resolve window the user hasn't solved/closed). That is acceptable —
-// the visible window holds the profile, so no scrape could run during it anyway,
-// and the window is on-screen and user-dismissable. To keep a wedged head from
-// trapping a still-cancellable price check, withMarketplaceBrowserLock checks the
-// caller's AbortSignal at turn-start and bails WITHOUT running fn if aborted, so
-// a cancelled price check that queued behind a long captcha-resolve never wastes
-// a scrape pass.
-//
-// Kept dependency-free (no electron / puppeteer imports) so it is unit-testable
-// in the plain-node test runner.
-//
+// The buy-side status check has its own lock (statusCheckLock.js) because it
+// settles on bounded fetch timeouts and must not wait behind an indefinite
+// captcha wait. This lock can be held across one, which is acceptable because
+// the visible window holds the profile anyway. A caller whose signal is already
+// aborted when it reaches the head of the queue is dropped without running, so a
+// cancelled price check never wastes a scrape pass.
 import { getSharedProfileLockSnapshot, withSharedProfileLock } from './sharedProfileLock.js';
 
 /**

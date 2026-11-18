@@ -2,7 +2,7 @@
  * Account voice catalogue and persona voice picking.
  * Voices come from the documented voices search endpoint; names come from voiceNames.js data.
  */
-import { classifyFailure, voiceError, redact } from './dialogueVoice.js';
+import { classifyFailure, voiceError, redact } from './voiceErrors.js';
 import { DIVERSE_POOL, NAME_POOLS, NEUTRAL_FIRST_NAMES } from './voiceNames.js';
 
 export const VOICES_URL = 'https://api.elevenlabs.io/v2/voices';

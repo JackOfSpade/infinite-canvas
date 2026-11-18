@@ -37,6 +37,7 @@ import {
   submitWorkerResponse,
   workerShadowValidator,
 } from './nonApiAi.js';
+import { CLAUDE_LIMIT_PROBE_MS } from './claudeLimitConstants.js';
 import { routedCall } from './aiCallProviders.js';
 import { configureAiRecording, recordAiReplaySample } from './aiReplaySamples.js';
 import { createShadowMeasure } from './aiShadowMeasure.js';
@@ -52,16 +53,22 @@ export const CLAUDE_TASK_USAGE_FILE = 'claude-task-usage.jsonl';
 const SAFEGUARD_ATTEMPTS = 3;
 const TRUNCATION_ATTEMPTS = 3;
 const RETRY_BASE_MS = 30_000;
-const RETRY_MAX_MS = 10 * 60_000;
-const USAGE_LIMIT_WAIT_MS = 10 * 60_000;
+const RETRY_PAUSE_MS = 10 * 60_000;
+const RETRY_MAX_MS = RETRY_PAUSE_MS;
+const USAGE_LIMIT_WAIT_MS = CLAUDE_LIMIT_PROBE_MS;
 const RESEARCH_MAX_TURNS = 16;
 const IMAGE_MAX_EDGE = 1568;
 const ACTIVITY_NOTIFY_MS = 500;
-const OFFLOAD_PAUSE_MS = 10 * 60_000;
+const OFFLOAD_PAUSE_MS = RETRY_PAUSE_MS;
 export const OFFLOAD_CREDIT_CODE = 'OFFLOAD_CREDIT_EXHAUSTED';
 // A Parallel web task waits for a limit to pass: its search has no fallback.
-const PARALLEL_PAUSE_MS = 10 * 60_000;
-const PARALLEL_TOOL_PREFIX = 'mcp__parallel__';
+const PARALLEL_PAUSE_MS = RETRY_PAUSE_MS;
+// Research runs Parallel alone. Measured 2026-11-14, two seeds, Parallel against built-in web search
+// and both together: experience bands over 12 families with two verified hosts 11 and 10 against 1 and
+// 4, together 12 and 12; salary over 12 cohorts with a verified source 12 and 9 against 4 and 4,
+// together 9 on the second seed; location cards correct 2 and 9 of 24 against 1 and 4, together 2 and
+// 8; preference research over 172 checks answered by both decided 166 confirmed / 2 conflicts / 4
+// unverified with built-in against 158 / 2 / 12 with Parallel, the same two conflicts decided.
 const BUILT_IN_WEB_TOOL_NAMES = Object.freeze(['WebSearch', 'WebFetch']);
 
 /**
@@ -72,17 +79,10 @@ const BUILT_IN_WEB_TOOL_NAMES = Object.freeze(['WebSearch', 'WebFetch']);
 export function toolSearchKind(tools) {
   const names = String(tools ?? '').split(',').map(name => name.trim()).filter(Boolean);
   return Object.freeze({
-    usesParallel: names.some(name => name.startsWith(PARALLEL_TOOL_PREFIX)),
+    usesParallel: names.some(name => isParallelToolName(name)),
     usesBuiltInWeb: names.some(name => BUILT_IN_WEB_TOOL_NAMES.includes(name)),
   });
 }
-// Research runs Parallel alone. Measured 2026-11-14, two seeds, Parallel against built-in web search
-// and both together: experience bands over 12 families with two verified hosts 11 and 10 against 1 and
-// 4, together 12 and 12; salary over 12 cohorts with a verified source 12 and 9 against 4 and 4,
-// together 9 on the second seed; location cards correct 2 and 9 of 24 against 1 and 4, together 2 and
-// 8; preference research over 172 checks answered by both decided 166 confirmed / 2 conflicts / 4
-// unverified with built-in against 158 / 2 / 12 with Parallel, the same two conflicts decided.
-
 const SEAM = Object.freeze({
   list: listWorkerHandoffs,
   read: readWorkerHandoff,
@@ -447,8 +447,7 @@ export function createClaudeTaskWorker({
         messages: handoffMessages(cached), route: route.route, reasoning: route.reasoning, tag: entry.task, signal: controller.signal,
       });
       provider = 'offload';
-    }
-    if (!reply) {
+    } else {
       const pageImages = await imagesFor(entry);
       const stage = binding();
       // Marked before the call so a failure is known to carry Claude's spend.
@@ -641,21 +640,33 @@ export function startClaudeTaskWorker({ userData, nativeImage = null, getAllWind
     standaloneTimer = setTimeout(() => { standaloneTimer = null; broadcast(claudeTaskWorkerActivity()); }, ACTIVITY_NOTIFY_MS);
     standaloneTimer.unref?.();
   };
-  subscribeStandaloneClaudeActivity(scheduleBroadcast);
-  subscribeClaudeHolds(scheduleBroadcast);
-  // A switched or limited account changes the dock and the pause notice alike.
-  subscribeClaudeAccounts(() => {
-    if (current) current.pump();
-    scheduleBroadcast();
-  });
+  const unsubscribers = [
+    subscribeStandaloneClaudeActivity(scheduleBroadcast),
+    subscribeClaudeHolds(scheduleBroadcast),
+    // A switched or limited account changes the dock and the pause notice alike.
+    subscribeClaudeAccounts(() => {
+      if (current) current.pump();
+      scheduleBroadcast();
+    }),
+  ];
   // Learn each account's email and sign-in once, so a later pause notice can name it.
   void listClaudeAccounts().catch(() => {});
-  const worker = createClaudeTaskWorker({
+  const base = createClaudeTaskWorker({
     prepareImage: attachment => prepareTaskImage(attachment, nativeImage),
     onActivityChange: snapshot => broadcast(withStandaloneActivity(snapshot)),
     onUsageLimit: reportClaudeUsageLimit,
     recordUsage: (row) => {
       if (usageFile) void fs.promises.appendFile(usageFile, `${JSON.stringify(row)}\n`, { mode: 0o600 }).catch(() => {});
+    },
+  });
+  const worker = Object.freeze({
+    ...base,
+    stop() {
+      base.stop();
+      for (const unsubscribe of unsubscribers) unsubscribe();
+      if (standaloneTimer) clearTimeout(standaloneTimer);
+      standaloneTimer = null;
+      if (current === worker) current = null;
     },
   });
   current = worker;

@@ -33,7 +33,7 @@ const NATIVE_LOGIN_COOKIE_FLUSH_MS = 2_500;      // let OAuth/session cookies re
 // have no CDP handle at all (that is the whole point: Google SSO rejects a
 // CDP-controlled browser), so their only close mechanism is SIGTERM, and
 // Chrome's POSIX SIGTERM path blocks on writing *preferences*, not on the
-// cookie store's flush. Closing a fixed NATIVE_LOGIN_COOKIE_FLUSH_MS after
+// cookie store's flush. Closing a fixed 2.5 seconds after
 // login therefore killed Chrome well inside the commit window, and everything
 // the login had just set was still only in memory.
 //   Observed: a native Indeed login window that completed Google SSO and
@@ -126,6 +126,28 @@ export function visibleWindowLaunchOptions(options = {}) {
     waitForInitialPage: false,
     args: args.includes('--no-startup-window') ? args : [...args, '--no-startup-window'],
   };
+}
+
+// The visible Puppeteer window used for login and captcha solving. Dropping
+// --enable-automation removes the automation banner and the cdc_ properties.
+function visibleAuthWindowLaunchOptions({ signal, executablePath, userDataDir }) {
+  return visibleWindowLaunchOptions({
+    signal,
+    headless: false,
+    executablePath,
+    userDataDir,
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-infobars',
+      '--window-size=1100,800',
+      '--lang=en-US,en',
+    ],
+    defaultViewport: null,
+    ignoreHTTPSErrors: true,
+  });
 }
 
 const waitForVisibleWindowNavigation = (page, timeoutMs) => new Promise(resolve => {
@@ -236,6 +258,25 @@ export const CAPTCHA_RESOLVE_CHALLENGE_SELECTORS = Object.freeze([
 // move with it or the two Chrome families silently diverge again.
 export const PUPPETEER_OSCRYPT_PARITY_ARGS = ['--password-store=basic', '--use-mock-keychain'];
 
+// Arguments for a raw-spawned (no CDP) Chrome window on the shared profile. The
+// OSCrypt parity args keep this window's cookie key aligned with every
+// Puppeteer-launched Chrome on the same userDataDir; without them this Chrome
+// derives its key from the real macOS Keychain and the two families write
+// mutually undecryptable cookies into one profile.
+export function nativeChromeLaunchArgs(userDataDir, url) {
+  return [
+    `--user-data-dir=${userDataDir}`,
+    '--profile-directory=Default',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--window-size=1100,800',
+    '--lang=en-US,en',
+    ...PUPPETEER_OSCRYPT_PARITY_ARGS,
+    ...BROWSER_SIGNIN_OFF_ARGS,
+    `--app=${url}`,
+  ];
+}
+
 /**
  * Every on-disk file Chromium may use for the profile's cookie store. Chrome has
  * moved it between <profile>/Default/Cookies and <profile>/Default/Network/Cookies
@@ -291,12 +332,14 @@ export function hasProfileCookieCommitAdvanced(baseline, current) {
  * was not enough. Heartbeats while it waits — a silent multi-second pause here
  * reads to the user as a hung window.
  */
-async function waitForNativeProfileCookieCommit(userDataDir, label) {
+export async function waitForNativeProfileCookieCommit(userDataDir, label, isCancelled = () => false) {
   const baseline = readProfileCookieStoreStamp(userDataDir);
   const startedAt = Date.now();
   let lastHeartbeat = startedAt;
   while (Date.now() - startedAt < NATIVE_LOGIN_COOKIE_COMMIT_CEILING_MS) {
+    if (isCancelled()) return { committed: false, waitedMs: Date.now() - startedAt, cancelled: true };
     await new Promise(resolve => setTimeout(resolve, NATIVE_LOGIN_COOKIE_COMMIT_POLL_MS));
+    if (isCancelled()) return { committed: false, waitedMs: Date.now() - startedAt, cancelled: true };
     if (hasProfileCookieCommitAdvanced(baseline, readProfileCookieStoreStamp(userDataDir))) {
       const waitedMs = Date.now() - startedAt;
       logger.info(`[StealthBrowser] ${label} profile cookie store checkpointed after ${waitedMs}ms — closing native window`);
@@ -310,6 +353,21 @@ async function waitForNativeProfileCookieCommit(userDataDir, label) {
   const waitedMs = Date.now() - startedAt;
   logger.warn(`[StealthBrowser] ${label} profile cookie store did not checkpoint within ${waitedMs}ms of the auth landing — closing the native window anyway; the post-close auth-cookie check reports whether the session actually persisted`);
   return { committed: false, waitedMs };
+}
+
+// Ends a native Chrome child this module spawned: SIGTERM, then SIGKILL when it
+// ignores that. warnMessage, when given, is logged before the SIGKILL.
+async function terminateNativeChrome(child, warnMessage = null) {
+  try { if (!isBrowserProcessExited(child)) child.kill('SIGTERM'); } catch { /* already gone */ }
+  let exited = await waitForBrowserProcessExit(child, NATIVE_BROWSER_TERM_EXIT_MS);
+  let disposition = 'sigterm-exit';
+  if (!exited) {
+    disposition = 'sigkill-fallback';
+    if (warnMessage) logger.warn(warnMessage);
+    try { if (!isBrowserProcessExited(child)) child.kill('SIGKILL'); } catch { /* already gone */ }
+    exited = await waitForBrowserProcessExit(child, NATIVE_BROWSER_KILL_EXIT_MS);
+  }
+  return { disposition, exited };
 }
 
 /**
@@ -365,6 +423,22 @@ export function getLastCaptchaHandoffAt() {
 const AUTH_CHALLENGE_URL_PATTERN = /captcha|splashui|\/challenge|checkpoint|__cf_chl|cf_chl_|cf-chl|\/signup|verif(y|ication)|two[-_]?step|two[-_]?factor|\/2fa|\/otp/i;
 export function isAuthChallengeUrl(url) {
   return AUTH_CHALLENGE_URL_PATTERN.test(String(url || ''));
+}
+
+const CLOUDFLARE_CHALLENGE_URL_PATTERN = /__cf_chl|cf_chl_|cf-chl/i;
+
+// Indeed's scrape URL carries the person's own search words in its query, so a
+// search for "verification engineer" must not read as a challenge page. The
+// challenge words are tested on the path; Cloudflare's tokens on the whole URL.
+function isIndeedChallengeUrl(url) {
+  const text = String(url || '');
+  let pathname = text;
+  try {
+    pathname = new URL(text).pathname;
+  } catch {
+    // An unparseable URL is tested whole.
+  }
+  return AUTH_CHALLENGE_URL_PATTERN.test(pathname) || CLOUDFLARE_CHALLENGE_URL_PATTERN.test(text);
 }
 
 // Post-login confirmation interstitials — the user IS already authenticated, but
@@ -664,7 +738,7 @@ const NATIVE_LOGIN_SUCCESS_URLS = {
 // client-rendered over an SSR shell whose <title> is the generic marketing SEO
 // string. So a logged-out load of mercari.com/mypage/listings/ has the success
 // marker in the URL but this generic title — without this gate isNativeLoginSuccess
-// false-succeeds and the window is killed (NATIVE_LOGIN_COOKIE_FLUSH_MS) before
+// false-succeeds and the window is closed on the login confirmation before
 // the user can sign in (the reported "keeps refreshing / can't complete human
 // verification" symptom). A real logged-in /mypage renders a "My Listings"-style
 // title, so this rejects the logged-out shell without blocking a real login.
@@ -1372,22 +1446,10 @@ export async function openLoginWindow(platformId, sender = null, signal = null) 
   // puppeteer and return a blank page. --disable-blink-features=AutomationControlled
   // already removes navigator.webdriver; stripping --enable-automation makes the
   // login window indistinguishable from a regular Chrome session.
-  loginBrowser = await launchVisibleWindow(`Login window (${platformId})`, url, visibleWindowLaunchOptions({
+  loginBrowser = await launchVisibleWindow(`Login window (${platformId})`, url, visibleAuthWindowLaunchOptions({
     signal,
-    headless: false,
     executablePath,
     userDataDir: await getUserDataDir(),
-    ignoreDefaultArgs: ['--enable-automation'],
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-blink-features=AutomationControlled',
-      '--disable-infobars',
-      '--window-size=1100,800',
-      '--lang=en-US,en',
-    ],
-    defaultViewport: null,
-    ignoreHTTPSErrors: true,
   }), 'login-window');
 
   // pages()/newPage() and everything through the navigate below can throw
@@ -1767,31 +1829,25 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
     userDataDir,
   });
 
-  const chromeArgs = [
-    `--user-data-dir=${userDataDir}`,
-    '--profile-directory=Default',
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--window-size=1100,800',
-    '--lang=en-US,en',
-    // See PUPPETEER_OSCRYPT_PARITY_ARGS above: without these, this raw-spawned
-    // Chrome derives its cookie OSCrypt key from the real macOS Keychain, while
-    // every Puppeteer-launched Chrome on this same userDataDir uses Chromium's
-    // static mock-keychain key — the two families would write mutually
-    // undecryptable cookies into one shared profile.
-    ...PUPPETEER_OSCRYPT_PARITY_ARGS,
-    ...BROWSER_SIGNIN_OFF_ARGS,
-    `--app=${url}`,
-  ];
+  const chromeArgs = nativeChromeLaunchArgs(userDataDir, url);
   updateAuthWindowDiagnostic(platformId, { chromeArgs });
 
-  throwIfSignalAborted(signal, 'Native login window cancelled before launch');
-  await prepareSharedBrowserProfileForLaunch(userDataDir);
-  throwIfSignalAborted(signal, 'Native login window cancelled before launch');
-  const child = spawn(nativeExecutablePath, chromeArgs, {
-    stdio: 'ignore',
-    detached: false,
-  });
+  let child;
+  try {
+    throwIfSignalAborted(signal, 'Native login window cancelled before launch');
+    await prepareSharedBrowserProfileForLaunch(userDataDir);
+    throwIfSignalAborted(signal, 'Native login window cancelled before launch');
+    child = spawn(nativeExecutablePath, chromeArgs, {
+      stdio: 'ignore',
+      detached: false,
+    });
+  } catch (err) {
+    finishAuthWindowDiagnostic(platformId, {
+      result: err?.name === 'AbortError' ? 'aborted' : 'launch-error',
+      error: err?.message || String(err),
+    });
+    throw err;
+  }
 
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -1837,15 +1893,7 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
         ? { ...pendingSuccessResult, interruptedBy: result?.result || null }
         : result;
       pendingSuccessResult = closing;
-      try { if (!isBrowserProcessExited(child)) child.kill('SIGTERM'); } catch { /* already closed */ }
-      let exited = await waitForBrowserProcessExit(child, NATIVE_BROWSER_TERM_EXIT_MS);
-      let disposition = 'sigterm-exit';
-      if (!exited) {
-        disposition = 'sigkill-fallback';
-        logger.warn(`[StealthBrowser] Native ${platformId} Chrome ignored SIGTERM — using final SIGKILL fallback`);
-        try { if (!isBrowserProcessExited(child)) child.kill('SIGKILL'); } catch { /* already closed */ }
-        exited = await waitForBrowserProcessExit(child, NATIVE_BROWSER_KILL_EXIT_MS);
-      }
+      const { disposition, exited } = await terminateNativeChrome(child, `[StealthBrowser] Native ${platformId} Chrome ignored SIGTERM — using final SIGKILL fallback`);
       await settle({ ...closing, closeDisposition: disposition, processExitObserved: exited });
     };
 
@@ -1871,10 +1919,10 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
       reject(error);
     });
 
-    child.once('exit', (code, signal) => {
-      logger.info(`[StealthBrowser] Native Chrome login window for ${platformId} exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`);
+    child.once('exit', (code, exitSignal) => {
+      logger.info(`[StealthBrowser] Native Chrome login window for ${platformId} exited (code=${code ?? 'null'}, signal=${exitSignal ?? 'null'})`);
       if (nativeCloseInFlight) return;
-      settle(pendingSuccessResult || { result: 'closed', exitCode: code, signal });
+      settle(pendingSuccessResult || { result: 'closed', exitCode: code, signal: exitSignal });
     });
 
     const runNativePoll = createNonOverlappingRunner(async () => {
@@ -1932,7 +1980,7 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
         // The poll interval and the open-window ceiling are both disarmed above,
         // so an unhandled rejection here would leave the window open with
         // nothing left to close it. Close on the confirmed login regardless.
-        void waitForNativeProfileCookieCommit(userDataDir, platformId).then(({ committed, waitedMs }) => {
+        void waitForNativeProfileCookieCommit(userDataDir, platformId, () => settled).then(({ committed, waitedMs }) => {
           if (settled) return;
           void requestNativeClose({ ...pendingSuccessResult, cookieFlushMs: waitedMs, cookieFlushPhase: 'pre-close-checkpoint', cookieStoreCommitted: committed });
         }).catch(error => {
@@ -2041,6 +2089,8 @@ export function nativeIndeedChallengeIsStalled({ classification, unchangedForMs,
     && unchangedForMs >= NATIVE_CHALLENGE_STALL_MS;
 }
 
+const NATIVE_INDEED_CHALLENGE_TITLE = /just a moment|additional verification required|verify you are human|checking your browser|cloudflare/i;
+
 export function isNativeIndeedChallengeHardBlock(url, title = '') {
   if (!isStrictIndeedHttpsUrl(url)) return false;
   return /security check|attention required|access denied|request blocked/i.test(String(title || ''));
@@ -2050,15 +2100,15 @@ export function isNativeIndeedChallengeCleared(url, title = '') {
   const lowerUrl = String(url || '').toLowerCase();
   const lowerTitle = String(title || '').toLowerCase().trim();
   if (!isStrictIndeedHttpsUrl(url) || !lowerTitle) return false;
-  if (isAuthChallengeUrl(lowerUrl) || isLoginUrlPath(lowerUrl)) return false;
+  if (isIndeedChallengeUrl(lowerUrl) || isLoginUrlPath(lowerUrl)) return false;
   if (isNativeIndeedChallengeHardBlock(url, title)) return false;
-  return !/just a moment|additional verification required|verify you are human|checking your browser|cloudflare/i.test(lowerTitle);
+  return !NATIVE_INDEED_CHALLENGE_TITLE.test(lowerTitle);
 }
 
 export function isNativeIndeedChallengePending(url, title = '') {
   if (!isStrictIndeedHttpsUrl(url)) return false;
-  return isAuthChallengeUrl(url)
-    || /just a moment|additional verification required|verify you are human|checking your browser|cloudflare/i.test(String(title || '').toLowerCase());
+  return isIndeedChallengeUrl(url)
+    || NATIVE_INDEED_CHALLENGE_TITLE.test(String(title || '').toLowerCase());
 }
 
 /** A compact classification shared by the live poll and its exit fallback. */
@@ -2209,38 +2259,40 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
     const userDataDir = await getUserDataDir();
     const cookieStoreBaseline = readProfileCookieStoreStamp(userDataDir);
     const executablePath = await findGoogleSafeChromePath(await findSystemChromePath() ?? await findChromePath());
-    const chromeArgs = [
-      `--user-data-dir=${userDataDir}`,
-      '--profile-directory=Default', '--no-first-run', '--no-default-browser-check',
-      '--window-size=1100,800', '--lang=en-US,en',
-      // See PUPPETEER_OSCRYPT_PARITY_ARGS above — keeps this raw-spawned native
-      // window's cookie OSCrypt key aligned with the Puppeteer scrape browser
-      // that shares this same userDataDir.
-      ...PUPPETEER_OSCRYPT_PARITY_ARGS,
-      ...BROWSER_SIGNIN_OFF_ARGS,
-      `--app=${url}`,
-    ];
+    const chromeArgs = nativeChromeLaunchArgs(userDataDir, url);
     logger.info(`[StealthBrowser] Opening native Chrome challenge handoff for Indeed (no CDP, executable: ${executablePath}, profile: ${userDataDir}): ${url}`);
     const diagnosticPlatformId = 'indeed-native-challenge';
+    const initialChallengePending = isNativeIndeedChallengePending(url);
+    const initialNativeChallenge = {
+      initialChallengeObserved: !!challengeObserved || initialChallengePending,
+      initialSignal: challengeObserved ? 'caller-observed' : (initialChallengePending ? 'url-or-title' : null),
+      pollCount: 0,
+      pollErrorCount: 0,
+      lastPollAt: null,
+      lastClassification: 'unknown',
+      sawFirstPartyTab: false,
+      firstPollError: null,
+      lastTabUrl: null,
+      lastTabTitle: null,
+      terminalSource: null,
+      postCloseVerify: null,
+    };
     updateAuthWindowDiagnostic(diagnosticPlatformId, {
       mode: 'native-chrome', loginUrl: url, currentUrl: url, executable: executablePath, userDataDir, chromeArgs,
-      nativeChallenge: {
-        initialChallengeObserved: !!challengeObserved || isNativeIndeedChallengePending(url),
-        initialSignal: challengeObserved ? 'caller-observed' : (isNativeIndeedChallengePending(url) ? 'url-or-title' : null),
-        pollCount: 0,
-        pollErrorCount: 0,
-        lastPollAt: null,
-        lastClassification: 'unknown',
-        sawFirstPartyTab: false,
-        firstPollError: null,
-        lastTabUrl: null,
-        lastTabTitle: null,
-        terminalSource: null,
-        postCloseVerify: null,
-      },
+      nativeChallenge: { ...initialNativeChallenge },
     });
-    await prepareSharedBrowserProfileForLaunch(userDataDir);
-    const child = spawn(executablePath, chromeArgs, { stdio: 'ignore', detached: false });
+    let child;
+    try {
+      await prepareSharedBrowserProfileForLaunch(userDataDir);
+      child = spawn(executablePath, chromeArgs, { stdio: 'ignore', detached: false });
+    } catch (err) {
+      finishAuthWindowDiagnostic(diagnosticPlatformId, {
+        result: err?.name === 'AbortError' ? 'aborted' : 'launch-error',
+        error: err?.message || String(err),
+        mode: 'native-chrome',
+      });
+      throw err;
+    }
     return await new Promise((resolve, reject) => {
       let settled = false;
       let poll = null;
@@ -2250,20 +2302,7 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
       let cleanSince = 0;
       let cleanObservation = null;
       let trackedTabIdentity = null;
-      let nativeChallenge = {
-        initialChallengeObserved: observedChallenge,
-        initialSignal: challengeObserved ? 'caller-observed' : (observedChallenge ? 'url-or-title' : null),
-        pollCount: 0,
-        pollErrorCount: 0,
-        lastPollAt: null,
-        lastClassification: 'unknown',
-        sawFirstPartyTab: false,
-        firstPollError: null,
-        lastTabUrl: null,
-        lastTabTitle: null,
-        terminalSource: null,
-        postCloseVerify: null,
-      };
+      let nativeChallenge = { ...initialNativeChallenge };
       let nativeCloseInFlight = false;
       let childExitObserved = false;
       let unregisterShutdownCloser = () => {};
@@ -2333,14 +2372,7 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
       const requestNativeClose = async (result) => {
         if (settled || nativeCloseInFlight || childExitObserved) return;
         nativeCloseInFlight = true;
-        try { if (!isBrowserProcessExited(child)) child.kill('SIGTERM'); } catch { /* already gone */ }
-        let exited = await waitForBrowserProcessExit(child, NATIVE_BROWSER_TERM_EXIT_MS);
-        let disposition = 'sigterm-exit';
-        if (!exited) {
-          disposition = 'sigkill-fallback';
-          try { if (!isBrowserProcessExited(child)) child.kill('SIGKILL'); } catch { /* already gone */ }
-          exited = await waitForBrowserProcessExit(child, NATIVE_BROWSER_KILL_EXIT_MS);
-        }
+        const { disposition, exited } = await terminateNativeChrome(child);
         await settle({ ...result, closeDisposition: disposition, processExitObserved: exited });
       };
       const onSenderDestroyed = () => {
@@ -2368,7 +2400,7 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
         finishAuthWindowDiagnostic(diagnosticPlatformId, { result: 'launch-error', error: error?.message || String(error), mode: 'native-chrome' });
         reject(error);
       });
-      child.once('exit', (code, signal) => {
+      child.once('exit', (code, exitSignal) => {
         if (nativeCloseInFlight) return;
         childExitObserved = true;
         // Freeze the evidence at the lifecycle boundary. An in-flight
@@ -2401,7 +2433,7 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
           updateNativeChallenge({
             terminalSource: exitDisposition.terminalSource,
             exitCode: code ?? null,
-            exitSignal: signal ?? null,
+            exitSignal: exitSignal ?? null,
             postCloseVerify,
           });
           if (cleanWasAffirmative) {
@@ -2576,7 +2608,7 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
           // handoff: a rejection here would leave the promise pending forever —
           // an un-cancellable Solve holding the shared browser profile. Close on
           // the observed clearance anyway and report the checkpoint failure.
-          void waitForNativeProfileCookieCommit(userDataDir, 'indeed challenge handoff').then(({ committed, waitedMs }) => {
+          void waitForNativeProfileCookieCommit(userDataDir, 'indeed challenge handoff', () => settled).then(({ committed, waitedMs }) => {
             if (settled) return;
             void requestNativeClose({
               result: 'cleared', currentUrl: tab.url, title: tab.title,
@@ -2684,22 +2716,10 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     await closeStealthBrowser();
     logger.info('[StealthBrowser] Captcha window: stealth browser closed — launching visible window');
 
-    captchaBrowser = await launchVisibleWindow('Captcha-resolve window', url, visibleWindowLaunchOptions({
+    captchaBrowser = await launchVisibleWindow('Captcha-resolve window', url, visibleAuthWindowLaunchOptions({
       signal,
-      headless: false,
       executablePath,
       userDataDir: await getUserDataDir(),
-      ignoreDefaultArgs: ['--enable-automation'],
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-infobars',
-        '--window-size=1100,800',
-        '--lang=en-US,en',
-      ],
-      defaultViewport: null,
-      ignoreHTTPSErrors: true,
     }), 'captcha-resolve-window');
   } catch (err) {
     releaseProfileReservation?.();

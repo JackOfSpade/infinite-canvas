@@ -3,6 +3,10 @@
  * One WebSocket per utterance, one registered voice, PCM audio at the account's rate.
  * Every dependency (WebSocket class, clock, key) is injected; nothing is logged.
  */
+import { VOICE_ERROR_CODES, voiceError, isAuthText, isQuotaText, classifyFailure, redact } from './voiceErrors.js';
+
+export { VOICE_ERROR_CODES, voiceError, isAuthText, isQuotaText, classifyFailure, redact };
+
 export const MODEL_ID = 'eleven_v4_turbo';
 // Stability runs 0 to 1 and defaults to 0.5 when nothing is sent; lower values give the voice a
 // broader emotional range, which is what makes delivery tags audible. 0.3 leans expressive
@@ -17,16 +21,7 @@ export const FALLBACK_RATE = 24000;
 // The server drops a connection after 20 s of silence; stay well below it.
 export const KEEP_ALIVE_MS = 15000;
 
-export const VOICE_ERROR_CODES = Object.freeze(['voice-auth', 'voice-quota', 'voice-network', 'voice-protocol']);
-
 export const outputFormat = rate => `pcm_${rate}`;
-
-export function voiceError(code, message, extra = {}) {
-  const error = new Error(message);
-  error.code = VOICE_ERROR_CODES.includes(code) ? code : 'voice-protocol';
-  Object.assign(error, extra);
-  return error;
-}
 
 // ElevenLabs refuses pcm_44100 below Pro with 403 subscription_required "only available on
 // the Pro tier and above" (verified live on Starter, 2026-11-08). Asking anyway costs the
@@ -58,12 +53,8 @@ export async function fetchSubscriptionTier({ fetch = globalThis.fetch, key, url
   return String(body?.tier ?? '').trim();
 }
 
-const AUTH_WORDS = /(invalid|missing|expired|incorrect).?(api.?key|token)|unauthor|authentication|not.?(authorised|authorized)|permission/i;
-const QUOTA_WORDS = /quota|credit|rate.?limit|usage.?limit|too.?many.?requests/i;
 const RATE_WORDS = /output.?format|pcm|sample.?(rate|frequency)|44\.?1|44100|48.?k|unsupported.?format/i;
 
-export const isAuthText = text => AUTH_WORDS.test(String(text ?? ''));
-export const isQuotaText = text => QUOTA_WORDS.test(String(text ?? ''));
 export const isRateRejection = ({ code, reason, message } = {}) => {
   const text = `${reason ?? ''} ${message ?? ''}`;
   if (isAuthText(text) || isQuotaText(text)) return false;
@@ -71,29 +62,11 @@ export const isRateRejection = ({ code, reason, message } = {}) => {
   return RATE_WORDS.test(text);
 };
 
-/** Maps an HTTP failure, close reason or server error frame onto the small code set. */
-export function classifyFailure({ status, reason, message, code } = {}) {
-  if (status === 401 || status === 403) return isQuotaText(message) ? 'voice-quota' : 'voice-auth';
-  if (status === 429) return 'voice-quota';
-  const text = `${reason ?? ''} ${message ?? ''}`;
-  if (isQuotaText(text)) return 'voice-quota';
-  if (isAuthText(text)) return 'voice-auth';
-  if (!status && (code === 1006 || code === 1005)) return 'voice-network';
-  return 'voice-protocol';
-}
-
 function statusError(response, prefix, key) {
   const status = Number(response?.status) || 0;
   const code = classifyFailure({ status, message: '' });
   const detail = status ? ` (HTTP ${status})` : '';
   return voiceError(code, redact(`${prefix}${detail}`, key), { status });
-}
-
-/** Never let the API key reach an error message. */
-export function redact(value, key) {
-  const text = String(value ?? '');
-  if (!key) return text;
-  return text.split(String(key)).join('[redacted]');
 }
 
 const roundMs = value => Math.round(Number(value) * 10) / 10;

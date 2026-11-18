@@ -1,6 +1,6 @@
+/** Pure correction mechanics. The shared kind table remains in applicationWriteVerify. */
 import { normalizeBoundDocumentText } from './pasteApplicationAssembly.js';
 import { isUnsafeControlCharacter } from './structuredResume.js';
-/** Pure correction mechanics. The shared kind table remains in applicationWriteVerify. */
 import { createHash } from 'node:crypto';
 import { WRITE_VERIFY_UNIT_KINDS } from './applicationWriteVerify.js';
 import { boundedDetailValue } from './coverLetterChecks.js';
@@ -58,9 +58,9 @@ export function applicationUnitRegistry(documents) {
 }
 export const unitDigest = row => digest(row.fields);
 export const structuredDocumentDigest = documents => digest({ resume: documents?.resume, coverLetter: documents?.coverLetter });
-export function diffUnits(before, after) {
+export function diffUnits(before, after, afterRegistry = null) {
   const a = new Map(applicationUnitRegistry(before).rows.map(row => [row.id, row]));
-  const b = new Map(applicationUnitRegistry(after).rows.map(row => [row.id, row]));
+  const b = new Map((afterRegistry || applicationUnitRegistry(after)).rows.map(row => [row.id, row]));
   return { changed: [...a].filter(([id, row]) => b.has(id) && !same(row.fields, b.get(id).fields)).map(([id]) => id),
     removed: [...a.keys()].filter(id => !b.has(id)), added: [...b.keys()].filter(id => !a.has(id)) };
 }
@@ -148,12 +148,16 @@ export function mergeUnitPatches(documents, patches, { open = [], registry = app
   }
   // Resolve only explicit rebindings or a formerly bound bullet that changed.
   // This copies the host-owned current bullet; it never invents argument text.
+  // Argument evidence is the only thing this loop edits and bullet rows do not
+  // read it, so one registry serves both slots.
+  let bulletRows = null;
   for (const slot of ['primary', 'secondary']) {
     const item = next.coverLetter?.coverLetterArgument?.[`${slot}Evidence`];
     if (!item) continue;
     const requested = explicitBindings.get(slot), bulletId = requested?.bullet || bindings[slot];
     if (!bulletId) continue;
-    const bullet = applicationUnitRegistry(next).rows.find(row => row.kind === 'bullet' && row.id === bulletId);
+    bulletRows ||= applicationUnitRegistry(next).rows.filter(row => row.kind === 'bullet');
+    const bullet = bulletRows.find(row => row.id === bulletId);
     if (!bullet) {
       const removed = removedBullets.find(row => row.id === bulletId);
       if (removed) add('bound', bulletId, removed.index, `patches[${removed.index}] removes bullet ${own(bulletId)}, which @argument.${slot} is bound to; patch ${own(`@argument.${slot}`)} to a different bullet in the same answer.`);
@@ -190,7 +194,7 @@ export function mergeUnitPatches(documents, patches, { open = [], registry = app
     }
   }
   if (errors.length) return refused();
-  const difference = diffUnits(documents, next);
+  const difference = diffUnits(documents, next, finalRegistry);
   return { documents: next, changed: difference.changed, removed: difference.removed, errors };
 }
 

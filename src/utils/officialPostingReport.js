@@ -55,13 +55,12 @@ export function collectOfficialPostingReport(nodes, { flat = false } = {}) {
       const raw = node.data?.officialPosting;
       const posting = normalizeOfficialPosting(raw);
       const status = officialPostingLookupStatus(posting);
-      // Below the fit threshold, no automatic lookup is a decision rather than a failed
-      // one, and the same goes for a lookup left unfinished from before the gate.
-      const notResearched = (raw == null || status.state === 'incomplete') && classifyResearchEligibility(node.data) !== RESEARCH_ELIGIBILITY.eligible
-        && (typeof node.data?.matchScore === 'number' || typeof node.data?.scoreStatus === 'string');
       // Matches the Board's Retry count, which never includes a job below the threshold.
       const belowGate = (typeof node.data?.matchScore === 'number' || typeof node.data?.scoreStatus === 'string')
         && classifyResearchEligibility(node.data) !== RESEARCH_ELIGIBILITY.eligible;
+      // Below the fit threshold, no automatic lookup is a decision rather than a failed
+      // one, and the same goes for a lookup left unfinished from before the gate.
+      const notResearched = (raw == null || status.state === 'incomplete') && belowGate;
       rows.push(sanitizeOfficialPostingReportRow({ id: node.id,
         record: posting ? 'valid' : raw == null ? 'absent' : 'invalid',
         level: posting?.level, outcome: posting?.outcome, state: notResearched ? 'not-researched' : status.state,

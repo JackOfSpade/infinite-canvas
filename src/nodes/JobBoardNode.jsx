@@ -750,10 +750,15 @@ function selectedRunsMatchExpected(modules, expectedSourceRuns) {
   });
 }
 
-// A combine signature identifies the input payload, but not the Job Search run
-// that produced it. Retain a compact exact-run index alongside the signature so
-// a later manual Clear cannot accidentally certify a newer run from the same
-// hub whose board state had not caught up yet.
+// Request for compiling career data from dropped, picked or canvas files: each
+// file is { path, name? }, and a file without a name is shown by its path's last segment.
+function careerFileRequest(files) {
+  return {
+    filePaths: files.map(file => file.path),
+    fileNames: files.map(file => file.name || file.path.split(/[\\/]/u).pop() || file.path),
+  };
+}
+
 /**
  * Job Board Module — orchestrator for the connected job-search pipeline. It
  * owns scan selection and queue admission, asks each selected Job Search module
@@ -1154,7 +1159,8 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             runId: manual.runId,
             // Cleanup-only manual markers intentionally stop reserving their
             // completed Search inputs. Include that ownership boundary in the
-            // wake key so a recovered Board that yielded to this Combine gets
+            // wake key so a recovered Board that yielded to this Combine is
+            // woken when that marker is retired.
             retirementPending: manual.retirementPending === true,
             startedAt: manualStartedAt,
             combineInputSignature: manual.combineInputSignature || '',
@@ -6610,7 +6616,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           if (activeCombineManualAiRunRef.current === active) activeCombineManualAiRunRef.current = null;
           compensationRequestIdRef.current = null;
           setCompensationProgress(null);
-    setCombineResearchProgress(null);
+          setCombineResearchProgress(null);
           setCombining(false);
           setRecoveryError(SAVED_HANDOFF_READY_MESSAGE);
           EventLogger.log(`[JobBoard] Pause & save acknowledged id=${id} run=${detail.runId}`);
@@ -7290,10 +7296,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
 
   const handleCareerOverrideDrop = useCallback((event) => {
     const files = filesToDropPayloads(event?.dataTransfer?.files);
-    void compileCareerOverride({
-      filePaths: files.map(file => file.path),
-      fileNames: files.map(file => file.name || file.path.split(/[\\/]/u).pop()),
-    });
+    void compileCareerOverride(careerFileRequest(files));
   }, [compileCareerOverride]);
 
   const handleCareerOverridePick = useCallback((event) => {
@@ -7301,10 +7304,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const files = filesToDropPayloads(input?.files);
     if (input) input.value = '';
     if (files.length === 0) return;
-    void compileCareerOverride({
-      filePaths: files.map(file => file.path),
-      fileNames: files.map(file => file.name || file.path.split(/[\\/]/u).pop()),
-    });
+    void compileCareerOverride(careerFileRequest(files));
   }, [compileCareerOverride]);
 
   const handleCareerOverrideOpenCanvasFiles = useCallback((event) => {
@@ -7334,10 +7334,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     }
     setCareerCanvasOpen(false);
     setCareerCanvasError(null);
-    void compileCareerOverride({
-      filePaths,
-      fileNames: filePaths.map(path => path.split(/[\\/]/u).pop() || path),
-    });
+    void compileCareerOverride(careerFileRequest(filePaths.map(path => ({ path }))));
   }, [careerCanvasSelections, compileCareerOverride, getNodes]);
 
   // A canvas document node dragged onto this Board (resolved and gated in
@@ -7347,10 +7344,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       if (e.detail?.hubId !== id || e.detail?.hubType !== 'jobboard') return;
       const files = (e.detail?.files || []).filter(file => typeof file?.filePath === 'string' && file.filePath);
       if (files.length === 0) return;
-      void compileCareerOverride({
-        filePaths: files.map(file => file.filePath),
-        fileNames: files.map(file => file.filename || file.filePath.split(/[\\/]/u).pop() || file.filePath),
-      });
+      void compileCareerOverride(careerFileRequest(files.map(file => ({ path: file.filePath, name: file.filename }))));
     };
     document.addEventListener('canvas-file-nodes-dropped-on-hub', handler);
     return () => document.removeEventListener('canvas-file-nodes-dropped-on-hub', handler);
@@ -7386,13 +7380,13 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   const preferenceOverrideView = jobBoardPreferenceOverrideView(data);
   const handlePreferenceOverrideApply = useCallback(async (brief) => {
     updateGlobal(id, node => ({ jobBoardPreferenceOverride: applyJobBoardPreferenceBrief(node?.data, brief) }));
-    await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+    await waitForRendererCommitFrame();
     return handleCombine({ preferencesJustApplied: true });
   }, [handleCombine, id, updateGlobal]);
   const handlePreferenceOverrideClear = useCallback(async () => {
     updateGlobal(id, { jobBoardPreferenceOverride: null });
     addToast({ title: 'Board preferences cleared', description: 'This Board goes back to each search’s own rules.', type: 'info' });
-    await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+    await waitForRendererCommitFrame();
     const live = liveCombineInputs(id, getNodes(), getEdges());
     if (live.completed.length === 0) return { status: 'not-ready' };
     if (live.ready.length > 0) return handleCombine({ preferencesJustApplied: true });

@@ -8,12 +8,10 @@
 // scraped-evidence test and the stored-view reader so this stays unit-testable.
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { listingSourceTier } from './officialSourceHosts.js';
-import { BOARD_ID_RE, listingStateRank, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialResearchSettled } from './officialPostingFields.js';
+import { BOARD_ID_RE, OFFICIAL_LEVELS, TEXT_LEVELS, listingStateRank, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialResearchSettled } from './officialPostingFields.js';
 import { canonicalLeadUrl } from './officialPostingMatch.js';
 import { officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
 
-const TEXT_LEVELS = new Set(['L1', 'L2', 'L3']);
-const OFFICIAL_LINK_LEVELS = new Set(['L1', 'L2', 'L3', 'L4']);
 const MAX_TELEMETRY_BOARDS = 24;
 const COUNT_FIELDS = Object.freeze(['detected', 'keptOfficial', 'keptUnchecked', 'dropped']);
 
@@ -27,7 +25,7 @@ export const BOARD_CLOSED_DISPOSITIONS = Object.freeze({
   droppedOfficialClosed: 'dropped-official-closed',
 });
 
-export function boardClosedOf(job) { return normalizeBoardClosed(job?.boardClosed); }
+function boardClosedOf(job) { return normalizeBoardClosed(job?.boardClosed); }
 export function isBoardClosedRow(job) { return boardClosedOf(job) !== null; }
 
 /** The two liveness fields are replaced together so an old close cannot survive a fresh visit. */
@@ -104,7 +102,7 @@ async function officialTextIsEvidence(row, { getView, minChars, requireSemantic 
 /** A verified open official posting elsewhere outranks a closed verdict from this page. The same page cannot outrank itself. */
 export function officialPostingOutranksClosedPage(row, closedPageUrl = '') {
   const posting = normalizeOfficialPosting(row?.officialPosting);
-  if (!posting || !OFFICIAL_LINK_LEVELS.has(posting.level) || !['found', 'link-only'].includes(posting.outcome)
+  if (!posting || !OFFICIAL_LEVELS.has(posting.level) || !['found', 'link-only'].includes(posting.outcome)
     || !officialPostingSemanticProofMatches(row, posting)) return false;
   const closed = canonicalLeadUrl(closedPageUrl);
   return !closed || ![posting.sourceUrl, posting.officialApplyUrl].some(url => url && canonicalLeadUrl(url) === closed);
@@ -136,7 +134,7 @@ export async function settleBoardClosedRows(rows, {
     const live = Boolean(posting) && ['found', 'link-only'].includes(posting.outcome);
     // The official posting outranks a board's closed verdict. Before scoring (getView supplied) a row with no text to
     // score waits rather than being scored on nothing; it is not retired, so the official posting can still bring it back.
-    if (live && OFFICIAL_LINK_LEVELS.has(posting.level)) {
+    if (live && OFFICIAL_LEVELS.has(posting.level)) {
       if (typeof getView !== 'function' || scrapedOk || (TEXT_LEVELS.has(posting.level) && await officialTextIsEvidence(row, { getView, minChars, requireSemantic }))) {
         keep(row, BOARD_CLOSED_DISPOSITIONS.keptOfficial);
       } else dropped.push({ row, disposition: BOARD_CLOSED_DISPOSITIONS.deferredUnchecked });

@@ -10,6 +10,16 @@ const QUERY_GROUP_KEYS = [
   'skillsOnlyQueries',
 ];
 
+// Adds the normalized query unless it is empty or already seen, ignoring case.
+function appendDistinctQuery(seen, out, raw) {
+  const query = normalizeJobSearchQuery(raw);
+  if (!query) return;
+  const identity = query.toLowerCase();
+  if (seen.has(identity)) return;
+  seen.add(identity);
+  out.push(query);
+}
+
 /**
  * A Job Preferences plan that produced `titles` (always worked out by the AI
  * from the brief + career profile, with any title the user wrote in the brief
@@ -23,13 +33,9 @@ const QUERY_GROUP_KEYS = [
 export function buildPinnedTitleQueryBundle(titles) {
   const seen = new Set();
   const targetRoleQueries = [];
+  // A repeated title (e.g. AI-generated "Backend Engineer" twice) is kept once.
   for (const raw of Array.isArray(titles) ? titles : []) {
-    const role = normalizeJobSearchQuery(raw);
-    if (!role) continue;
-    const identity = role.toLowerCase();
-    if (seen.has(identity)) continue; // e.g. AI-generated "Backend Engineer" twice
-    seen.add(identity);
-    targetRoleQueries.push(role);
+    appendDistinctQuery(seen, targetRoleQueries, raw);
   }
   return {
     targetRoleQueries,
@@ -93,14 +99,7 @@ export function flattenJobSearchQueries(queryBundle) {
   for (const key of QUERY_GROUP_KEYS) {
     const group = queryBundle?.[key];
     if (!Array.isArray(group)) continue;
-    for (const value of group) {
-      const query = normalizeJobSearchQuery(value);
-      if (!query) continue;
-      const identity = query.toLowerCase();
-      if (seen.has(identity)) continue;
-      seen.add(identity);
-      queries.push(query);
-    }
+    for (const value of group) appendDistinctQuery(seen, queries, value);
   }
 
   return queries;

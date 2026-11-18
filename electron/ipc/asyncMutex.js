@@ -1,29 +1,22 @@
-// Shared FIFO async-mutex factory backing sharedProfileLock.js,
-// marketplaceBrowserLock.js, and statusCheckLock.js — three near-identical
-// hand-rolled implementations of the same pattern, kept in sync by hand
-// until now. See each of those files for WHY they're separate queues.
+// FIFO async-mutex factory. Each caller (sharedProfileLock.js, statusCheckLock.js,
+// jobRoleScreenVerdicts.js, listingLivenessCalibration.js) creates its own
+// queue from it, so unrelated work never waits behind another queue.
 //
-// Kept dependency-free (no electron / puppeteer imports — AsyncLocalStorage
-// is a plain Node core built-in) so it stays unit-testable in the plain-node
-// test runner.
+// Kept dependency-free (no electron or puppeteer imports; AsyncLocalStorage is
+// a Node core module) so it stays unit-testable in the plain-node test runner.
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 /**
  * Create one FIFO mutex: `withLock(fn, signal?)` runs `fn` exclusively with
  * respect to every other call through the SAME returned `withLock`, in FIFO
- * order. A rejected (or resolved) `fn` does NOT wedge the queue — the next
+ * order. A rejected (or resolved) `fn` does NOT wedge the queue: the next
  * caller still runs.
  *
- * Reentrancy guard: the original per-file implementations had no defense
- * against `withLock` being called again from within its own `fn` (directly,
- * or transitively through something `fn` awaits) — that reassigns the tail
- * to a promise that depends on the very `fn()` call the nested call would
- * then wait behind, deadlocking forever with no error and no timeout. One
- * caller (jobs.js) already hit this once and worked around it purely by
- * convention/comment ("we must NOT nest withSharedProfileLock calls") rather
- * than the lock itself being safe. AsyncLocalStorage marks every async
- * frame spawned inside a critical section, so a reentrant call throws a
- * clear error instead of hanging.
+ * Reentrancy guard: calling `withLock` again from within its own `fn`
+ * (directly, or through something `fn` awaits) would make the nested call wait
+ * behind the very `fn` that is waiting for it, a deadlock with no error and no
+ * timeout. AsyncLocalStorage marks every async frame spawned inside a critical
+ * section, so a reentrant call throws a clear error instead of hanging.
  *
  * @param {object} [opts]
  * @param {string} [opts.name] — used in error/log messages (e.g. 'sharedProfileLock')

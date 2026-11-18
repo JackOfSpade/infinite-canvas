@@ -4,7 +4,7 @@ import { officialPostingAliases, officialPostingRecordMatchesScrapedIdentity } f
 import { getOfficialPostingStore, mergeOfficialPostingTelemetry, resolveOfficialPostings } from './officialPostingService.js';
 import { fetchOfficialPosting } from './officialPostingFetch.js';
 import { unresolvedOfficialPosting } from './officialPostingResolver.js';
-import { normalizeAlternateListings, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialHttpsUrl, officialPostingAfterRepeatAttempt, officialPostingLookupStatus, officialPostingCitedLeadUrls } from './officialPostingFields.js';
+import { OFFICIAL_LEVELS, TEXT_LEVELS, normalizeAlternateListings, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialHttpsUrl, officialPostingAfterRepeatAttempt, officialPostingLookupStatus, officialPostingCitedLeadUrls } from './officialPostingFields.js';
 import { checkListingForGeneration, checkPostingVariantsForGeneration, decideGenerationListingCheck, normalizeListingAudit, recordGenerationFallbackHold } from './listingLivenessProbe.js';
 import { normaliseJobPostingVariants } from './applicationBundle.js';
 import { callLLMText } from './llm.js';
@@ -17,8 +17,6 @@ const MAX_PREPARED_RECORDS = 128;
 const MAX_PREPARED_BYTES = 32 * 1024 * 1024;
 const STORE_DRAIN_TIMEOUT_MS = 2_000;
 const prepared = new Map();
-const officialLevels = new Set(['L1', 'L2', 'L3', 'L4']);
-const textLevels = new Set(['L1', 'L2', 'L3']);
 const aliasesOf = job => officialPostingAliases(job).sort();
 function errorWithCode(code) { return Object.assign(new Error(code), { code }); }
 function active(signal) { if (signal?.aborted) throw signal.reason || errorWithCode('worker-aborted'); }
@@ -131,7 +129,7 @@ export function getPreparedOfficialPosting(resolutionId, scrapedJob, { now = Dat
     || JSON.stringify(aliasesOf(scrapedJob)) !== JSON.stringify(record.aliases)) return null;
   try { if (record.inputHash !== officialPostingSemanticInputHash(scrapedJob)) return null; }
   catch { return null; }
-  if (officialLevels.has(record.officialPosting.level) && !officialPostingSemanticProofMatches(scrapedJob, record.officialPosting)) return null;
+  if (OFFICIAL_LEVELS.has(record.officialPosting.level) && !officialPostingSemanticProofMatches(scrapedJob, record.officialPosting)) return null;
   return structuredClone(record);
 }
 
@@ -252,12 +250,12 @@ export async function prepareOfficialPostingForGeneration(args, {
         resolvedTelemetry = mergeOfficialPostingTelemetry(resolvedTelemetry, resolved.telemetry);
         active(controller.signal);
         const posting = normalizeOfficialPosting(resolved.jobs[0]?.officialPosting);
-        if (!posting || officialLevels.has(posting.level) && (!officialPostingSemanticProofMatches(scrapedJob, posting)
+        if (!posting || OFFICIAL_LEVELS.has(posting.level) && (!officialPostingSemanticProofMatches(scrapedJob, posting)
           || !/^[a-f0-9]{64}$/u.test(posting.semanticMatch?.sourceHash))) {
           return unresolvedOfficialPosting(scrapedJob, { outcome: 'failed', trail: ['comparative-invalid'] });
         }
         return { officialPosting: posting, postedBy: resolved.jobs[0].postedBy, resolvedFresh: true,
-          description: textLevels.has(posting.level) && posting.contentHash ? await store.readText(posting.contentHash) : undefined };
+          description: TEXT_LEVELS.has(posting.level) && posting.contentHash ? await store.readText(posting.contentHash) : undefined };
       };
       const boundRecord = record && officialPostingRecordMatchesScrapedIdentity(scrapedJob, record) ? record : null;
       const cachedPosting = normalizeOfficialPosting(boundRecord?.officialPosting);

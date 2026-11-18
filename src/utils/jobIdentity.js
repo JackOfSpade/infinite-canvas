@@ -10,7 +10,7 @@
  *     (post-Solve resolve items, the late USAJobs append) — anything the
  *     backend would have collapsed had it arrived in the main gather must
  *     collapse the same way when it arrives late. The backend's own
- *     cross-source dedup (jobs.js dedupJobsAcrossSources, below) additionally
+ *     cross-source dedup (dedupJobsAcrossSources, below, which jobs.js wraps) additionally
  *     considers location — see dedupJobsAcrossSources for why title+company
  *     alone over-collapses distinct same-title/company reqs in different
  *     cities.
@@ -159,7 +159,7 @@ function normalizedNativeIdOrNull(job) {
 // an untrusted host cannot claim ZipRecruiter's `jid` identity.
 function sourceListingIdentityKey(job) {
   const source = keyPart(job?.source);
-  const rawUrl = String(job?.source === 'google' ? (job?.googleCardUrl || job?.url) : job?.url || '').trim();
+  const rawUrl = String((job?.source === 'google' ? (job?.googleCardUrl || job?.url) : job?.url) || '').trim();
   const parsed = parsedHttpUrlOrNull(rawUrl);
   const host = parsed?.hostname?.toLowerCase() || '';
   // ZipRecruiter's two first-party host spellings can serve the same jid. Keep

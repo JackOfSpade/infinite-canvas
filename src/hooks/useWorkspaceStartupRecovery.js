@@ -68,7 +68,7 @@ export function useWorkspaceStartupRecovery({ canvasFilePath, rootNodes, hydrate
         watchUrlsByPlatform = null;
       }
       if (cancelled) { coordinator.release?.(next); return; }
-      const settled = await Promise.all(next.map(async (entry) => {
+      const settled = await Promise.all(next.map((entry) => (async () => {
         if (entry.kind === 'sellhub' && entry.state === 'terminal-replay-ready') {
           if (typeof updateNodeDataGlobally !== 'function') return { ...entry, state: 'update-unavailable' };
           if (terminalMarketplaceReplayDisposition(entry) === 'acknowledge') {
@@ -654,12 +654,19 @@ export function useWorkspaceStartupRecovery({ canvasFilePath, rootNodes, hydrate
             } catch { /* renderer teardown releases the sender-owned lease */ }
           }
         }
-      }));
+      })().catch((error) => {
+        // One entry's failing call must not reject the whole plan: the entry
+        // is deferred and keeps its saved state for the next startup.
+        EventLogger.log(`[StartupRecovery] ${entry.kind} id=${entry.nodeId} failed: ${error?.message || error}`);
+        return { ...entry, state: 'provider-deferred', error: error?.message || String(error) };
+      })));
       if (cancelled) return;
       setPlan(settled);
       for (const entry of settled) {
         EventLogger.log(`[StartupRecovery] nested ${entry.kind} id=${entry.nodeId} state=${entry.state}`);
       }
+    }).catch((error) => {
+      EventLogger.log(`[StartupRecovery] discovery failed: ${error?.message || error}`);
     });
     return () => { cancelled = true; };
   }, [canvasFilePath, coordinator, hydrated, moduleRunQueue, recoverySignature, updateNodeDataGlobally]);

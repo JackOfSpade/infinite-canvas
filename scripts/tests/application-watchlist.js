@@ -87,4 +87,19 @@ export default [{
     await applyWatchlistReview(root, { at, pairIds: [], items: [{ id: items[0].id, status: 'resolved', reason: 'source edited and confirmed' }] });
     assert.deepEqual((await improvementStatus(root)).watchlist.careerDataEdits.map(item => item.summary), ['Unclassified one-off'], 'resolved source fixes leave the list');
   },
+}, {
+  name: 'application watch list: overlapping reviews each keep their update',
+  run: async () => {
+    const root = await temp();
+    const at = '2026-11-10T00:00:00.000Z';
+    const reviews = ['one', 'two', 'three', 'four'].map(name => applyWatchlistReview(root, { at, pairIds: [`${name}-1`], items: [
+      { summary: `Pattern ${name}`, category: 'wording', document: 'letter', occurred: [`${name}-1`], reviewed: [`${name}-1`] },
+    ] }));
+    await Promise.all(reviews);
+    const list = await readWatchlist(root);
+    assert.equal(list.items.length, 4, 'no overlapping review overwrote another');
+    assert.equal(list.reviews.length, 4);
+    await assert.rejects(applyWatchlistReview(root, { at: 'bad', pairIds: [], items: [] }), /needs an ISO/u);
+    await applyWatchlistReview(root, { at, pairIds: [], items: [] });
+  },
 }];

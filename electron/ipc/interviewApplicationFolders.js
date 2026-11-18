@@ -55,16 +55,21 @@ export async function applicationFolderJobUrl(folder) {
   finally { await handle?.close().catch(() => {}); }
 }
 
+const ROLE_STAT_BATCH = 16;
+
 /** Enumerate application folders under `root` (depth Company/Location/Role), newest first. */
 export async function enumerateApplicationFolders(root) {
   const folders = [];
   for (const company of await realSubdirectories(root)) {
     for (const location of await realSubdirectories(path.join(root, company))) {
-      for (const role of await realSubdirectories(path.join(root, company, location))) {
-        const folder = path.join(root, company, location, role);
-        const listing = await regularFile(path.join(folder, LISTING_FILE));
-        if (!listing) continue;
-        folders.push({ folder, company, location, role, modifiedAt: listing.mtimeMs });
+      const roles = await realSubdirectories(path.join(root, company, location));
+      for (let start = 0; start < roles.length; start += ROLE_STAT_BATCH) {
+        const batch = roles.slice(start, start + ROLE_STAT_BATCH);
+        const listings = await Promise.all(batch.map(role => regularFile(path.join(root, company, location, role, LISTING_FILE))));
+        batch.forEach((role, index) => {
+          if (!listings[index]) return;
+          folders.push({ folder: path.join(root, company, location, role), company, location, role, modifiedAt: listings[index].mtimeMs });
+        });
       }
     }
   }

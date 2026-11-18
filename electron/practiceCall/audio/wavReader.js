@@ -4,35 +4,14 @@
 // File I/O only: everything else in audio/ is pure JS on Float32Arrays.
 import nodeFs from 'node:fs';
 
-export const HEADER_BYTES = 44;
-const TWO_POW_15 = 32768;
+import { HEADER_BYTES, TWO_POW_15, pcm16FrameCount, readPcm16MonoHeader } from './wavFormat.js';
 
-function u32(bytes, offset) {
-  return bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24);
-}
-function u16(bytes, offset) { return bytes[offset] | (bytes[offset + 1] << 8); }
-
-function readHeader(fd, fs) {
-  const header = Buffer.alloc(HEADER_BYTES);
-  const read = fs.readSync(fd, header, 0, HEADER_BYTES, 0);
-  if (read < HEADER_BYTES) throw new Error('practice call wav: header incomplete');
-  if (header.toString('ascii', 0, 4) !== 'RIFF' || header.toString('ascii', 8, 12) !== 'WAVE') {
-    throw new Error('practice call wav: not a RIFF/WAVE file');
-  }
-  const audioFormat = u16(header, 20);
-  const channels = u16(header, 22);
-  const sampleRate = u32(header, 24);
-  const bitsPerSample = u16(header, 34);
-  if (audioFormat !== 1 || bitsPerSample !== 16 || channels !== 1) {
-    throw new Error(`practice call wav: expected PCM16 mono, got format ${audioFormat} channels ${channels} bits ${bitsPerSample}`);
-  }
-  return { sampleRate, channels };
-}
+export { HEADER_BYTES };
 
 export function openGrowingWav(path, { fs = nodeFs } = {}) {
   const fd = fs.openSync(path, 'r');
   let header;
-  try { header = readHeader(fd, fs); }
+  try { header = readPcm16MonoHeader(fd, fs, { prefix: 'practice call wav' }); }
   catch (error) { try { fs.closeSync(fd); } catch { /* already closed */ } throw error; }
   const { sampleRate } = header;
   let closed = false;
@@ -40,7 +19,7 @@ export function openGrowingWav(path, { fs = nodeFs } = {}) {
   const writtenFrames = () => {
     let size = 0;
     try { size = fs.fstatSync(fd).size; } catch { size = 0; }
-    return Math.max(0, Math.floor((size - HEADER_BYTES) / 2));
+    return pcm16FrameCount(size);
   };
 
   return {

@@ -338,12 +338,12 @@ function setMarketplacePreviewCache(key, buffer) {
 // Prevents the main process from crashing unexpectedly in production due to 
 // unhandled promise rejections or rogue callbacks from external dependencies.
 process.on('uncaughtException', (err) => {
-  console.error('[Main Process] Uncaught Exception:', err);
+  logger.error('[Main Process] Uncaught Exception:', err?.stack || err);
   // Log but do not exit — keeps the window alive even if a background task fails
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('[Main Process] Unhandled Rejection at:', promise, 'reason:', reason);
+process.on('unhandledRejection', (reason) => {
+  logger.error('[Main Process] Unhandled Rejection, reason:', reason?.stack || reason);
 });
 
 // ── Multi-window state ─────────────────────────────────────────────────────
@@ -1025,12 +1025,12 @@ if (!gotTheLock) {
     }
   ]);
 
-  app.on('second-instance', (_event, commandLine) => {
+  app.on('second-instance', (_event, commandLine, workingDirectory) => {
     // The single-instance lock funnels every relaunch (e.g. double-clicking the
     // app again) into this one process. A supplied canvas opens (or focuses) its
     // canonical file window; an ordinary relaunch still creates a blank canvas.
     if (isBackgroundE2E) return;
-    const initSpec = secondInstanceCanvasWindowSpec(commandLine);
+    const initSpec = secondInstanceCanvasWindowSpec(commandLine, workingDirectory ? { cwd: workingDirectory } : {});
     if (initSpec.mode === 'file') {
       openOrFocusCanvasWindow(initSpec.filePath, { canvasWindows, createWindow });
     } else {

@@ -50,14 +50,13 @@ export function summarizeAiSpend({ usageRows = [], runRows = [], now = Date.now(
     if (!id) return;
     let group = groups.get(id);
     if (!group) {
-      group = { id, isRun, calls: 0, costedCalls: 0, totalCostUsd: 0, costSum: 0 };
+      group = { id, isRun, calls: 0, costedCalls: 0, totalCostUsd: 0 };
       groups.set(id, group);
     }
     group.calls += 1;
     if (isCost(costUsd)) {
       group.costedCalls += 1;
       group.totalCostUsd += costUsd;
-      group.costSum += costUsd;
     }
     if (typeof model === 'string' && model) pairs.add(`${model} / ${typeof effort === 'string' && effort ? effort : 'unknown'}`);
   };
@@ -106,7 +105,7 @@ export function summarizeAiSpend({ usageRows = [], runRows = [], now = Date.now(
     }
     // Stage calls recorded before costs existed: extrapolate the mean recorded
     // cost over every call rather than the few costed days.
-    const meanCostUsd = group.costedCalls ? group.costSum / group.costedCalls : null;
+    const meanCostUsd = group.costedCalls ? group.totalCostUsd / group.costedCalls : null;
     const annualCostUsd = meanCostUsd === null ? 0 : (meanCostUsd * group.calls / runWindowDays) * 365;
     return {
       id: group.id,

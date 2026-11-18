@@ -44,7 +44,7 @@ import { createApplicationConvergenceTracker } from '../test-dependencies.js';
 import { assertResponseMatchesSchema, buildJobAnalysisSnapshot, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, JOB_SCORING_SCHEMA, mergeDescriptionRecoverySourceJobs, snapshotDescriptionRecoveryJobs } from '../test-dependencies.js';
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
 import { buildJobBoardDiagnostics, buildJobLinkSnapshot, buildJobRecoveryOfferSnapshot, handoffElapsed, manualAiBoardProgressForNode, receiptElapsed } from '../../electron/ipc/bugReport/jobsSnapshot.js';
-import { closeReportDiagnostic, projectReportDiagnostic, redactReportLocalPathsInText, redactReportLogSecrets, redactReportOpaqueIds, redactReportPath, redactReportUrl, redactReportUrlsInText, renderSessionTraceBlocks } from '../../electron/ipc/bugReport/helpers.js';
+import { closeReportDiagnostic, projectReportDiagnostic, redactReportLocalPathsInText, redactReportLogSecrets, redactReportOpaqueIds, redactReportPath, redactReportUrl, redactReportUrlsInText, renderSessionRows, renderSessionTraceBlocks } from '../../electron/ipc/bugReport/helpers.js';
 import { __listDescriptionRecoveryCheckpointsForTests, __withLockedLinkedInEnrichmentForTests, authenticatedIndeedScrapeStatus, capPlatformJobsAfterWindow, indeedWarningRequiresManualVerification, registerJobsHandlers, withFreshManualScraperTelemetry } from '../../electron/ipc/jobs.js';
 import { logger } from '../../electron/logger.js';
 import { GLASSDOOR_EXTRACTOR, recordActivityBeat, setActivitySink, scrapeManualSources } from '../test-dependencies.js';
@@ -85,7 +85,7 @@ import { claimJobAnalysisOperationAuthority } from '../../electron/ipc/jobAnalys
 import { checkListingForGeneration } from '../../electron/ipc/listingLivenessProbe.js';
 import { collectJobCompensationReport } from '../../src/utils/jobCompensationReport.js';
 import { buildJobCompensationSnapshot } from '../../electron/ipc/bugReport/jobCompensationSnapshot.js';
-import { normalizeCompensationAssessment } from '../../src/nodes/jobsearch/buildJobTree.js';
+import { normalizeBands, normalizeCompensationAssessment, placeBand } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { collectOfficialPostingReport } from '../../src/utils/officialPostingReport.js';
 import { buildOfficialPostingSnapshot } from '../../electron/ipc/bugReport/officialPostingSnapshot.js';
 import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
@@ -4876,6 +4876,36 @@ export default [
       assert(cut.markdown.includes('Report content after this point was omitted by the clipboard cap'),
         'Clipboard fence balance: the omission marker survives the cut it describes');
       return { foldedLineCount: folded.foldedLineCount, fenceCount };
+    },
+  },
+  {
+    name: 'Clipboard cap omission banner ignores heading-like lines inside fenced blocks',
+    run: () => {
+      const rows = Array.from({ length: 300 }, (_, i) => `- row ${i} ${'A'.repeat(40)}`).join('\n');
+      const base = '# R\n## Kept\n' + rows + '\n\n## Samples\n```text\n## Fake Heading\n### Fake Sub\n```\n\n## Tail\nbody\n';
+      const cut = enforceClipboardMarkdownCap(base, ['[00:00:00] E1'], ['[00:00:00] [L] L1'], 6_000);
+      assert(cut.hardTruncated && cut.markdown.includes('Tail'),
+        'Clipboard fenced headings: the real dropped sections are still named');
+      assert(!cut.markdown.includes('Fake Heading') && !cut.markdown.includes('Fake Sub'),
+        'Clipboard fenced headings: a ## or ### line inside a code fence is content, never a dropped section');
+      return { named: true };
+    },
+  },
+  {
+    name: 'session report rows survive an out-of-range stored timestamp',
+    run: () => {
+      const platforms = [{ id: 'indeed', name: 'Indeed' }];
+      const rows = renderSessionRows(platforms, { indeed: { connected: true, ts: 1e300 } });
+      assert(rows.includes('Indeed') && !rows.includes('Invalid'),
+        'Session rows: an unrepresentable Last confirmed timestamp renders a placeholder instead of throwing');
+      const traces = renderSessionTraceBlocks(platforms, {
+        indeed: { connected: true, lastNegative: { reason: 'logged-out', ts: 1e300 } },
+      });
+      assert(traces.includes('time not recorded'),
+        'Session traces: an unrepresentable preserved-negative timestamp reads as not recorded');
+      const ok = renderSessionRows(platforms, { indeed: { connected: true, ts: Date.now() - 5000 } });
+      assert(/\d{4}-\d{2}-\d{2}T[\d:.]+Z \(\d+s ago\)/.test(ok), 'Session rows: a normal timestamp keeps the ISO plus age text');
+      return { ok: true };
     },
   },
 {
@@ -17329,6 +17359,17 @@ export default [
         && sourceCard.includes("solveOutcome = 'fenced';"),
       'host authority supersession must not become a generic score/provider/Solve failure or publish into a newer UI generation');
       return { exactProgressReceiptRequired: true, quietSupersession: true };
+    },
+  },
+  {
+    name: 'job tree: a legacy numeric-string match score is placed in the same band as the number',
+    async run() {
+      const bands = normalizeBands(null);
+      for (const score of [95, 80, 62, 40, 12]) {
+        assert(placeBand(String(score), bands) === placeBand(score, bands), `string score ${score} must land in the band of the number`);
+      }
+      assert(placeBand('80', bands) !== bands[bands.length - 1], 'a string score of 80 is not treated as zero');
+      assert(placeBand(undefined, bands) === bands[bands.length - 1] && placeBand('n/a', bands) === bands[bands.length - 1], 'an unreadable score falls in the lowest band');
     },
   },
 ];

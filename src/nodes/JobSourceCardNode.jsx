@@ -1264,16 +1264,13 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         if (result.nextBlockedUrl) {
           // Another query for this source was also blocked. Re-arm the card with
           // the next URL, then decide whether THIS press keeps going.
-          const rearmed = setProgress(prev => {
-            const next = prev ? {
-              ...prev,
-              status: 'error',
-              url: result.nextBlockedUrl,
-              count: nextCount(prev),
-              warning: nextBlockedWarning,
-            } : prev;
-            return next;
-          });
+          const rearmed = setProgress(prev => (prev ? {
+            ...prev,
+            status: 'error',
+            url: result.nextBlockedUrl,
+            count: nextCount(prev),
+            warning: nextBlockedWarning,
+          } : prev));
           // Stop conditions, in the order they can fire. Every one of these
           // reuses a decision the code already makes rather than inventing a
           // new policy:
@@ -1348,16 +1345,13 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           // warning + action button so the user can retry later, rather than
           // clearing to a clean done. LinkedIn replacement responses show the
           // replacement size; incremental captcha/Continue responses add.
-          setProgress(prev => {
-            const next = prev ? {
-              ...prev,
-              status: 'error',
-              url: result.warning?.url || prev.url,
-              warning: result.warning,
-              count: nextCount(prev),
-            } : prev;
-            return next;
-          });
+          setProgress(prev => (prev ? {
+            ...prev,
+            status: 'error',
+            url: result.warning?.url || prev.url,
+            warning: result.warning,
+            count: nextCount(prev),
+          } : prev));
           solveOutcome = 'still-blocked';
           solveOutcomeExtra = { recoveryGuidance: result.warning?.recoveryGuidance || null };
           break;
@@ -1371,15 +1365,12 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           // resolve didn't take effect even though it fully did.
           // The owning hub will dismiss clean source cards together after the
           // all-sources terminal grace period.
-          setProgress(prev => {
-            const next = prev ? {
-              ...prev,
-              status: 'done', // flip off 'error' so it reads "{count} jobs" not "Failed", and auto-dismisses as clean-done
-              warning: null,
-              count: nextCount(prev),
-            } : prev;
-            return next;
-          });
+          setProgress(prev => (prev ? {
+            ...prev,
+            status: 'done', // flip off 'error' so it reads "{count} jobs" not "Failed", and auto-dismisses as clean-done
+            warning: null,
+            count: nextCount(prev),
+          } : prev));
           solveOutcome = 'resolved';
           break;
         }
@@ -1425,14 +1416,13 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
             // `detail`, so a failing Solve skipped the restore and stranded the
             // card spinning with no warning and no Solve button.
             if (!prev || isTerminalSourceStatus(prev.status)) return prev;
-            const next = {
+            return {
               ...prevForRestore,
               status: 'error',
               detail: null,
               url: rawRestoreWarning.url || prev.url,
               warning: restoreWarning,
             };
-            return next;
           });
           // This outcome did not recover any source rows. Keep it off the
           // successful-resolve channel: the hub must restore its warning, but
@@ -1924,9 +1914,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   const hasVisibleResolverControl = Boolean(
     warningCanResolve
     && (progress?.warning?.actionLabel || progress?.warning?.resumeState
-      || progress?.warning?.code === 'cloudflare-hard-block'
-      || progress?.warning?.code === 'description-detail-hard-block'
-      || progress?.warning?.code === 'google-apply-links-rate-limited'
+      || isTimedRetrySourceWarning(progress?.warning)
       || (progress?.url && !hasWarn))
     && !hasInfo
     && (!hasWarn || warningBlocksScoring)
@@ -1952,6 +1940,13 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     }
     let cancelled = false;
     let retryTimer = null;
+    // The poll repeats every 750 ms, so an unchanged result keeps the previous
+    // state object and the card does not re-render.
+    const publishReadiness = (status) => setProviderRecoveryReadiness(prev => (
+      prev.status === status && prev.proofKey === providerRecoveryProofKey
+        ? prev
+        : { status, proofKey: providerRecoveryProofKey }
+    ));
     const inspect = async () => {
       try {
         const run = await window.electronAPI.peekJobRun({
@@ -1970,17 +1965,14 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         // source action can proceed. A missing, mismatched, malformed, or
         // incomplete receipt stays fenced: it cannot mirror backend authority.
         const savedReady = exactRun && run?.stage === 'gathered';
-        setProviderRecoveryReadiness({
-          status: savedReady ? 'ready' : 'fenced',
-          proofKey: providerRecoveryProofKey,
-        });
+        publishReadiness(savedReady ? 'ready' : 'fenced');
       } catch {
         if (!cancelled) {
           setProviderGatheredRunId(null);
           // A failed read revokes prior positive proof for this render
           // generation. Keep the saved action fail-closed until a successful
           // exact read replaces it; retry below.
-          setProviderRecoveryReadiness({ status: 'pending', proofKey: providerRecoveryProofKey });
+          publishReadiness('pending');
         }
       }
       if (!cancelled) retryTimer = setTimeout(inspect, 750);
@@ -2170,7 +2162,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
               <ExternalLink size={9} />
               {/* A hard block's own label (e.g. the no-match "Wait, then rerun")
                   would contradict an enabled button: after the wait it says Retry. */}
-              {resolving ? 'Running…' : progress?.warning?.retryLabel || ((progress?.warning?.code === 'cloudflare-hard-block' || progress?.warning?.code === 'description-detail-hard-block' || progress?.warning?.code === 'google-apply-links-rate-limited') ? 'Retry' : progress?.warning?.actionLabel || (progress?.warning?.resumeState ? 'Continue' : 'Solve'))}
+              {resolving ? 'Running…' : progress?.warning?.retryLabel || (isTimedRetrySourceWarning(progress?.warning) ? 'Retry' : progress?.warning?.actionLabel || (progress?.warning?.resumeState ? 'Continue' : 'Solve'))}
             </button>
           )}
           <button

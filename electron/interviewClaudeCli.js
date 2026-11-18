@@ -77,7 +77,7 @@ export function requireCliFlags(help, flags) {
 }
 
 /** The text of a successful stream-json `result` event. */
-export function cliResultText(value) {
+function cliResultText(value) {
   if (!value || value.type !== 'result' || value.is_error || value.subtype && value.subtype !== 'success' || typeof value.result !== 'string') throw transportError('TRANSPORT_INVALID_RESPONSE');
   return value.result;
 }

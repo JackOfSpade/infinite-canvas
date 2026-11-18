@@ -330,10 +330,16 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile, addToast
         // through its own poll or import leaves the candidate list and is
         // never re-read here, so without this an unreadable flag would carry
         // it forward on every pass for the life of the canvas.
-        const candidateJobIds = new Set(candidates.map((node) => node.data.localApplication.id));
-        const currentPreviousItems = previousItems.filter(item => candidates.some(node => (
-          node.data.localApplication.id === item.jobId && belongsToNode(item, node)
-        )));
+        const candidatesByJobId = new Map();
+        for (const node of candidates) {
+          const id = node.data.localApplication.id;
+          if (!candidatesByJobId.has(id)) candidatesByJobId.set(id, []);
+          candidatesByJobId.get(id).push(node);
+        }
+        const candidateJobIds = new Set(candidatesByJobId.keys());
+        const currentPreviousItems = previousItems.filter(item => (
+          (candidatesByJobId.get(item.jobId) || []).some(node => belongsToNode(item, node))
+        ));
         publishApplicationHandoffs(retainUnreadableApplicationItems(nextItems, currentPreviousItems, candidateJobIds));
       } finally {
         tickBusyRef.current = false;

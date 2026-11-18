@@ -187,9 +187,13 @@ export function createInterviewClaudeTransport({
           if (scope) standaloneClaudeActivity.released(scope.key);
           throw error;
         }
+        if (!reply) {
+          if (scope) standaloneClaudeActivity.released(scope.key);
+          throw Object.assign(new Error('The offload call returned no reply.'), { code: 'OFFLOAD_EMPTY_REPLY' });
+        }
         provider = 'offload';
       }
-      if (!reply) {
+      if (mode === 'claude') {
         if (scope) {
           await waitForClaudeUsage(signal);
           await waitForClaudeRelease(scope.key, signal);

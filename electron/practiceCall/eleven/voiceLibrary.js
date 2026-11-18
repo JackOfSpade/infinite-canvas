@@ -8,7 +8,8 @@
  */
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
-import { classifyFailure, redact, voiceError, SUBSCRIPTION_URL } from './dialogueVoice.js';
+import { SUBSCRIPTION_URL } from './dialogueVoice.js';
+import { classifyFailure, redact, voiceError } from './voiceErrors.js';
 import {
   hasKnownGender, isEnglishVoice, isStandardPrice, languageOf, normalizeGender, rateOf,
 } from './voiceCatalog.js';
@@ -157,6 +158,8 @@ function libraryUnavailable(message, options = {}) {
 export async function drawVoice({
   fetch: fetchImpl = globalThis.fetch, key, random = Math.random,
   excludeVoiceIds = [], excludeNames = [], pageSize = 100, maxAttempts = 24, signal,
+  // Pages read by earlier draws of the same call setup; exclusion is still applied to every row drawn.
+  pageCache = new Map(),
 } = {}) {
   // Names are matched whole and without regard to case: a library copy of a built-in voice keeps its name.
   const excludedNames = new Set((Array.isArray(excludeNames) ? excludeNames : []).map(textOf).filter(Boolean));
@@ -165,9 +168,11 @@ export async function drawVoice({
   const attemptLimit = Number.isFinite(Number(maxAttempts)) && Number(maxAttempts) >= 1 ? Math.floor(Number(maxAttempts)) : 0;
   const size = Number.isFinite(Number(pageSize)) && Number(pageSize) >= 1 ? Math.floor(Number(pageSize)) : 100;
 
-  const pages = new Map();
+  // A failed page stays in this draw's own map only, so a later draw tries the network again.
+  const failedPages = new Map();
   const fetchPage = async page => {
-    if (pages.has(page)) return pages.get(page);
+    if (pageCache.has(page)) return pageCache.get(page);
+    if (failedPages.has(page)) return failedPages.get(page);
     const target = new URL(SHARED_VOICES_URL);
     target.searchParams.set('language', 'en');
     target.searchParams.set('use_cases', 'conversational');
@@ -185,7 +190,7 @@ export async function drawVoice({
     } catch (error) {
       found = { rows: [], total: null, error };
     }
-    pages.set(page, found);
+    (found.error ? failedPages : pageCache).set(page, found);
     return found;
   };
 

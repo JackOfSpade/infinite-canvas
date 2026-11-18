@@ -18,9 +18,9 @@ import { cappedHandoff } from './officialPostingService.js';
 import { callLLMText } from './llm.js';
 import { withSharedProfileLock } from './sharedProfileLock.js';
 
-export const LISTING_PROBE_LOCK_WAIT_MS = 120_000;
-export const LISTING_PROBE_VISIT_MS = 60_000;
-export const LISTING_GENERATION_AI_MS = 5 * 60_000;
+const LISTING_PROBE_LOCK_WAIT_MS = 120_000;
+const LISTING_PROBE_VISIT_MS = 60_000;
+const LISTING_GENERATION_AI_MS = 5 * 60_000;
 const FRESH_OPEN_MS = 24 * 60 * 60_000;
 const AI_MIN_REMAINING_MS = 90_000;
 const MAX_GENERATION_VARIANT_PROBES = 4;
@@ -85,7 +85,9 @@ async function abortable(promise, signal) {
 }
 async function delay(ms, signal) {
   if (ms <= 0) return;
-  await abortable(new Promise(resolve => setTimeout(resolve, ms)), signal);
+  let timer;
+  try { await abortable(new Promise(resolve => { timer = setTimeout(resolve, ms); }), signal); }
+  finally { clearTimeout(timer); }
 }
 
 // One gate across rapid Generate clicks, including separate prepare invocations.
@@ -232,7 +234,9 @@ export function createListingLivenessProbe({
       lock = withDeadlineSignal(signal, Math.min(LISTING_PROBE_LOCK_WAIT_MS, lockWaitMs), 'listing-lock-timeout');
       return await withProfileLock(async () => {
         aborted(lock.signal);
-        const visit = withDeadlineSignal(lock.signal, Math.min(LISTING_PROBE_VISIT_MS, visitMs), 'listing-visit-timeout');
+        // The wait deadline covers queueing only; the visit gets its own budget.
+        lock.close();
+        const visit = withDeadlineSignal(signal, Math.min(LISTING_PROBE_VISIT_MS, visitMs), 'listing-visit-timeout');
         try {
           const ruleKey = ruleKeyForHost(kind);
           const rules = rulesFor(ruleKey) || LISTING_LIVENESS_RULES[ruleKey];

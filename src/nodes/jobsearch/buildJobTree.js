@@ -3,6 +3,7 @@ import { structuralEdge } from '../_shared/edgeHelpers.js';
 import { isJobCardVisible } from '../../utils/jobCardFilters.js';
 import { validateJobBoardTaxonomy } from '../../utils/jobBoardAiProvider.js';
 import { mergeDeadSourceUrls } from '../../utils/jobSourceLinks.js';
+import { normalizeJobMatchScore } from '../jobboard/mergeJobs.js';
 import { salaryRecommendationBounds } from '../../utils/salaryRecommendationBounds.js';
 
 /**
@@ -194,6 +195,7 @@ const COMPENSATION_STATUSES = new Set(['competitive', 'below_market', 'market_re
 // used by the offer parser; it still accommodates unusually high executive
 // and contractor pay in the currencies this feature supports.
 const MAX_CREDIBLE_ANNUAL_CASH = 10_000_000;
+const isCurrencyCode = value => typeof value === 'string' && /^[A-Z]{3}$/.test(value);
 const MAX_COMPENSATION_TEXT_LENGTH = 2_400;
 const MAX_SOURCE_LABEL_LENGTH = 240;
 const MAX_SOURCE_DETAILS_LENGTH = 500;
@@ -256,7 +258,7 @@ function normalizedPersonalRecommendation(value, marketRange, offered) {
   if (!range || typeof range !== 'object' || Array.isArray(range)
     || !isPositiveCash(range.min) || !isPositiveCash(range.max) || range.min > range.max
     || !isPositiveCash(value.desiredSalary) || value.desiredSalary < range.min || value.desiredSalary > range.max
-    || typeof range.currency !== 'string' || !/^[A-Z]{3}$/.test(range.currency)
+    || !isCurrencyCode(range.currency)
     || range.currency !== marketRange.currency || range.period !== 'annual' || marketRange.period !== 'annual'
     || !(marketRange.min > 0) || !(marketRange.max > 0)
     || !(range.min >= bounds.min) || !(range.max <= bounds.max)
@@ -285,11 +287,6 @@ export function isCompensationRecommendationCurrent(recommendation, careerSnapsh
     && recommendation.careerSnapshotId === (typeof careerSnapshotId === 'string' ? careerSnapshotId.trim() : ''));
 }
 
-function numericScore(value) {
-  const score = Number(value);
-  return Number.isFinite(score) ? score : 0;
-}
-
 /**
  * Cards remain primarily ordered by hiring fit. When that score is tied, the
  * independent Job Preferences assessment gives the user a useful secondary
@@ -297,10 +294,10 @@ function numericScore(value) {
  * stable order rather than inventing a title/company tie-break.
  */
 export function compareJobsByFitAndPreference(a, b) {
-  const fitDelta = numericScore(b?.matchScore) - numericScore(a?.matchScore);
+  const fitDelta = normalizeJobMatchScore(b?.matchScore) - normalizeJobMatchScore(a?.matchScore);
   if (fitDelta) return fitDelta;
-  return numericScore(b?.preferenceAssessment?.preferenceScore)
-    - numericScore(a?.preferenceAssessment?.preferenceScore);
+  return normalizeJobMatchScore(b?.preferenceAssessment?.preferenceScore)
+    - normalizeJobMatchScore(a?.preferenceAssessment?.preferenceScore);
 }
 
 function textValue(value) {
@@ -404,8 +401,43 @@ function normalizedOfferPercentile(value) {
 function normalizedReportedSpan(value) {
   const range = normalizedRange(value);
   if (!(range.min > 0) || !(range.max > 0)) return null;
-  if (!/^[A-Z]{3}$/.test(range.currency) || range.period !== 'annual') return null;
+  if (!isCurrencyCode(range.currency) || range.period !== 'annual') return null;
   return range;
+}
+
+/**
+ * A competitive or below-market verdict is only shown when the figures behind
+ * it can be compared. Downgrades an unsafe one to "uncertain" in place and
+ * returns true; any other status, or a safe verdict, is left alone.
+ */
+function downgradeUnsafeComparison(normalized, floorPresent) {
+  const isVerdict = normalized.status === 'competitive' || normalized.status === 'below_market';
+  if (!isVerdict) return false;
+  const { offered, competitiveRange } = normalized;
+  const downgrade = (reasonCode, justification) => {
+    normalized.status = 'uncertain';
+    normalized.reasonCode = reasonCode;
+    normalized.justification = justification;
+    return true;
+  };
+  if (!(offered.min > 0) || !(offered.max > 0) || !(competitiveRange.min > 0) || !(competitiveRange.max > 0)
+    || (floorPresent && !(normalized.competitiveFloor > 0))) {
+    return downgrade('incomplete_comparison_data', 'Compensation research did not retain a complete cash-pay comparison, so no green or red conclusion is shown.');
+  }
+  if (!isCurrencyCode(offered.currency) || !isCurrencyCode(competitiveRange.currency) || offered.currency !== competitiveRange.currency) {
+    // Values without an explicit shared currency cannot be compared. The
+    // backend always normalizes a valid assessment to one currency, but
+    // saved/partial data must fail open in the renderer rather than infer it.
+    return downgrade('incompatible_comparison_currency', 'Compensation research retained cash figures in different currencies without a reliable conversion, so no green or red conclusion is shown.');
+  }
+  if (offered.period !== 'annual' || competitiveRange.period !== 'annual') {
+    return downgrade('incompatible_comparison_period', 'Compensation research did not retain reliably annualized cash figures, so no green or red conclusion is shown.');
+  }
+  const floor = normalized.competitiveFloor > 0 ? normalized.competitiveFloor : competitiveRange.min;
+  if ((normalized.status === 'competitive') !== (offered.max >= floor)) {
+    return downgrade('inconsistent_comparison_verdict', 'The saved cash-pay conclusion conflicts with its salary ranges. Re-combine saved results on the Job Board to refresh the comparison.');
+  }
+  return false;
 }
 
 /**
@@ -472,49 +504,24 @@ export function normalizeCompensationAssessment(value) {
   } else if (!status) {
     normalized.reasonCode = normalized.reasonCode || 'unreadable_assessment';
     normalized.justification = normalized.justification || 'Compensation research could not be read safely, so no cash-pay conclusion is shown.';
-  } else if (['competitive', 'below_market'].includes(normalized.status)
-    && (!(normalized.offered.min > 0) || !(normalized.offered.max > 0)
-      || !(normalized.competitiveRange.min > 0) || !(normalized.competitiveRange.max > 0)
-      || (floorPresent && !(normalized.competitiveFloor > 0)))) {
-    normalized.status = 'uncertain';
-    normalized.reasonCode = 'incomplete_comparison_data';
-    normalized.justification = 'Compensation research did not retain a complete cash-pay comparison, so no green or red conclusion is shown.';
-  } else if (['competitive', 'below_market'].includes(normalized.status)
-    && (!/^[A-Z]{3}$/.test(normalized.offered.currency) || !/^[A-Z]{3}$/.test(normalized.competitiveRange.currency)
-      || normalized.offered.currency !== normalized.competitiveRange.currency)) {
-    // Values without an explicit shared currency cannot be compared. The
-    // backend always normalizes a valid assessment to one currency, but
-    // saved/partial data must fail open in the renderer rather than infer it.
-    normalized.status = 'uncertain';
-    normalized.reasonCode = 'incompatible_comparison_currency';
-    normalized.justification = 'Compensation research retained cash figures in different currencies without a reliable conversion, so no green or red conclusion is shown.';
-  } else if (['competitive', 'below_market'].includes(normalized.status)
-    && (normalized.offered.period !== 'annual' || normalized.competitiveRange.period !== 'annual')) {
-    normalized.status = 'uncertain';
-    normalized.reasonCode = 'incompatible_comparison_period';
-    normalized.justification = 'Compensation research did not retain reliably annualized cash figures, so no green or red conclusion is shown.';
-  } else if (['competitive', 'below_market'].includes(normalized.status)
-    && (normalized.status === 'competitive')
-      !== (normalized.offered.max >= (normalized.competitiveFloor > 0 ? normalized.competitiveFloor : normalized.competitiveRange.min))) {
-    normalized.status = 'uncertain';
-    normalized.reasonCode = 'inconsistent_comparison_verdict';
-    normalized.justification = 'The saved cash-pay conclusion conflicts with its salary ranges. Re-combine saved results on the Job Board to refresh the comparison.';
-  } else if (normalized.status === 'market_recommendation'
-    && (!(normalized.competitiveRange.min > 0) || !(normalized.competitiveRange.max > 0)
-      || !/^[A-Z]{3}$/.test(normalized.competitiveRange.currency) || normalized.competitiveRange.period !== 'annual')) {
-    normalized.status = 'uncertain';
-    normalized.reasonCode = 'incomplete_market_recommendation';
-    normalized.justification = 'Compensation research did not retain a complete annual market range and currency, so no salary recommendation is shown.';
-  } else if (!normalized.justification) {
-    normalized.justification = normalized.status === 'competitive'
-      ? 'The advertised guaranteed cash salary reaches typical researched pay for this role and location.'
-      : normalized.status === 'below_market'
-        ? 'The advertised guaranteed cash salary is below the researched competitive range for this role and location.'
-        : normalized.status === 'market_recommendation'
-          ? 'The listing did not provide usable cash pay to compare; this is the researched competitive salary range for the role and location.'
-        : normalized.status === 'uncertain'
-          ? 'The available salary evidence was not comparable enough to make a reliable cash-pay conclusion.'
-          : 'The listing did not provide enough guaranteed recurring cash compensation to evaluate.';
+  } else if (!downgradeUnsafeComparison(normalized, floorPresent)) {
+    if (normalized.status === 'market_recommendation'
+      && (!(normalized.competitiveRange.min > 0) || !(normalized.competitiveRange.max > 0)
+        || !isCurrencyCode(normalized.competitiveRange.currency) || normalized.competitiveRange.period !== 'annual')) {
+      normalized.status = 'uncertain';
+      normalized.reasonCode = 'incomplete_market_recommendation';
+      normalized.justification = 'Compensation research did not retain a complete annual market range and currency, so no salary recommendation is shown.';
+    } else if (!normalized.justification) {
+      normalized.justification = normalized.status === 'competitive'
+        ? 'The advertised guaranteed cash salary reaches typical researched pay for this role and location.'
+        : normalized.status === 'below_market'
+          ? 'The advertised guaranteed cash salary is below the researched competitive range for this role and location.'
+          : normalized.status === 'market_recommendation'
+            ? 'The listing did not provide usable cash pay to compare; this is the researched competitive salary range for the role and location.'
+          : normalized.status === 'uncertain'
+            ? 'The available salary evidence was not comparable enough to make a reliable cash-pay conclusion.'
+            : 'The listing did not provide enough guaranteed recurring cash compensation to evaluate.';
+    }
   }
   normalized.personalRecommendation = schemaVersion === 1
     ? normalizedPersonalRecommendation(source.personalRecommendation, normalized.competitiveRange, normalized.offered)
@@ -616,8 +623,7 @@ export function parseSalaryToNumeric(salaryStr) {
   // mark a value outside any credible job-compensation range as Unspecified.
   // The ceiling still permits unusually highly paid executive and contractor
   // work (up to roughly $4.8K/hour) without silently rewriting the source.
-  const MAX_CREDIBLE_ANNUAL_SALARY = 10_000_000;
-  return Number.isFinite(val) && val > 0 && val <= MAX_CREDIBLE_ANNUAL_SALARY ? Math.round(val) : 0;
+  return Number.isFinite(val) && val > 0 && val <= MAX_CREDIBLE_ANNUAL_CASH ? Math.round(val) : 0;
 }
 
 // One endpoint of a pay range. The leading `[A-Za-z]{1,3}(?=[$€£])` is
@@ -861,7 +867,7 @@ function normalizeCareerDirection(value) {
  *  Single source of truth for band placement, used by buildJobTreeNodes (the
  *  Job Board's Combine spawn) so every card is placed deterministically. */
 export function placeBand(score, bands) {
-  const s = typeof score === 'number' ? score : 0;
+  const s = normalizeJobMatchScore(score);
   for (const b of bands) if (s >= b.minScore) return b;
   return bands[bands.length - 1];
 }
@@ -1301,7 +1307,9 @@ export function buildJobTreeNodes({
     displayedJobs,
   );
   const bands = taxonomy.likelihoodBands;
-  const { real: realRanges, unspecified } = normalizeRanges(taxonomy.salaryRanges);
+  // sanitizeJobTaxonomy already repaired the ranges and put Unspecified last.
+  const realRanges = taxonomy.salaryRanges.slice(0, -1);
+  const unspecified = taxonomy.salaryRanges[taxonomy.salaryRanges.length - 1];
 
   // index → role name. validateJobBoardTaxonomy guarantees complete, unique coverage.
   const roleByIdx = new Map();
@@ -1373,7 +1381,7 @@ export function buildJobTreeNodes({
   newNodes.forEach(n => { if (layoutPos[n.id]) n.position = layoutPos[n.id]; });
 
   // Slider iterates over spawned scores.
-  const spawnedScores = displayedJobs.map(j => j.matchScore || 0);
+  const spawnedScores = displayedJobs.map(j => normalizeJobMatchScore(j.matchScore));
   const scoreRangeMin = spawnedScores.length > 0 ? Math.min(...spawnedScores) : 0;
   const scoreRangeMax = spawnedScores.length > 0 ? Math.max(...spawnedScores) : 100;
 

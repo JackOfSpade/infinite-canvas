@@ -681,6 +681,10 @@ export default [
         'a native Cloudflare interstitial stays pending');
       assert(isNativeIndeedChallengePending('https://ca.indeed.com/jobs?q=architect', 'Additional verification required') === true,
         'Cloudflare verification text remains pending even on the public jobs path');
+      for (const query of ['verification+engineer', 'checkpoint', 'sales']) {
+        assert(classifyNativeIndeedChallengeTab({ url: `https://www.indeed.com/jobs?q=${query}&l=Vancouver`, title: 'Jobs - Indeed' }) === 'cleared',
+          `a search whose query is "${query}" is not a challenge page`);
+      }
       assert(isNativeIndeedChallengeCleared('https://ca.indeed.com/jobs?q=architect', 'Software Architect Jobs, Employment | Indeed') === true,
         'a settled first-party results page is a valid post-challenge handoff destination');
       assert(isNativeIndeedChallengeCleared(challengeUrl, 'Just a moment...') === false,

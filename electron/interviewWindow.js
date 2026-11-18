@@ -16,7 +16,7 @@ import { createInterviewSpeculativeMatcher } from './interviewSpeculativeMatcher
 
 // Live-call notices are read mid-interview at a glance: a few words, never a
 // sentence. "Use this question" beside the transcript is the action they name.
-export const AUDIO_NOTICES = Object.freeze({
+const AUDIO_NOTICES = Object.freeze({
   tooLong: 'Too long · type it',
   multipart: 'Multi-part · pick one',
   notMatched: 'Not matched · Use to match',
@@ -166,7 +166,7 @@ function isSameJson(left, right) {
   return stableJson(left) === stableJson(right);
 }
 
-export function isInterviewWindowLaunchArgs(value) {
+function isInterviewWindowLaunchArgs(value) {
   if (!exactKeys(value, ['nodeId', 'snapshotId', 'jobUrl', 'briefRecordId', 'brief', 'plan', 'currentStep'])) return false;
   if (typeof value.nodeId !== 'string' || !NODE_ID.test(value.nodeId) || typeof value.snapshotId !== 'string' || !SNAPSHOT_ID.test(value.snapshotId)) return false;
   if (typeof value.briefRecordId !== 'string' || !SNAPSHOT_ID.test(value.briefRecordId)) return false;
@@ -182,7 +182,7 @@ export function isInterviewWindowLaunchArgs(value) {
 }
 
 /** The child receives only this bounded presentation contract. */
-export function isInterviewBrief(value, snapshotId = null) {
+function isInterviewBrief(value, snapshotId = null) {
   const keys = ['version', 'briefId', 'createdAt', 'inputs', 'role', ...BRIEF_ARRAYS, 'sources'];
   if (!exactKeys(value, keys) || value.version !== BRIEF_VERSION || !SNAPSHOT_ID.test(value.briefId || '')) return false;
   if (!briefText(value.createdAt, 80) || !exactKeys(value.inputs, ['careerSnapshotId', 'jobUrlSha256', 'applicationArtifactId', 'applicationArtifactDigest'])) return false;
@@ -507,6 +507,8 @@ export function createInterviewWindowController({
 } = {}) {
   if (typeof BrowserWindow !== 'function' || !ipcMain || typeof isAuthorizedOwner !== 'function' || typeof loadSnapshot !== 'function' || typeof loadBundle !== 'function' || typeof loadPreparedBrief !== 'function' || typeof loadAnswerBank !== 'function' || typeof buildPlan !== 'function') throw new TypeError('Interview Window dependencies are unavailable.');
   const sessions = new Map();
+  const userDataPath = () => appInstance?.getPath?.('userData');
+  const pushDisplay = (session, display) => session.child.webContents.send?.('interview-window:brief-updated', display);
   // A launch spans async brief/bundle/snapshot reads and the first child
   // navigation. A committed node deletion or owner close landing in that gap
   // finds no session to close, so it cancels the in-flight launch instead.
@@ -585,7 +587,7 @@ export function createInterviewWindowController({
       note(session, 'talking-points', { question, points: usable, ms: Date.now() - started, shown: live && usable.length >= 2 });
       if (!live || usable.length < 2) return;
       session.display = Object.freeze({ ...shown, talkingPoints: Object.freeze(usable) });
-      session.child.webContents.send?.('interview-window:brief-updated', session.display);
+      pushDisplay(session, session.display);
     }).catch(() => {});
   };
   const ensureMatcher = (session, sealedBank) => {
@@ -619,7 +621,7 @@ export function createInterviewWindowController({
           card: projectLiveCard(card, sealedBank), confidence: preview.confidence,
           transcript: preview.transcript.slice(0, MAX_QUESTION), updatedAt: preview.updatedAt }) : null;
         session.display = Object.freeze({ ...session.display, preview: projected });
-        if (!session.closing && !session.child.isDestroyed?.()) { noteShown(session); session.child.webContents.send?.('interview-window:brief-updated', session.display); }
+        if (!session.closing && !session.child.isDestroyed?.()) { noteShown(session); pushDisplay(session, session.display); }
       },
     });
     session.matcher.start().catch(() => {});
@@ -661,7 +663,7 @@ export function createInterviewWindowController({
   const refreshLiveCards = async (bank, nodeId) => {
     if (!bank || typeof nodeId !== 'string') return bank;
     let cards = null;
-    try { cards = await loadQaCards({ userDataPath: appInstance?.getPath?.('userData'), nodeId }); } catch { cards = null; }
+    try { cards = await loadQaCards({ userDataPath: userDataPath(), nodeId }); } catch { cards = null; }
     return attachInterviewLiveCards(bank, cards);
   };
   const loadLiveAnswerBank = nodeId => async loaderArgs => refreshLiveCards(await loadAnswerBank(loaderArgs), nodeId);
@@ -669,16 +671,16 @@ export function createInterviewWindowController({
     if (!isInterviewWindowLaunchArgs(args) || !isAuthorizedOwner(owner, args.nodeId)) throw new Error('Interview Window launch is not authorized.');
     // The canvas carries a cache/display copy only. Resolve its full record
     // address and require the exact app-owned seal before any portion is used.
-    const brief = await loadSafely(loadPreparedBrief, { briefRecordId: args.briefRecordId, brief: args.brief, userDataPath: appInstance?.getPath?.('userData') }, 'Interview Window brief is unavailable or changed.');
-    if (!isInterviewBrief(brief, args.snapshotId) || stableJson(brief) !== stableJson(args.brief)
+    const brief = await loadSafely(loadPreparedBrief, { briefRecordId: args.briefRecordId, brief: args.brief, userDataPath: userDataPath() }, 'Interview Window brief is unavailable or changed.');
+    if (!isInterviewBrief(brief, args.snapshotId) || !isSameJson(brief, args.brief)
       || brief.inputs.jobUrlSha256 !== sha256(args.jobUrl)
       || brief.inputs.careerSnapshotId !== args.snapshotId) throw new Error('Interview Window brief is unavailable or changed.');
-    const bundle = await loadSafely(loadBundle, { artifactId: brief.inputs.applicationArtifactId, userDataPath: appInstance?.getPath?.('userData') }, 'Interview Window application artifact is unavailable or changed.');
+    const bundle = await loadSafely(loadBundle, { artifactId: brief.inputs.applicationArtifactId, userDataPath: userDataPath() }, 'Interview Window application artifact is unavailable or changed.');
     if (!bundle || bundle.artifactId !== brief.inputs.applicationArtifactId
       || bundle.applicationArtifactDigest !== brief.inputs.applicationArtifactDigest) throw new Error('Interview Window application artifact is unavailable or changed.');
-    const snapshot = await loadSafely(loadSnapshot, { snapshotId: args.snapshotId, owner, nodeId: args.nodeId, userDataPath: appInstance?.getPath?.('userData') }, 'Interview Window snapshot is unavailable.');
+    const snapshot = await loadSafely(loadSnapshot, { snapshotId: args.snapshotId, owner, nodeId: args.nodeId, userDataPath: userDataPath() }, 'Interview Window snapshot is unavailable.');
     if (!snapshot || snapshot.snapshotId !== args.snapshotId || !snapshot.profile) throw new Error('Interview Window snapshot is unavailable.');
-    const loadedBank = await loadSafely(loadLiveAnswerBank(args.nodeId), { brief, briefRecordId: args.briefRecordId, snapshot, bundle, userDataPath: appInstance?.getPath?.('userData') }, 'Interview Window prepared answers are unavailable.');
+    const loadedBank = await loadSafely(loadLiveAnswerBank(args.nodeId), { brief, briefRecordId: args.briefRecordId, snapshot, bundle, userDataPath: userDataPath() }, 'Interview Window prepared answers are unavailable.');
     const answerBank = bankMatchesBrief(loadedBank, brief, args.snapshotId, snapshot) ? loadedBank : null;
     if (args.plan === null) return { snapshot, brief, bundle, answerBank, display: projectInterviewDisplay({ brief, snapshotId: args.snapshotId, currentStep: 0, answerBank }) };
     const canonical = buildPlan({ question: args.plan.analysis.transcript, profile: snapshot, snapshotId: args.snapshotId });
@@ -771,7 +773,7 @@ export function createInterviewWindowController({
         selectIncoming = !!(args.plan && existing.answerBank && !dismissedIncomingPlan);
         existing.display = Object.freeze({ ...existing.display, matching: matchingState(existing, existing.display.matching) });
         noteShown(existing);
-        existing.child.webContents.send?.('interview-window:brief-updated', existing.display);
+        pushDisplay(existing, existing.display);
       }
       existing.child.focus?.();
       // A reuse racing the first navigation cannot report success before the
@@ -828,7 +830,7 @@ export function createInterviewWindowController({
       // reports for a pending load). crashed: its renderer process died.
       closing: false, crashed: false,
     };
-    try { session.log = createLog({ userDataPath: appInstance?.getPath?.('userData'), onError: error => logger.warn?.(`[cue-card] log unavailable: ${error?.message || error}`) }); } catch { session.log = null; }
+    try { session.log = createLog({ userDataPath: userDataPath(), onError: error => logger.warn?.(`[cue-card] log unavailable: ${error?.message || error}`) }); } catch { session.log = null; }
     note(session, 'open', { nodeId: args.nodeId, role: brief.role?.title || null, company: brief.role?.company || null,
       cards: cardsOf(session.answerBank).map(card => ({ id: card.id, question: card.question, answered: !!statementOf(card.headline).trim() })) });
     sessions.set(ownerId, session);
@@ -955,7 +957,7 @@ export function createInterviewWindowController({
       let snapshot;
       try {
         snapshot = cached ? (target.snapshot || target.listeningSnapshot) : await loadSafely(loadSnapshot,
-          { snapshotId: target.snapshotId, owner: session.owner, nodeId: session.nodeId, userDataPath: appInstance?.getPath?.('userData') },
+          { snapshotId: target.snapshotId, owner: session.owner, nodeId: session.nodeId, userDataPath: userDataPath() },
           'Interview Window snapshot is unavailable.');
       } catch (error) { if (!current()) return superseded(); throw error; }
       if (!current()) return superseded();
@@ -963,7 +965,7 @@ export function createInterviewWindowController({
       let loadedBank;
       try {
         loadedBank = cached ? await refreshLiveCards(target.answerBank, session.nodeId) : await loadSafely(loadLiveAnswerBank(session.nodeId),
-          { brief: target.brief, briefRecordId: target.briefRecordId, snapshot, bundle: target.bundle, userDataPath: appInstance?.getPath?.('userData') },
+          { brief: target.brief, briefRecordId: target.briefRecordId, snapshot, bundle: target.bundle, userDataPath: userDataPath() },
           'Interview Window prepared answers are unavailable.');
       } catch (error) { if (!current()) return superseded(); throw error; }
       if (!current()) return superseded();
@@ -1074,7 +1076,7 @@ export function createInterviewWindowController({
       session.anchorPlan = supported && sameStory ? (followUp && anchorPlan ? anchorPlan : plan) : null;
       onSelection({ stage: 'display', question, cardId: answerCard?.id ?? null, supported, followUp });
       noteShown(session);
-      session.child.webContents.send?.('interview-window:brief-updated', session.display);
+      pushDisplay(session, session.display);
       // Nothing prepared answers this question: fill the blank card with
       // generic talking points when they are ready. Never for a follow-up, or
       // when the AI itself was unavailable for the match.
@@ -1102,12 +1104,12 @@ export function createInterviewWindowController({
     const current = () => sessions.get(session.ownerId) === session
       && session.questionSequence === sequence && !session.closing;
     const snapshot = await loadSafely(loadSnapshot,
-      { snapshotId: session.snapshotId, owner: session.owner, nodeId: session.nodeId, userDataPath: appInstance?.getPath?.('userData') },
+      { snapshotId: session.snapshotId, owner: session.owner, nodeId: session.nodeId, userDataPath: userDataPath() },
       'Interview Window snapshot is unavailable.');
     if (!current()) return session.display;
     if (!snapshot || snapshot.snapshotId !== session.snapshotId || !snapshot.profile) throw new Error('Interview Window snapshot is unavailable.');
     const answerBank = await loadSafely(loadLiveAnswerBank(session.nodeId),
-      { brief: session.brief, briefRecordId: session.briefRecordId, snapshot, bundle: session.bundle, userDataPath: appInstance?.getPath?.('userData') },
+      { brief: session.brief, briefRecordId: session.briefRecordId, snapshot, bundle: session.bundle, userDataPath: userDataPath() },
       'Interview Window prepared answers are unavailable.');
     if (!current()) return session.display;
     if (!bankMatchesBrief(answerBank, session.brief, session.snapshotId, snapshot)) throw new Error('Interview prepared answer is unavailable.');
@@ -1125,7 +1127,7 @@ export function createInterviewWindowController({
     session.locked = true;
     session.anchorPlan = null;
     noteShown(session);
-    session.child.webContents.send?.('interview-window:brief-updated', display);
+    pushDisplay(session, display);
     return display;
   };
   const advanceQuestion = (event, notify = true) => {
@@ -1150,7 +1152,7 @@ export function createInterviewWindowController({
     }
     ensureMatcher(session, session.answerBank);
     session.display = projectInterviewDisplay({ brief: session.brief, snapshotId: session.snapshotId, currentStep: 0, answerBank: session.answerBank, matching: matchingState(session) });
-    if (notify) { noteShown(session); session.child.webContents.send?.('interview-window:brief-updated', session.display); }
+    if (notify) { noteShown(session); pushDisplay(session, session.display); }
     return session.display;
   };
   const nextQuestion = event => advanceQuestion(event);
@@ -1179,7 +1181,7 @@ export function createInterviewWindowController({
     session.latencyMode = value;
     session.display = Object.freeze({ ...session.display, matching: Object.freeze(matchingState(session, session.display.matching)) });
     noteShown(session);
-    session.child.webContents.send?.('interview-window:brief-updated', session.display);
+    pushDisplay(session, session.display);
     return session.display;
   };
 

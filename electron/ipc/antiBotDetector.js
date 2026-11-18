@@ -484,7 +484,6 @@ const API_JSON_ERROR_PATTERNS = [
  * @param {number} [ctx.status]          HTTP status
  * @param {string} [ctx.bodyText]        Response body as raw text
  * @param {any}    [ctx.bodyJson]        Parsed JSON if available
- * @param {number} [ctx.itemsReturned]   Items the parser produced (null if N/A)
  * @param {string} [ctx.sourceLabel]
  * @returns {null | {code, severity, evidence, suggestion}}
  */

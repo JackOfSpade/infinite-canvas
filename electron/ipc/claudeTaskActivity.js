@@ -2,30 +2,33 @@
 // application bundles and interview preparation. Holds described events only
 // (see describeClaudeSdkMessage): no prompt, thinking or answer text, and
 // nothing here is logged or saved.
+import { isParallelToolName } from './parallelSearch.js';
+
 const STEP_LIMIT = 12;
 const LABEL_LIMIT = 160;
 
-function clipped(value, max = 300) {
+/** Collapses whitespace, trims and cuts to `max` characters. */
+export function clipText(value, max = 300) {
   return String(value ?? '').replace(/\s+/gu, ' ').trim().slice(0, max);
 }
 
 const ACTIVITY_TARGET_LIMIT = 120;
-const PARALLEL_TOOL_PREFIX = 'mcp__parallel__';
-const isParallelTool = name => typeof name === 'string' && name.startsWith(PARALLEL_TOOL_PREFIX);
+const PARALLEL_WEB_SEARCH = 'mcp__parallel__web_search';
+const PARALLEL_WEB_FETCH = 'mcp__parallel__web_fetch';
 
 // What a person may see of a tool call. Only a search query and a page address
 // (no query string, which can hold tokens) ever leave this file.
 function toolTarget(name, input) {
-  if (name === 'WebSearch' && typeof input?.query === 'string') return clipped(input.query, ACTIVITY_TARGET_LIMIT) || null;
-  if (name === 'mcp__parallel__web_search') {
+  if (name === 'WebSearch' && typeof input?.query === 'string') return clipText(input.query, ACTIVITY_TARGET_LIMIT) || null;
+  if (name === PARALLEL_WEB_SEARCH) {
     const query = Array.isArray(input?.search_queries) && typeof input.search_queries[0] === 'string' ? input.search_queries[0] : input?.objective;
-    return typeof query === 'string' ? clipped(query, ACTIVITY_TARGET_LIMIT) || null : null;
+    return typeof query === 'string' ? clipText(query, ACTIVITY_TARGET_LIMIT) || null : null;
   }
-  const page = name === 'WebFetch' ? input?.url : name === 'mcp__parallel__web_fetch' ? (Array.isArray(input?.urls) ? input.urls[0] : null) : null;
+  const page = name === 'WebFetch' ? input?.url : name === PARALLEL_WEB_FETCH ? (Array.isArray(input?.urls) ? input.urls[0] : null) : null;
   if (typeof page !== 'string') return null;
   try {
     const url = new URL(page);
-    return clipped(`${url.host}${url.pathname === '/' ? '' : url.pathname}`, ACTIVITY_TARGET_LIMIT) || null;
+    return clipText(`${url.host}${url.pathname === '/' ? '' : url.pathname}`, ACTIVITY_TARGET_LIMIT) || null;
   } catch { return null; }
 }
 
@@ -58,14 +61,14 @@ export function describeClaudeSdkMessage(message) {
     case 'stream_event': return describeStreamEvent(message.event);
     case 'assistant': {
       const calls = content.filter(block => block?.type === 'tool_use' || block?.type === 'server_tool_use')
-        .map(block => ({ tool: clipped(block.name, 60), target: toolTarget(block.name, block.input) }));
+        .map(block => ({ tool: clipText(block.name, 60), target: toolTarget(block.name, block.input) }));
       return calls.length ? { kind: 'tool', messageId: typeof message.message?.id === 'string' ? message.message.id : null, calls } : null;
     }
     case 'user': {
       const results = content.filter(block => block?.type === 'tool_result');
       return results.length ? { kind: 'tool-result', isError: results.some(block => block.is_error === true) } : null;
     }
-    case 'tool_progress': return { kind: 'tool-progress', tool: clipped(message.tool_name, 60), seconds: Number.isFinite(message.elapsed_time_seconds) ? message.elapsed_time_seconds : null };
+    case 'tool_progress': return { kind: 'tool-progress', tool: clipText(message.tool_name, 60), seconds: Number.isFinite(message.elapsed_time_seconds) ? message.elapsed_time_seconds : null };
     case 'result': return { kind: 'finished' };
     case 'rate_limit_event': {
       const info = message.rate_limit_info;
@@ -97,10 +100,10 @@ export const claudeTaskFailureLabel = code => CLAUDE_TASK_FAILURE_LABELS[code]
   || (typeof code === 'string' && code.startsWith('OFFLOAD_') ? 'DeepSeek could not answer' : 'The attempt failed');
 
 function toolLabel({ tool, target }) {
-  if (tool === 'WebSearch' || tool === 'mcp__parallel__web_search') return target ? `Searching the web: ${target}` : 'Searching the web';
-  if (tool === 'WebFetch' || tool === 'mcp__parallel__web_fetch') return target ? `Reading ${target}` : 'Reading a page';
+  if (tool === 'WebSearch' || tool === PARALLEL_WEB_SEARCH) return target ? `Searching the web: ${target}` : 'Searching the web';
+  if (tool === 'WebFetch' || tool === PARALLEL_WEB_FETCH) return target ? `Reading ${target}` : 'Reading a page';
   // web_decisions, find_verticals, search_vertical and image_search all search.
-  if (isParallelTool(tool)) return 'Searching the web';
+  if (isParallelToolName(tool)) return 'Searching the web';
   return `Using ${tool}`;
 }
 

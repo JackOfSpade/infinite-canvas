@@ -16,6 +16,8 @@ import { JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
  */
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+// A whole count of at least one; anything that is not a number counts as one.
+const positiveCount = value => Math.max(1, Math.floor(Number(value) || 1));
 
 // The output size every multi-item batch is sized against. Anthropic's official
 // model overview (platform.claude.com/docs/en/models/overview) gives the latest
@@ -26,8 +28,8 @@ export const BATCH_OUTPUT_TOKEN_BUDGET = 128000 - 1024;
 
 // The career clean layer keeps a 4/5 share of the budget, leaving room for its
 // per-row framing.
-export const CAREER_CLEAN_BUDGET_SHARE_NUMERATOR = 4;
-export const CAREER_CLEAN_BUDGET_SHARE_DENOMINATOR = 5;
+const CAREER_CLEAN_BUDGET_SHARE_NUMERATOR = 4;
+const CAREER_CLEAN_BUDGET_SHARE_DENOMINATOR = 5;
 export const CAREER_CLEAN_RESPONSE_TOKEN_LIMIT = Math.floor(
   BATCH_OUTPUT_TOKEN_BUDGET * CAREER_CLEAN_BUDGET_SHARE_NUMERATOR / CAREER_CLEAN_BUDGET_SHARE_DENOMINATOR,
 );
@@ -40,7 +42,7 @@ const PRICE_BATCH_BASE_TOKENS = 1024;
 const PRICE_BATCH_ITEM_TOKENS = 900;
 const PRICE_BATCH_COMP_TOKENS = 200;
 export function priceSynthesisBatchEstimatedTokens(itemCount = 1, totalCompCount = 0) {
-  const items = Math.max(1, Math.floor(Number(itemCount) || 1));
+  const items = positiveCount(itemCount);
   const comps = Math.max(0, Math.floor(Number(totalCompCount) || 0));
   return PRICE_BATCH_BASE_TOKENS + items * PRICE_BATCH_ITEM_TOKENS + comps * PRICE_BATCH_COMP_TOKENS;
 }
@@ -51,7 +53,7 @@ export function priceSynthesisBatchFits(itemCount = 1, totalCompCount = 0) {
   return priceSynthesisBatchEstimatedTokens(itemCount, totalCompCount) <= BATCH_OUTPUT_TOKEN_BUDGET;
 }
 export function priceSynthesisBatchMaxComps(itemCount = 1) {
-  const items = Math.max(1, Math.floor(Number(itemCount) || 1));
+  const items = positiveCount(itemCount);
   return Math.max(0, Math.floor(
     (BATCH_OUTPUT_TOKEN_BUDGET - PRICE_BATCH_BASE_TOKENS - items * PRICE_BATCH_ITEM_TOKENS)
       / PRICE_BATCH_COMP_TOKENS,
@@ -62,8 +64,8 @@ const HUB_SCAN_BATCH_BASE_TOKENS = 1024;
 const HUB_SCAN_PLATFORM_TOKENS = 2688;
 const HUB_SCAN_PAGE_TOKENS = 448;
 export function marketplaceHubScanBatchEstimatedTokens(platformCount = 1, urlCount = 1) {
-  const platforms = Math.max(1, Math.floor(Number(platformCount) || 1));
-  const urls = Math.max(1, Math.floor(Number(urlCount) || 1));
+  const platforms = positiveCount(platformCount);
+  const urls = positiveCount(urlCount);
   return HUB_SCAN_BATCH_BASE_TOKENS + platforms * HUB_SCAN_PLATFORM_TOKENS + urls * HUB_SCAN_PAGE_TOKENS;
 }
 export function marketplaceHubScanBatchMaxTokens(platformCount = 1, urlCount = 1) {
@@ -119,7 +121,7 @@ const JOB_SCORING_BASE_TOKENS = 1600;
 const JOB_SCORING_TOKENS_PER_JOB = 2800;
 
 export function jobScoringEstimatedTokens(itemCount = 1) {
-  const items = Math.max(1, Math.floor(Number(itemCount) || 1));
+  const items = positiveCount(itemCount);
   return JOB_SCORING_BASE_TOKENS + items * JOB_SCORING_TOKENS_PER_JOB;
 }
 
@@ -290,7 +292,7 @@ export const JOB_PREFERENCE_RESEARCH_ASSESSMENT_MAX_ITEMS = Math.floor(
 ) + 1;
 
 export function jobPreferenceResearchMaxTokens(itemCount = 1) {
-  const n = Math.max(1, Math.floor(Number(itemCount) || 1));
+  const n = positiveCount(itemCount);
   return Math.min(
     BATCH_OUTPUT_TOKEN_BUDGET,
     JOB_PREFERENCE_RESEARCH_FLOOR_TOKENS + Math.max(0, n - 1) * JOB_PREFERENCE_RESEARCH_EXTRA_ITEM_TOKENS,
@@ -298,7 +300,7 @@ export function jobPreferenceResearchMaxTokens(itemCount = 1) {
 }
 
 export function jobPreferenceResearchAssessmentMaxTokens(itemCount = 1) {
-  const n = Math.max(1, Math.floor(Number(itemCount) || 1));
+  const n = positiveCount(itemCount);
   return Math.min(
     BATCH_OUTPUT_TOKEN_BUDGET,
     JOB_PREFERENCE_ASSESSMENT_FLOOR_TOKENS + Math.max(0, n - 1) * JOB_PREFERENCE_ASSESSMENT_EXTRA_ITEM_TOKENS,
@@ -339,8 +341,8 @@ export const COMPENSATION_ASSESSMENT_PER_ROW_TOKENS = 1200;
 // Keep this next to the cohort formula because both share the same
 // extraction task, but deliberately let its downstream phase pack beyond the
 // seven-item grounded-research batch that feeds it.
-export const ROLE_FAMILY_ASSESSMENT_BASE_TOKENS = 1024;
-export const ROLE_FAMILY_ASSESSMENT_PER_ROLE_TOKENS = 700;
+const ROLE_FAMILY_ASSESSMENT_BASE_TOKENS = 1024;
+const ROLE_FAMILY_ASSESSMENT_PER_ROLE_TOKENS = 700;
 export const MAX_ROLE_FAMILIES_PER_ASSESSMENT = Math.floor(
   (BATCH_OUTPUT_TOKEN_BUDGET - ROLE_FAMILY_ASSESSMENT_BASE_TOKENS)
     / ROLE_FAMILY_ASSESSMENT_PER_ROLE_TOKENS,
@@ -354,7 +356,7 @@ export const MAX_COMPENSATION_COHORTS_PER_ASSESSMENT = Math.floor(
 );
 
 export function roleFamilyAssessmentMaxTokens(roleCount = 1) {
-  const roles = Math.max(1, Math.floor(Number(roleCount) || 1));
+  const roles = positiveCount(roleCount);
   return Math.min(
     BATCH_OUTPUT_TOKEN_BUDGET,
     ROLE_FAMILY_ASSESSMENT_BASE_TOKENS + roles * ROLE_FAMILY_ASSESSMENT_PER_ROLE_TOKENS,
@@ -362,8 +364,8 @@ export function roleFamilyAssessmentMaxTokens(roleCount = 1) {
 }
 
 export function compensationCohortAssessmentMaxTokens(cohortCount = 1, rowCount = 1) {
-  const cohorts = Math.max(1, Math.floor(Number(cohortCount) || 1));
-  const rows = Math.max(1, Math.floor(Number(rowCount) || 1));
+  const cohorts = positiveCount(cohortCount);
+  const rows = positiveCount(rowCount);
   return Math.min(
     BATCH_OUTPUT_TOKEN_BUDGET,
     COMPENSATION_ASSESSMENT_BASE_TOKENS
@@ -373,8 +375,8 @@ export function compensationCohortAssessmentMaxTokens(cohortCount = 1, rowCount 
 }
 
 export function compensationCohortAssessmentFits(cohortCount = 1, rowCount = 1) {
-  const cohorts = Math.max(1, Math.floor(Number(cohortCount) || 1));
-  const rows = Math.max(1, Math.floor(Number(rowCount) || 1));
+  const cohorts = positiveCount(cohortCount);
+  const rows = positiveCount(rowCount);
   return cohorts <= MAX_COMPENSATION_COHORTS_PER_ASSESSMENT
     && COMPENSATION_ASSESSMENT_BASE_TOKENS
       + cohorts * COMPENSATION_ASSESSMENT_PER_COHORT_TOKENS

@@ -5,8 +5,7 @@
 import childProcess from 'node:child_process';
 import crypto from 'node:crypto';
 import { CLAUDE_HANDOFF_SYSTEM_PROMPT, ClaudeRunnerError } from './claudeApplicationRunner.js';
-import { offloadReasoning } from './aiCallProviders.js';
-import { OFFLOAD_MAX_TOKENS, OFFLOAD_TIMEOUT_MS, offloadEmptyAnswer, offloadFailure, offloadUsage, runOffloadComplete } from './offloadCompleteStage.js';
+import { OFFLOAD_MAX_TOKENS, OFFLOAD_TIMEOUT_MS, offloadAnswerFields, offloadEmptyAnswer, offloadFailure, offloadRequestReasoning, runOffloadComplete } from './offloadCompleteStage.js';
 
 /** The handoff system prompt (plus any shared reference) and the user text, as CLI messages. */
 export function handoffMessages({ text, systemAppend = '' }) {
@@ -28,11 +27,7 @@ export async function offloadTextCall({
   messages, route, reasoning, tag, signal, maxTokens = OFFLOAD_MAX_TOKENS, timeoutMs = OFFLOAD_TIMEOUT_MS,
   binPath, nodePath = process.execPath, spawnImpl = childProcess.spawn, caller = 'infinite-canvas', webTools,
 } = {}) {
-  let reasoningRequest;
-  try { reasoningRequest = offloadReasoning(reasoning ?? 'high'); } catch {
-    throw new ClaudeRunnerError('OFFLOAD_INVALID_REQUEST', 'The offload reasoning level is not valid.');
-  }
-  if (signal?.aborted) throw new ClaudeRunnerError('CLAUDE_CANCELLED', 'Offload run was cancelled.');
+  const reasoningRequest = offloadRequestReasoning(reasoning, signal);
   const request = {
     version: 1, route, messages, maxTokens, reasoning: reasoningRequest, timeoutMs,
     caller, tag: String(tag ?? 'text'),
@@ -61,12 +56,7 @@ export async function offloadTextCall({
   }
   return {
     text: answer,
-    model: typeof result.model === 'string' ? result.model : route,
-    durationMs: Number.isFinite(result.latencyMs) ? result.latencyMs : null,
-    usage: offloadUsage(result),
-    costUsd: typeof result.costUsd === 'number' ? result.costUsd : undefined,
-    provider: 'offload',
-    route,
+    ...offloadAnswerFields(result, route),
     reasoning,
     ...(useWebTools ? { webTools: { turns: result.toolLoop?.turn ?? null, toolCalls: result.toolLoop?.toolCalls ?? null } } : {}),
   };

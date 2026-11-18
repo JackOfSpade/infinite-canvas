@@ -269,7 +269,6 @@ export async function main(argv = process.argv.slice(2)) {
   if (args['--help']) { console.log(USAGE); return; }
   if (!args['--out']) throw new Error(USAGE);
   const outDir = path.resolve(args['--out']);
-  await assertExternalOutput(outDir);
   const summary = await runAb({ outDir, ultracodes: parseUltracode(args['--ultracode'] || 'on,off'),
     runs: args['--runs'] === undefined ? 2 : Number(args['--runs']), log: message => console.log(message) });
   console.log(JSON.stringify(summary.arms, null, 2));

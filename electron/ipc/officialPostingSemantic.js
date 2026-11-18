@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS, SALARY_PROVENANCES, normalizeApplyOptions, officialHttpsUrl } from './officialPostingFields.js';
+import { LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS, SALARY_PROVENANCES, OFFICIAL_LEVELS, normalizeApplyOptions, officialHttpsUrl } from './officialPostingFields.js';
 import { projectOfficialPostingSourceFields } from './officialPostingSourceProjection.js';
 import { isUnsafeControlCharacter } from './structuredResume.js';
 import { normalizeJobListingExternalUrl } from '../../src/utils/jobListingUrl.js';
@@ -201,7 +201,7 @@ export function officialPostingSemanticProofMatches(job, value) {
   const proof = posting?.semanticMatch;
   if (proof?.version !== 1 || typeof proof.inputHash !== 'string' || !/^[a-f0-9]{64}$/iu.test(proof.inputHash)
     || !Array.isArray(posting?.trail) || !posting.trail.includes('semantic-match-v1')) return false;
-  if (['L1', 'L2', 'L3', 'L4'].includes(posting.level)
+  if (OFFICIAL_LEVELS.has(posting.level)
     && (typeof proof.sourceHash !== 'string' || !/^[a-f0-9]{64}$/iu.test(proof.sourceHash))) return false;
   const want = proof.inputHash.toLowerCase();
   const holds = shape => {

@@ -164,6 +164,10 @@ export default [
       const stopped = await stopping.resolve([{ label: 'Apply on A', href: GOTO('a') }, { label: 'Apply on B', href: GOTO('b') }]);
       assert.equal(stopping.rateLimited, true); assert.equal(limited.log.gotos, 1, 'no further Google requests once rate-limited');
       assert.deepEqual(stopped.map(item => item.href), [GOTO('a'), GOTO('b')]);
+      const cancelled = fakeTab({ [GOTO('a')]: [site] });
+      const cancelledOut = await createGoogleApplyRedirectResolver(async () => cancelled.tab).resolve([{ label: 'Apply on A', href: GOTO('a') }], { aborted: true });
+      assert.deepEqual(cancelledOut.map(item => item.href), [GOTO('a')], 'an aborted run follows nothing and keeps every candidate');
+      assert.equal(cancelled.log.gotos, 0);
       const idle = fakeTab({}); let opened = 0;
       await createGoogleApplyRedirectResolver(async () => { opened += 1; return idle.tab; }).resolve([direct]);
       assert.equal(opened, 0, 'a signed-in page with direct links opens no tab');

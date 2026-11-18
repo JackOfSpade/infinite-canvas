@@ -81,14 +81,24 @@ function warningProjectionSignature(warning) {
   }
 }
 
-function isSameWarningProjection(a, b) {
-  const aSignature = warningProjectionSignature(a);
-  const bSignature = warningProjectionSignature(b);
-  return !!aSignature && aSignature === bSignature;
+// Signatures are pure, so one reconcile pass computes each warning object's
+// signature once instead of once per comparison.
+function createSignatureReader() {
+  const cache = new WeakMap();
+  return (warning) => {
+    if (!warning || typeof warning !== 'object') return warningProjectionSignature(warning);
+    if (!cache.has(warning)) cache.set(warning, warningProjectionSignature(warning));
+    return cache.get(warning);
+  };
 }
 
-function removeOneWarningProjection(warnings, projection) {
-  const index = warnings.findIndex(warning => isSameWarningProjection(warning, projection));
+function hasWarningProjection(warnings, signature, signatureOf) {
+  return !!signature && warnings.some(entry => signatureOf(entry) === signature);
+}
+
+function removeOneWarningProjection(warnings, projectionSignature, signatureOf) {
+  if (!projectionSignature) return warnings;
+  const index = warnings.findIndex(warning => signatureOf(warning) === projectionSignature);
   if (index < 0) return warnings;
   return [...warnings.slice(0, index), ...warnings.slice(index + 1)];
 }
@@ -103,6 +113,7 @@ export function reconcileTerminalJobSourceWarningProjection(
   const sourceIds = new Set([...prior.keys(), ...Object.keys(sourceProgress || {})]);
   const nextProjectedWarnings = new Map();
   let next = current;
+  const signatureOf = createSignatureReader();
 
   for (const sourceId of sourceIds) {
     const progress = sourceProgress?.[sourceId];
@@ -113,14 +124,17 @@ export function reconcileTerminalJobSourceWarningProjection(
       ? { ...warning, sourceId }
       : null;
     const priorWarning = prior.get(sourceId) || null;
+    const priorSignature = priorWarning ? signatureOf(priorWarning) : null;
+    const liveSignature = liveWarning ? signatureOf(liveWarning) : null;
 
     // Same terminal outcome, still represented: retain both the warning and
     // its provenance without writing on every progress/render tick.
     if (
       priorWarning
       && liveWarning
-      && isSameWarningProjection(priorWarning, liveWarning)
-      && next.some(entry => isSameWarningProjection(entry, priorWarning))
+      && !!priorSignature
+      && priorSignature === liveSignature
+      && hasWarningProjection(next, priorSignature, signatureOf)
     ) {
       nextProjectedWarnings.set(sourceId, priorWarning);
       continue;
@@ -128,14 +142,14 @@ export function reconcileTerminalJobSourceWarningProjection(
 
     // Clear/retry and changed terminal outcomes retract only the bridge's own
     // entry. Final/backend or unrelated source warnings remain untouched.
-    if (priorWarning) next = removeOneWarningProjection(next, priorWarning);
+    if (priorWarning) next = removeOneWarningProjection(next, priorSignature, signatureOf);
     // Do not copy an untrusted/non-JSON-shaped progress payload into durable
     // hub state. Final backend warnings are preserved in `next` regardless.
-    if (!liveWarning || !warningProjectionSignature(liveWarning)) continue;
+    if (!liveWarning || !liveSignature) continue;
 
     // If another authority has already supplied this exact warning, do not
     // claim it as provisional: a later progress clear must not remove it.
-    if (next.some(entry => isSameWarningProjection(entry, liveWarning))) continue;
+    if (hasWarningProjection(next, liveSignature, signatureOf)) continue;
     next = [...next, liveWarning];
     nextProjectedWarnings.set(sourceId, liveWarning);
   }

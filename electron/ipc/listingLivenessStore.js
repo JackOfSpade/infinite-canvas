@@ -5,7 +5,6 @@ import { getCurrentIpcRequestContext } from './ipcUtils.js';
 import { officialHttpsUrl } from './officialPostingFields.js';
 
 const MAX_ENTRIES = 5_000;
-const flagsByMap = new WeakMap();
 const expiryByMap = new WeakMap();
 const MAX_EXPIRY_CANDIDATES = 8;
 
@@ -100,20 +99,4 @@ export function officialExpiryCandidatesConfirmedClosed(row) {
   const bucket = key ? expiryMap()?.get(key) : null;
   return Boolean(bucket && !bucket.truncated && bucket.candidates.length
     && bucket.candidates.every(candidate => candidate.verdict === 'closed'));
-}
-
-function runFlags() {
-  const map = evidenceMap();
-  if (!map) return null;
-  if (!flagsByMap.has(map)) flagsByMap.set(map, { breakerTripped: false });
-  return flagsByMap.get(map);
-}
-
-export function tripListingLivenessBreaker() {
-  const flags = runFlags();
-  if (flags) flags.breakerTripped = true;
-}
-
-export function isListingLivenessBreakerTripped() {
-  return runFlags()?.breakerTripped === true;
 }

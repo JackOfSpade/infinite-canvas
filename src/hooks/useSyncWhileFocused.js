@@ -26,5 +26,5 @@ export function useSyncWhileFocused(externalValue) {
     onBlur: () => { focusRef.current = false; },
   };
 
-  return { value, setValue, focusProps, focusRef };
+  return { value, setValue, focusProps };
 }

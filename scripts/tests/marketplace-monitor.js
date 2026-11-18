@@ -1,6 +1,6 @@
 import { READ_STATE_READ_TOKEN, READ_STATE_UNREAD_TOKEN, annotateReadState, assert, buildMarketplaceModuleRollup, buildSellHubPriceDropRollup, buildSellHubResolveRollup, buildSellHubResolveSnapshot, deriveHubScanStatus, fs, normalizeMarketplaceWatchUrls, path, prepareHubPages, resolveAttentionSourceUrls, stripHtmlForAnalysis, stripReadStateTokens, summarizeReadState, visitCanvasNodes, withStatusCheckLock } from '../test-dependencies.js';
 import { marketplaceHubScanBatchFits, marketplaceHubScanMaxPagesForPlatform } from '../../electron/ipc/resultCaps.js';
-import { finalizeTerminalHubScan, mergePreparedHubScanSections, packPreparedHubScans, scanPreparedHubPageBatch } from '../../electron/ipc/listingStatusCheck.js';
+import { createSharedVerifierGate, finalizeTerminalHubScan, mergePreparedHubScanSections, packPreparedHubScans, scanPreparedHubPageBatch } from '../../electron/ipc/listingStatusCheck.js';
 
 // Runs the real production sequence for one platform: prepareHubPages (scrape
 // + transport-outcome classification, no LLM call), then either
@@ -805,6 +805,37 @@ export default [
       assert(s.unread === 1, `1 unread conversation counted (got ${s.unread})`);
       const empty = summarizeReadState('');
       assert(empty.read === 0 && empty.unread === 0, 'empty html → zero counts');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'shared platform verifier: one cancelled caller does not reject the verdict for the others',
+    run: async () => {
+      let runs = 0;
+      let sharedSignal;
+      const verify = createSharedVerifierGate(async (_key, signal) => {
+        runs += 1;
+        sharedSignal = signal;
+        await new Promise(resolve => setTimeout(resolve, 20));
+        return { connected: true };
+      });
+      const first = new AbortController();
+      const second = new AbortController();
+      const a = verify('p', first.signal);
+      const b = verify('p', second.signal);
+      first.abort(Object.assign(new Error('cancelled'), { name: 'AbortError' }));
+      let aError = null;
+      try { await a; } catch (error) { aError = error; }
+      assert(aError?.name === 'AbortError', 'the cancelled caller is rejected');
+      assert(sharedSignal.aborted === false, 'the shared run keeps going while another caller waits');
+      assert((await b).connected === true, 'the uncancelled caller still gets the verdict');
+      assert(runs === 1, 'the verifier ran once');
+      const only = new AbortController();
+      const c = verify('p', only.signal);
+      only.abort(new Error('gone'));
+      let cError = null;
+      try { await c; } catch (error) { cError = error; }
+      assert(cError?.message === 'gone' && sharedSignal.aborted === true, 'the run aborts once every caller is cancelled');
       return { ok: true };
     },
   }

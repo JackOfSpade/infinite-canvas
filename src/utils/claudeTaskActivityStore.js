@@ -46,7 +46,7 @@ export function normalizeClaudeActivityEntry(raw) {
 }
 
 /** Pure: only the CONTRACT fields of one signed-in Claude account. */
-export function normalizeClaudeAccount(raw) {
+function normalizeClaudeAccount(raw) {
   if (!isObject(raw) || !text(raw.id, 60)) return null;
   return Object.freeze({
     id: text(raw.id, 60),
@@ -119,11 +119,4 @@ export function subscribeClaudeTaskActivity(listener) {
     listeners.delete(listener);
     if (listeners.size === 0) { try { detach?.(); } catch { /* already gone */ } detach = null; }
   };
-}
-
-// Test seam: the store is module-level.
-export function __resetClaudeTaskActivityForTests() {
-  snapshot = IDLE;
-  listeners.clear();
-  detach = null;
 }

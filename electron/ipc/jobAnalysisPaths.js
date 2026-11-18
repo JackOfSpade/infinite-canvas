@@ -348,12 +348,14 @@ export async function rebindJobAnalysisRecoveryOwners(oldCanvasFilePath, newCanv
       const destination = path.join(newDir, destinationNames.get(name) || rebindArtifactName(name, oldPrefix, newNamespace, oldCanvasPath, newCanvasPath, parsedJson.get(name), ownersByNamespace));
       const stat = await fs.promises.lstat(source);
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_REBIND_ARTIFACT_BYTES) throw new Error('unsafe-artifact');
-      const sourceBytes = await fs.promises.readFile(source);
-      let bytes = sourceBytes;
+      let bytes;
       if (name.endsWith('.json')) {
         bytes = destinationBytes.get(path.basename(destination));
         if (!bytes) throw new Error('malformed-artifact');
-      } else if (name.endsWith('.txt')) {
+      } else {
+        bytes = await fs.promises.readFile(source);
+      }
+      if (name.endsWith('.txt')) {
         // Prompt content carries no owner field. Migrate it only beside a
         // verified snapshot from the same (canvas or canvas+hub) namespace.
         const promptStem = name.slice(0, -'-scoring-AI-prompt.txt'.length);

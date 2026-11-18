@@ -13,7 +13,7 @@ import { officialPostingAdapterUrl, officialPostingChunks, unresolvedOfficialPos
 import { canonicalLeadUrl, descriptionOverlap } from './officialPostingMatch.js';
 import { officialPostingSemanticInputHash, officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
 import { extractAtsTenant, isAggregatorHost, isHostedAtsSurface, normalizedSourceHost, strictEmployerEqual } from './officialSourceHosts.js';
-import { normalizeOfficialPosting, officialHttpsUrl, boundedOfficialPostingTrail, officialPostingComparativeTrail, OFFICIAL_POSTING_LEVELS, OFFICIAL_POSTING_OUTCOMES, OFFICIAL_POSTING_TRAIL, OFFICIAL_POSTING_COMPARATIVE_CODES } from './officialPostingFields.js';
+import { OFFICIAL_LEVELS, TEXT_LEVELS, normalizeOfficialPosting, officialHttpsUrl, boundedOfficialPostingTrail, officialPostingComparativeTrail, OFFICIAL_POSTING_LEVELS, OFFICIAL_POSTING_OUTCOMES, OFFICIAL_POSTING_TRAIL, OFFICIAL_POSTING_COMPARATIVE_CODES } from './officialPostingFields.js';
 import { mergeListingLivenessTelemetry } from './listingLivenessTelemetry.js';
 import { mergeBoardClosedTelemetry } from './officialPostingBoardClosed.js';
 import { buildOfficialPostingResearchRequest, parseOfficialPostingResearchResponse } from './officialPostingBridge.js';
@@ -26,10 +26,8 @@ import { buildOfficialPostingJudgeRequest, decideOfficialPostingJudgments, rankJ
 import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from './officialPostingNegativePolicy.js';
 import { officialPostingHandoffFailureCause, officialPostingHandoffFailureCode, recordOfficialPostingDiscovery } from './officialPostingDiscoveryDiagnostics.js';
 
-export const OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS = 20 * 60 * 1_000;
+const OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS = 20 * 60 * 1_000;
 export const OFFICIAL_POSTING_HANDOFF_ASSIGNMENT_TIMEOUT_MS = 20 * 60 * 1_000;
-const VERIFIED_LEVELS = new Set(['L1', 'L2', 'L3', 'L4']);
-const TEXT_LEVELS = new Set(['L1', 'L2', 'L3']);
 const stores = new Map();
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const normalizedText = value => String(value ?? '').normalize('NFKC').replace(/\s+/gu, ' ').trim();
@@ -292,11 +290,11 @@ async function cachedChatResolution(job, store) {
   const posting = normalizeOfficialPosting(record?.officialPosting);
   if (!posting || !officialPostingRecordMatchesScrapedIdentity(job, record) || !officialPostingSemanticProofMatches(job, posting)
     || !shouldPersistOfficialPostingResult({ officialPosting: posting }, { researchRan: true })) return null;
-  if (VERIFIED_LEVELS.has(posting.level) && ['found', 'link-only'].includes(posting.outcome)) {
+  if (OFFICIAL_LEVELS.has(posting.level) && ['found', 'link-only'].includes(posting.outcome)) {
     return { record, postedBy: strictEmployerEqual(posting.employer, job?.company) ? '' : String(job?.company || ''),
       officialPosting: { ...posting, trail: boundedOfficialPostingTrail([...(posting.trail || []), 'cache-hit']) } };
   }
-  if (!VERIFIED_LEVELS.has(posting.level) && !posting.trail?.includes('closed')) {
+  if (!OFFICIAL_LEVELS.has(posting.level) && !posting.trail?.includes('closed')) {
     return { record, postedBy: unresolvedOfficialPosting(job).postedBy,
       officialPosting: { ...posting, trail: boundedOfficialPostingTrail([...(posting.trail || []), 'recent-miss']) } };
   }
@@ -320,7 +318,7 @@ function judgeLeadsFor(member, found) {
   };
   const prior = normalizeOfficialPosting(member.priorOfficialRecord?.officialPosting);
   // Only a verification of this same listing counts: the judges may then accept that its page has gone without any text to compare.
-  const confirmedEarlier = prior && VERIFIED_LEVELS.has(prior.level) && ['found', 'link-only'].includes(prior.outcome)
+  const confirmedEarlier = prior && OFFICIAL_LEVELS.has(prior.level) && ['found', 'link-only'].includes(prior.outcome)
     && officialPostingSemanticProofMatches(member.job, prior);
   add(prior?.sourceUrl, 'posting', prior?.employer, confirmedEarlier ? { confirmedEarlier: true, title: prior.title } : {});
   add(prior?.officialApplyUrl, 'posting', prior?.employer);
@@ -715,7 +713,7 @@ export async function resolveOfficialPostings(jobs, {
     const resolved = rows.map(job => { const result = byJob.get(job); return { ...job, postedBy: result?.postedBy,
       officialPosting: normalizeOfficialPosting(result?.officialPosting) || undefined }; });
     if (telemetry && typeof telemetry === 'object') telemetry.officialPosting = stats;
-    return { jobs: resolved, telemetry: stats, expiryCandidates: rows.map(() => []) };
+    return { jobs: resolved, telemetry: stats };
   } finally {
     await Promise.allSettled(judgmentTasks);
     readHealth.flush();

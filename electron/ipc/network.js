@@ -9,6 +9,24 @@ const { ipcMain } = electronPkg;
 
 /** Pre-compiled once at module level to avoid recompilation on every fetch. */
 const TITLE_REGEX = /<title[^>]*>([^<]+)<\/title>/i;
+// The earliest place in the text where a title could still be completed by more
+// data: a prefix of `<title...>...</title>` that runs to the end of the text.
+const optionalPrefix = (word, tail = '') => word.split('').reduceRight((inner, letter) => `(?:${letter}${inner})?`, tail);
+const PARTIAL_TITLE_REGEX = new RegExp(
+  `<${optionalPrefix('title', `[^>]*(?:>[^<]*(?:<(?:\\/${optionalPrefix('title')})?)?)?`)}$`, 'i');
+
+/**
+ * Looks for the title in the text read so far without rescanning text that can
+ * no longer start one. `scanFrom` is the value returned by the previous call.
+ * @returns {{ match: RegExpExecArray|null, scanFrom: number }}
+ */
+export function scanForTitle(text, scanFrom = 0) {
+  const tail = text.slice(scanFrom);
+  const match = TITLE_REGEX.exec(tail);
+  if (match) return { match, scanFrom };
+  const partial = tail.search(PARTIAL_TITLE_REGEX);
+  return { match: null, scanFrom: partial === -1 ? text.length : scanFrom + partial };
+}
 
 // Static safety bound (not adaptive): a <title> lives in the document head, so a
 // fetched page that hasn't yielded one within 3s is almost certainly not going to.
@@ -62,6 +80,7 @@ export function registerNetworkHandlers({ onNodeDeleted = null, ipcMainInstance 
       const decoder = new TextDecoder();
       let text = '';
       let bytesRead = 0;
+      let scanFrom = 0;
 
       try {
         while (true) {
@@ -75,10 +94,11 @@ export function registerNetworkHandlers({ onNodeDeleted = null, ipcMainInstance 
           text += decoder.decode(inspected, { stream: true });
           bytesRead += inspected.byteLength;
           
-          const earlyMatch = text.match(TITLE_REGEX);
-          if (earlyMatch) {
+          const scan = scanForTitle(text, scanFrom);
+          if (scan.match) {
             break; // Stop streaming early if title is found!
           }
+          scanFrom = scan.scanFrom;
 
           if (bytesRead >= MAX_SIZE) {
             break;

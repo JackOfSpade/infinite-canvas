@@ -3,6 +3,9 @@
 
 export const MISSING_PRELOAD = Object.freeze({ phase: 'error', error: { code: 'preload-missing', message: 'The practice call window could not reach its main process. Close it and start the call again from the hub.' } });
 
+// The replay state shown when the saved call cannot be read; a fresh object each time.
+export const replayLoadFailed = () => ({ audioUrl: null, durationMs: 0, transcript: [], chapters: [], feedback: null, analysis: { status: 'failed', error: 'The replay could not be loaded.' } });
+
 export function mergeState(current, patch) {
   if (!patch || typeof patch !== 'object') return current;
   return { ...(current || {}), ...patch };

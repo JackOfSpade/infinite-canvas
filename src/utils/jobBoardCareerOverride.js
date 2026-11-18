@@ -55,7 +55,7 @@ export function isJobBoardCareerOverrideRunId(value) {
 // while its official-posting run id remains owned by the requesting card.
 export const BOARD_STAGE_RUN_PREFIX = 'board-stage:';
 
-export function isBoardStageRunId(runId) {
+function isBoardStageRunId(runId) {
   return typeof runId === 'string' && runId.startsWith(BOARD_STAGE_RUN_PREFIX);
 }
 
@@ -375,7 +375,7 @@ export function resolveApplicationCareerSnapshotId({ cardData, boardData, search
 
 // Applications and salary analysis share one career record for the Board, independent of
 // the immutable career pins that originally produced each hiring-fit score.
-export function resolveBoardCareerSnapshotId({ boardData, searchModules = [] } = {}) {
+function resolveBoardCareerSnapshotId({ boardData, searchModules = [] } = {}) {
   const current = recordOf(boardData);
   if (current?.approved) return { careerSnapshotId: current.approved.careerSnapshotId, source: 'board', blocked: false };
   // Dropped but unfinished Board data is not an empty slot. Do not silently

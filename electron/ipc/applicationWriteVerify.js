@@ -1,7 +1,7 @@
+/** Application protocol v2 state and prompt policy. No candidate data is kept here. */
 import { COVER_LETTER_EVIDENCE_SELECTION_RULE } from './applicationWriterGuidance.js';
 import { applicationUnitRegistry, argumentBindings, renderedUnitCharacters, UNIT_PATCH_SCHEMA } from './applicationUnitPatches.js';
 import { bootstrapApplicationUnitState } from './applicationGateFindings.js';
-/** Application protocol v2 state and prompt policy. No candidate data is kept here. */
 import { careerChangedFindingErrors, careerFactFindingErrors, careerFactFindingsSection, careerFactTransition, careerInflationRules } from './careerWritingCore.js';
 import { isCareerSkillIndexEligible } from './careerSnapshot.js';
 import { cleanCareerSkillNames } from './careerCleanLayer.js';
@@ -96,17 +96,27 @@ export function initialWriteVerifyState(count) {
   };
 }
 
-function catalogEntityRows(catalog, kind, id) {
-  const prefix = `host.career.${kind}.${id}.`;
-  return catalog.filter(row => row.id?.startsWith(prefix));
+/** Rows keyed by every dotted prefix of their id, in catalog order, so an entity's rows are one lookup. */
+function catalogPrefixIndex(catalog) {
+  const index = new Map();
+  for (const row of catalog) {
+    if (typeof row.id !== 'string') continue;
+    for (let dot = row.id.indexOf('.'); dot !== -1; dot = row.id.indexOf('.', dot + 1)) {
+      const prefix = row.id.slice(0, dot + 1);
+      const rows = index.get(prefix);
+      if (rows) rows.push(row); else index.set(prefix, [row]);
+    }
+  }
+  return index;
 }
 
 /** Same entity order and ID-inline full quotes as the approved experiment hand. */
 export function fullApprovedHand(profile, catalog) {
   const seen = new Set();
   const lines = [];
+  const byPrefix = catalogPrefixIndex(catalog);
   const emit = (kind, unit) => {
-    for (const row of catalogEntityRows(catalog, kind, unit.id)) {
+    for (const row of byPrefix.get(`host.career.${kind}.${unit.id}.`) || []) {
       if (seen.has(row.id)) throw new Error(`Duplicate approved catalog ID ${row.id}.`);
       seen.add(row.id);
       lines.push(`[${row.id}] ${row.cleanQuote || row.quote}`);
@@ -135,6 +145,7 @@ export function fullApprovedHand(profile, catalog) {
 /** The skills the writer and converter may list: exact names and their only skill-group citation IDs. */
 export function writeVerifySkillIndex({ profile, catalog, listingEvidence, careerSkillEvidence }) {
   const cleanSkills = cleanCareerSkillNames(profile, catalog);
+  const byPrefix = catalogPrefixIndex(catalog);
   const skillDeclarations = new Map((careerSkillEvidence?.skills || []).map(skill => [skill.id, skill.declaredInSkillsSection]));
   return (profile.skills || []).filter(isCareerSkillIndexEligible)
     .filter(skill => applicationSkillPermittedForPosting({
@@ -144,7 +155,7 @@ export function writeVerifySkillIndex({ profile, catalog, listingEvidence, caree
         ? { declaredInSkillsSection: skillDeclarations.get(skill.id) } : {}),
     }, listingEvidence)).map(skill => ({
     name: cleanSkills.get(skill.id) || skill.name,
-    evidenceIds: catalog.filter(row => row.id?.startsWith(`host.career.skill.${skill.id}.`)).map(row => row.id),
+    evidenceIds: (byPrefix.get(`host.career.skill.${skill.id}.`) || []).map(row => row.id),
   }));
 }
 
@@ -257,10 +268,7 @@ export function writeVerifyNextAfterCandidate(state) {
   }
   const accepted = acceptedWriteVerifyCandidates(state);
   if (!accepted.length) return 'write-verify-human-stop';
-  if (state.selectionPolicy === 'first-accepted') {
-    state.ranking = [accepted[0].id]; state.factIndex = 0; return 'fact-check';
-  }
-  if (accepted.length === 1) { state.ranking = [accepted[0].id]; state.factIndex = 0; return 'fact-check'; }
+  if (state.selectionPolicy === 'first-accepted' || accepted.length === 1) { state.ranking = [accepted[0].id]; state.factIndex = 0; return 'fact-check'; }
   return 'pick';
 }
 
@@ -356,6 +364,19 @@ export function factCorrectionTransition({ priorRound = 0, failed, factIndex, ra
 
 const WRITE_VERIFY_CHECK_ID_PREFIX_RE = /^([a-z][a-z0-9-]*):\s/u;
 
+/** Keeps the newest item for each key, then returns at most `max` of them, oldest first. */
+function newestDistinct(items, keyOf, max) {
+  const seen = new Set();
+  const newestFirst = [];
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const key = keyOf(items[index]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    newestFirst.push(items[index]);
+  }
+  return newestFirst.slice(0, max).reverse();
+}
+
 /**
  * The deterministic findings that dropped earlier candidates, for the next
  * write handoff. Each dropped candidate keeps its dropReason (the verbatim
@@ -376,16 +397,7 @@ export function droppedCandidateFindings(state, max = WRITE_VERIFY_DROPPED_FINDI
       rows.push({ candidateId: candidate.id, checkId: WRITE_VERIFY_CHECK_ID_PREFIX_RE.exec(text)?.[1] || null, text });
     }
   }
-  const seen = new Set();
-  const newestFirst = [];
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const row = rows[index];
-    const key = JSON.stringify([row.checkId, row.text]);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    newestFirst.push(row);
-  }
-  return newestFirst.slice(0, max).reverse();
+  return newestDistinct(rows, row => JSON.stringify([row.checkId, row.text]), max);
 }
 
 export const WRITE_VERIFY_DROPPED_FINDINGS_HEADING = 'EARLIER DRAFTS RETURNED BY DETERMINISTIC CHECKS (OBSERVATIONS, NOT WORDING)';
@@ -422,14 +434,7 @@ export function priorRoundFindings(rows, corrections, max = WRITE_VERIFY_PRIOR_R
       if (text && !current.has(text)) texts.push(text);
     }
   }
-  const seen = new Set();
-  const newestFirst = [];
-  for (let index = texts.length - 1; index >= 0; index -= 1) {
-    if (seen.has(texts[index])) continue;
-    seen.add(texts[index]);
-    newestFirst.push(texts[index]);
-  }
-  return newestFirst.slice(0, max).reverse();
+  return newestDistinct(texts, text => text, max);
 }
 
 function priorRoundsSection(texts) {

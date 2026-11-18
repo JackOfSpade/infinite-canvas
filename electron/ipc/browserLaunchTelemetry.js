@@ -1,20 +1,10 @@
-// Persisted record of shared-profile browser-launch COLLISIONS.
+// Persisted record of shared-profile browser-launch collisions.
 //
-// WHY: the one shared Chrome profile (getUserDataDir()) is OS-locked to a single
-// process at a time. When a second Chrome tries to launch on it — a headless
-// rescrape firing while a visible captcha-resolve window is still open, or two
-// captcha-resolve windows overlapping — puppeteer.launch() fails with one of two
-// distinctive errors:
-//   - headless: "The browser is already running for <userDataDir>. Use a different
-//     `userDataDir` or stop the running browser first."
-//   - visible:  "Failed to launch the browser process: … Code: 0 … stderr:
-//     Opening in existing browser session." (Chrome handed off to the existing
-//     process and exited 0; puppeteer sees no debugging port → launch failure.)
-//
-// These errors used to live ONLY in the 60-line main-process log ring buffer, so
-// a longer run scrolled them away and even a FULL bug report couldn't show that a
-// profile-lock collision had happened. This module keeps a small persisted tally
-// + the last few events so the bug report can surface them long after.
+// The shared Chrome profile (getUserDataDir()) is OS-locked to one process at a
+// time. A second launch on it fails with "already running for <userDataDir>"
+// (headless) or "Opening in existing browser session" (visible). This module
+// keeps a small tally and the last few events so a bug report can show that a
+// collision happened after the main-process log ring has scrolled past it.
 //
 // Pure / dependency-free (no electron, no puppeteer) so it's unit-testable in the
 // plain-node test runner. Callers pass `ts` (Date.now()) in rather than the module
@@ -46,13 +36,9 @@ const _state = { total: 0, recovered: 0, events: [] };
  * @param {boolean} [o.recovered] whether a retry eventually succeeded
  * @param {unknown} [o.error]
  * @param {number|null} [o.ts]  epoch ms (caller passes Date.now())
- * @param {boolean|null} [o.askedSingletonToYield]  whether this SAME call asked
- *   the retained stealth-browser singleton to close so it would yield the
- *   shared profile — the fact that separates "our own idle browser held the
- *   lock (and was asked to step aside)" from "something else held it and was
- *   never asked to, or never let go" (a visible window, another process).
- *   `null` means the caller didn't report it (not the same as `false`, which
- *   means it reported "no, this attempt did not ask").
+ * @param {boolean|null} [o.askedSingletonToYield]  whether this call asked the
+ *   retained stealth-browser singleton to close so it would yield the profile;
+ *   `null` means the caller did not report it, `false` means it did not ask.
  */
 export function recordLaunchCollision({ context, url = null, attempts = 1, recovered = false, error = '', ts = null, askedSingletonToYield = null } = {}) {
   _state.total += 1;

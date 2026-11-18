@@ -55,9 +55,6 @@ import { EventLogger } from '../utils/EventLogger';
  *   { platformStatus?: { [platformId]: { status, message, summary, attention[], sources[], lastChecked } } }
  */
 
-// The layout helper chooses a fixed-width grid closest to 16:9. We feed it each
-// card's measured collapsed height so opening an attention lane never reflows
-// the node.
 function arraysEqual(a, b) {
   return a.length === b.length && a.every((v, i) => v === b[i]);
 }
@@ -281,7 +278,7 @@ export const MarketplaceStatusNode = React.memo(function MarketplaceStatusNode({
         recoveryRef.current = nextRecovery;
         return {
           platformStatus: mergeMarketplaceStatusResults(node?.data?.platformStatus, {
-          [payload.platformId]: payload.result,
+            [payload.platformId]: payload.result,
           }),
           ...(nextRecovery && nextRecovery !== previousRecovery ? { marketplaceStatusRunResume: nextRecovery } : {}),
         };

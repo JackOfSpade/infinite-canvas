@@ -1,31 +1,18 @@
-import {
-  redactReportLocalPathsInText,
-  redactReportLogSecrets,
-  redactReportOpaqueIds,
-  redactReportUrlsInText,
-} from './helpers.js';
+import { indentedReportCode, reportFilterCodes, sanitizeReportProse } from './helpers.js';
 
-export const APPLICATION_REJECTION_FILTER_CODE = 'APPREJECT';
+const APPLICATION_REJECTION_FILTER_CODE = 'APPREJECT';
 
 // A rejection message quotes generated application prose. Like APPOUTPUT, only
 // an explicit FULL or its own narrow code consents to exporting it; the empty
 // default report and every other code stay metadata-only.
 export function codeIncludesApplicationRejections(filterCode) {
-  const codes = String(filterCode || '').trim().toUpperCase().split(/[+\s,]+/).filter(Boolean);
+  const codes = reportFilterCodes(filterCode);
   return codes.includes(APPLICATION_REJECTION_FILTER_CODE) || codes.includes('FULL');
 }
 
-function sanitizeRejectionText(value) {
-  if (typeof value !== 'string') return '';
-  return redactReportOpaqueIds(redactReportLogSecrets(redactReportLocalPathsInText(redactReportUrlsInText(value))))
-    .replace(/\r\n?/g, '\n')
-    .split('').filter(char => char === '\n' || char === '\t' || (char.codePointAt(0) >= 32 && char.codePointAt(0) !== 127)).join('')
-    .trim();
-}
+const sanitizeRejectionText = value => sanitizeReportProse(value);
 
-// Indented code cannot be closed by its content, so model-authored markup in a
-// quoted sentence stays literal.
-const indentedCode = text => text.split('\n').map(line => `      ${line}`).join('\n');
+const indentedCode = text => indentedReportCode(text, 6);
 
 export function buildApplicationRejectionTextMarkdown(rows) {
   const list = Array.isArray(rows) ? rows : [];

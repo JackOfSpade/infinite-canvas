@@ -349,4 +349,12 @@ export default [
       assert(!ledger.canCommit(owner), 'cancellation must revoke durable-write authority');
     },
   },
+  {
+    name: 'operation ledger: claim works when detached from the ledger object',
+    run: () => {
+      const { claim, canCommit } = createJobAnalysisOperationLedger();
+      const owner = claim({ hubId: 'hub-a' });
+      assert(owner && canCommit(owner), 'a destructured claim must still adopt');
+    },
+  },
 ];

@@ -3,13 +3,13 @@ import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
 import { logger } from '../../logger.js';
-import { closeStealthBrowser, getUserDataDir, findSystemChromePath, findChromePath, reserveSharedProfile, prepareSharedBrowserProfileForLaunch, BROWSER_SIGNIN_OFF_ARGS } from '../stealthBrowser.js';
+import { closeStealthBrowser, getUserDataDir, findSystemChromePath, findChromePath, reserveSharedProfile, prepareSharedBrowserProfileForLaunch, waitForBrowserProcessExit } from '../stealthBrowser.js';
 import { pauseBrowserPool } from '../browserPool.js';
 import { withMarketplaceBrowserLock } from '../marketplaceBrowserLock.js';
-import { findGoogleSafeChromePath, isLoggedOutTitleForPlatform, isLoginUrlPath, PUPPETEER_OSCRYPT_PARITY_ARGS } from './authWindows.js';
+import { findGoogleSafeChromePath, isLoggedOutTitleForPlatform, isLoginUrlPath, nativeChromeLaunchArgs } from './authWindows.js';
 import { isBackgroundE2E, backgroundE2EDisabledError } from '../../utils/backgroundE2e.js';
 import { isAppleEventsJsDisabledError } from './appleEvents.js';
-export { isAppleEventsJsDisabledError, runChromeAppleScript } from './appleEvents.js';
+export { isAppleEventsJsDisabledError } from './appleEvents.js';
 
 const execFile = promisify(execFileCb);
 
@@ -418,17 +418,6 @@ export async function ensureAppleEventsJsEnabled(userDataDir) {
   }
 }
 
-/** Resolve once the spawned Chrome process has fully exited (or after timeout). */
-function waitForChildExit(child, timeoutMs = 3000) {
-  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
-  return new Promise((resolve) => {
-    let timer = null;
-    const done = () => { clearTimeout(timer); resolve(); };
-    child.once('exit', done);
-    timer = setTimeout(() => { child.removeListener('exit', done); resolve(); }, timeoutMs);
-  });
-}
-
 async function pollMatchedTabUrl(matchHost) {
   try {
     const { stdout } = await execFile('/usr/bin/osascript', ['-e', buildPollTabUrlScript(), matchHost], { timeout: 4000 });
@@ -609,22 +598,7 @@ export async function readHubUrlsViaNativeChrome(watchUrls, { platformId, signal
       // The window is VISIBLE and stays open: if the hub is logged out it bounces
       // to a login screen the human signs into IN this window (the only login that
       // works for Swappa/Mercari's anti-bot — non-CDP).
-      child = spawn(chromePath, [
-        `--user-data-dir=${userDataDir}`,
-        '--profile-directory=Default',
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--window-size=1100,800',
-        '--lang=en-US,en',
-        // See PUPPETEER_OSCRYPT_PARITY_ARGS in authWindows.js: without these, this
-        // raw-spawned Chrome derives its cookie OSCrypt key from the real macOS
-        // Keychain, while every Puppeteer-launched Chrome on this same userDataDir
-        // uses Chromium's static mock-keychain key — a login done IN this window
-        // would write cookies invisible to every later headless scrape/read.
-        ...PUPPETEER_OSCRYPT_PARITY_ARGS,
-        ...BROWSER_SIGNIN_OFF_ARGS,
-        `--app=${urls[0]}`,
-      ], { stdio: 'ignore', detached: false });
+      child = spawn(chromePath, nativeChromeLaunchArgs(userDataDir, urls[0]), { stdio: 'ignore', detached: false });
 
       let spawnError = null;
       child.once('error', (e) => { spawnError = e?.message || String(e); });
@@ -699,7 +673,7 @@ export async function readHubUrlsViaNativeChrome(watchUrls, { platformId, signal
       // into a FREE profile instead of handing off to this dying process — the
       // mercari→swappa "Application isn't running (-600)" race. Mirrors
       // closeStealthBrowser's own post-close wait.
-      await waitForChildExit(child);
+      if (child?.pid) await waitForBrowserProcessExit(child, 3000);
       releasePool();
       releaseProfileReservation();
     }

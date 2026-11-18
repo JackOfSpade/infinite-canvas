@@ -4,6 +4,7 @@ import { officialPostingNeedsRefresh } from './officialPostingDisplay.js';
 import { officialPostingPreparationSourceKey, projectOfficialPostingGenerationJob } from './officialPostingPreparation.js';
 
 const MAX_REFRESH_ENTRIES = 128;
+const textEncoder = new TextEncoder();
 const MAX_REFRESH_BATCH_BYTES = 15 * 1024 * 1024;
 const MAX_REFRESH_JOB_BYTES = 512 * 1024;
 const failure = (message, code = 'JOB_OFFICIAL_REFRESH_INVALID') => Object.assign(new Error(message), { code });
@@ -157,7 +158,7 @@ export async function refreshBoardOfficialPostingJobs(jobs, {
     while (offset < pending.length && batch.length < MAX_REFRESH_ENTRIES) {
       const member = pending[offset];
       const projected = structuredClone(projectOfficialPostingGenerationJob(member.job));
-      const size = new TextEncoder().encode(JSON.stringify(projected)).byteLength;
+      const size = textEncoder.encode(JSON.stringify(projected)).byteLength;
       if (size > MAX_REFRESH_JOB_BYTES) throw failure('An official posting source exceeds the refresh size limit.');
       if (batch.length && bytes + size > MAX_REFRESH_BATCH_BYTES) break;
       batch.push(member); entries.push({ cardId: rowId(member.index), job: projected });

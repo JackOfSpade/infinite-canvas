@@ -15,9 +15,9 @@ export const CALIBRATED_MODELS = Object.freeze({
 });
 export const CALIBRATED_ON = '2026-11-10';
 export const MODEL_CALIBRATION_FILE = 'ai-model-calibration.json';
-export const MODEL_CALIBRATION_STATUS_CHANNEL = 'ai-model-calibration:status';
-export const MODEL_CALIBRATION_EVENT = 'ai-model-calibration:changed';
-export const PLAYBOOK_REF = 'docs/ai-model-selection.md, section "New model release playbook"';
+const MODEL_CALIBRATION_STATUS_CHANNEL = 'ai-model-calibration:status';
+const MODEL_CALIBRATION_EVENT = 'ai-model-calibration:changed';
+const PLAYBOOK_REF = 'docs/ai-model-selection.md, section "New model release playbook"';
 const STORED_VERSION = 1;
 const MAX_SOURCES = 5;
 const MAX_ID_LENGTH = 200;

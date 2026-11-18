@@ -27,7 +27,7 @@ function differenceFunction(samples, start, windowSamples, tauMin, tauMax) {
   return d;
 }
 
-function cumulativeMeanNormalised(d, tauMin, tauMax) {
+function cumulativeMeanNormalised(d, tauMax) {
   const cmnd = new Float64Array(tauMax + 1);
   cmnd[0] = 1;
   let running = 0;
@@ -72,7 +72,7 @@ export function trackPitch(samples, sampleRate, { hopMs = 10, minHz = 60, maxHz 
     const start = frame * hop;
     if (frameRms(samples, start, windowSamples) < floorAmplitude) { f0[frame] = 0; continue; }
     const d = differenceFunction(samples, start, windowSamples, tauMin, tauMax);
-    const cmnd = cumulativeMeanNormalised(d, tauMin, tauMax);
+    const cmnd = cumulativeMeanNormalised(d, tauMax);
     const found = pickPeriod(cmnd, tauMin, tauMax);
     if (!found) { f0[frame] = 0; continue; }
     const period = parabolicPeriod(cmnd, found.tau);

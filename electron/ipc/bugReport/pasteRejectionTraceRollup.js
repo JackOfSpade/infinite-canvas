@@ -30,15 +30,15 @@ import { isWithinDirectory } from '../../utils/pathSafety.js';
  * is the fallback for an older card that never stamped one.
  */
 
-// Mirrors localAiApplication.js's own JOB_ID_RE exactly. Restated here rather
-// than imported for the same reason pasteHandoffDiagnostics.js restates
-// CHECK_FINGERPRINT_HEX_CHARS in its own header: this reader must never
-// import from a file another agent owns, and a job id that does not match
-// this shape can never have a real job folder, so treating it as
-// undiscoverable rather than building a path from it is strictly safer.
+// Mirrors localAiApplication.js's own JOB_ID_RE exactly. The values below are
+// restated rather than imported so this reader stays a light module that never
+// pulls in localAiApplication.js or Electron; a change there must be mirrored
+// here. A job id that does not match this shape can never have a real job
+// folder, so treating it as undiscoverable rather than building a path from it
+// is strictly safer.
 const JOB_ID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 // Mirrors pasteHandoffDiagnostics.js's own CHECK_ID_RE / CHECK_FINGERPRINT_RE
-// (CHECK_FINGERPRINT_HEX_CHARS = 8), restated for the same reason.
+// (CHECK_FINGERPRINT_HEX_CHARS = 8), restated to keep this reader light.
 const CHECK_ID_RE = /^[a-z][a-z0-9-]{0,39}$/u;
 const CHECK_FINGERPRINT_RE = /^[0-9a-f]{8}$/u;
 const MAX_CHECK_IDS = 16;
@@ -55,15 +55,16 @@ const MAX_ROWS_PER_JOB = 8;
 // Mirrors localAiApplication.js's own MAX_PASTE_REJECTION_TRACE_BYTES
 // (512_000) exactly: generous headroom over a realistically full 200-row
 // trace (a few hundred bytes/row), so a legitimately full file is never
-// mistaken for a tampered one. Restated for the same reason as JOB_ID_RE.
+// mistaken for a tampered one. Restated to keep this reader light, like JOB_ID_RE.
 const MAX_TRACE_FILE_BYTES = 512_000;
 // The exact filename appendPasteRejectionTrace writes
-// (localAiApplication.js's own PASTE_REJECTION_TRACE_FILE), restated for the
-// same reason.
+// (localAiApplication.js's own PASTE_REJECTION_TRACE_FILE), restated to keep
+// this reader light.
 const PASTE_REJECTION_TRACE_FILE = 'Paste Rejections.json';
 const HANDOFF_RECEIPTS_DIR = 'handoff-receipts';
-// localAiApplication.js's own PASTE_APPLICATION_STAGES, restated for the same
-// reason; a row from a stage missing here is dropped as untrusted.
+// localAiApplication.js's own PASTE_APPLICATION_STAGES, restated to keep this
+// reader light; a row from a stage missing here is dropped as untrusted, so a
+// stage added there must be added here too.
 const PASTE_APPLICATION_STAGES = new Set(['requirements', 'requirements-audit', 'requirements-adjudication',
   'requirements-audit-disagreement', 'career-match', 'evidence-plan', 'resume', 'cover-letter',
   'requirement-disposition', 'review',
@@ -234,6 +235,18 @@ function ownedTraceFileState(canvasRoot, ownedRoot, filePath) {
   return { state: 'ok', path: resolvedFilePath };
 }
 
+// The owned-path checks (no symlink at any boundary, size cap) followed by a
+// JSON parse. Any failure is { state } alone; success is { state: 'ok', value }.
+function readOwnedJson(canvasRoot, ownedRoot, filePath) {
+  const trusted = ownedTraceFileState(canvasRoot, ownedRoot, filePath);
+  if (trusted.state !== 'ok') return trusted;
+  try {
+    return { state: 'ok', value: JSON.parse(fs.readFileSync(trusted.path, 'utf8')) };
+  } catch {
+    return { state: 'unreadable' };
+  }
+}
+
 // Reads and bounds one job's durable trace. Every failure mode — absent file,
 // a symlink at any owned-path boundary, a file too large to trust, an
 // unparsable or non-array body — collapses to the same 'unreadable'/'absent'
@@ -241,14 +254,9 @@ function ownedTraceFileState(canvasRoot, ownedRoot, filePath) {
 // report must never let "the sidecar could not be read" read as "nothing
 // happened" (this file's own header rule, restated at the call site below).
 function readJobTrace(canvasRoot, jobsRoot, traceFilePath) {
-  const trusted = ownedTraceFileState(canvasRoot, jobsRoot, traceFilePath);
-  if (trusted.state !== 'ok') return trusted;
-  let parsed;
-  try {
-    parsed = JSON.parse(fs.readFileSync(trusted.path, 'utf8'));
-  } catch {
-    return { state: 'unreadable' };
-  }
+  const read = readOwnedJson(canvasRoot, jobsRoot, traceFilePath);
+  if (read.state !== 'ok') return read;
+  const parsed = read.value;
   if (!Array.isArray(parsed)) return { state: 'unreadable' };
   return { state: 'ok', rows: parsed.map(boundedRow).filter(Boolean) };
 }
@@ -264,11 +272,9 @@ function readSavedReceiptTrace(canvasRoot, ownerCanvasFilePath, jobId) {
   const localAiRoot = path.join(resolvedCanvasRoot, '.local-ai');
   const receiptsRoot = path.join(localAiRoot, HANDOFF_RECEIPTS_DIR);
   const receiptPath = path.join(receiptsRoot, `${jobId}.json`);
-  const trusted = ownedTraceFileState(resolvedCanvasRoot, receiptsRoot, receiptPath);
-  if (trusted.state !== 'ok') return trusted;
-  let receipt;
-  try { receipt = JSON.parse(fs.readFileSync(trusted.path, 'utf8')); }
-  catch { return { state: 'unreadable' }; }
+  const read = readOwnedJson(resolvedCanvasRoot, receiptsRoot, receiptPath);
+  if (read.state !== 'ok') return read;
+  const receipt = read.value;
   if (!receipt || typeof receipt !== 'object' || receipt.version !== 2 || receipt.jobId !== jobId
     || receipt.status !== 'imported' || typeof receipt.canvasFilePath !== 'string'
     || path.resolve(receipt.canvasFilePath) !== path.resolve(ownerCanvasFilePath)) return { state: 'absent' };
@@ -299,14 +305,9 @@ function streamCount(streams, name) {
 // counts and the stage enum leave this function: never stream heads, digests,
 // or any other manifest text.
 function readJobWorkflow(canvasRoot, jobsRoot, manifestPath) {
-  const trusted = ownedTraceFileState(canvasRoot, jobsRoot, manifestPath);
-  if (trusted.state !== 'ok') return { state: trusted.state };
-  let manifest;
-  try {
-    manifest = JSON.parse(fs.readFileSync(trusted.path, 'utf8'));
-  } catch {
-    return { state: 'unreadable' };
-  }
+  const read = readOwnedJson(canvasRoot, jobsRoot, manifestPath);
+  if (read.state !== 'ok') return { state: read.state };
+  const manifest = read.value;
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return { state: 'unreadable' };
   const paste = manifest.paste && typeof manifest.paste === 'object' && !Array.isArray(manifest.paste) ? manifest.paste : {};
   const stage = typeof paste.stage === 'string' && WORKFLOW_STAGE_RE.test(paste.stage) ? paste.stage : 'unknown';

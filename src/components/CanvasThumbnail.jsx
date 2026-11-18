@@ -125,7 +125,8 @@ export const CanvasThumbnail = React.memo(function CanvasThumbnail({ canvasData,
           key={p.id}
           points={p.points}
           fill="none"
-          stroke={p.color === 'white' ? 'rgba(255,255,255,0.35)' : `${p.color}80`}
+          stroke={p.color === 'white' ? 'rgba(255,255,255,0.35)' : p.color}
+          strokeOpacity={p.color === 'white' ? undefined : 0.5}
           strokeWidth={3}
           strokeLinecap="round"
           strokeLinejoin="round"

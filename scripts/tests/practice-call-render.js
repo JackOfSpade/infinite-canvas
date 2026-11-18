@@ -180,6 +180,39 @@ export const presentingTests = [
     },
   },
   {
+    name: 'practice call render: the read-only replay pad lets Tab move focus on instead of swallowing it',
+    async run() {
+      const { JSDOM } = await import('jsdom');
+      const dom = new JSDOM('<!doctype html><div id="root"></div>', { pretendToBeVisual: true });
+      const saved = {};
+      const realChannel = globalThis.MessageChannel;
+      const channels = [];
+      globalThis.MessageChannel = class { constructor() { const channel = new realChannel(); channels.push(channel); return channel; } };
+      const names = ['window', 'document', 'navigator', 'HTMLElement', 'Node', 'Event', 'KeyboardEvent', 'MouseEvent'];
+      for (const name of names) { saved[name] = Object.getOwnPropertyDescriptor(globalThis, name); Object.defineProperty(globalThis, name, { value: dom.window[name], configurable: true, writable: true }); }
+      globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+      let bundle = null;
+      try {
+        bundle = await loadServerBundle();
+        const { React, createRoot, CodingPad } = bundle.module;
+        const root = createRoot(dom.window.document.getElementById('root'));
+        await React.act(async () => root.render(React.createElement(CodingPad, { readOnly: true, value: 'print(1)' })));
+        const area = dom.window.document.querySelector('textarea[aria-label="Coding pad contents"]');
+        const tab = new dom.window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+        await React.act(async () => { area.dispatchEvent(tab); });
+        assert(tab.defaultPrevented === false, 'Tab in the replay pad must keep its default so focus can leave');
+        await React.act(async () => root.unmount());
+      } finally {
+        for (const name of names) { if (saved[name]) Object.defineProperty(globalThis, name, saved[name]); else delete globalThis[name]; }
+        delete globalThis.IS_REACT_ACT_ENVIRONMENT;
+        globalThis.MessageChannel = realChannel;
+        for (const channel of channels) { channel.port1.close(); channel.port2.close(); }
+        dom.window.close();
+        if (bundle) await bundle.dispose();
+      }
+    },
+  },
+  {
     name: 'practice call render: the pad is not overwritten by later state, Tab indents, and edits are sent debounced with a typing heartbeat',
     async run() {
       const { JSDOM } = await import('jsdom');
@@ -327,6 +360,15 @@ export default [
         assert(context.closed === false, 'the ring keeps playing until it is stopped');
         stop();
         assert(context.closed === true, 'stopping the ring must close the audio context');
+        const unhandled = [];
+        const onUnhandled = reason => unhandled.push(reason);
+        process.on('unhandledRejection', onUnhandled);
+        class RejectingAudioContext extends FakeAudioContext { resume() { return Promise.reject(new Error('autoplay blocked')); } }
+        ringtone.startRingtone({ AudioContext: RejectingAudioContext })();
+        ringtone.playJoinChime({ AudioContext: RejectingAudioContext });
+        await new Promise(resolve => setTimeout(resolve, 20));
+        process.off('unhandledRejection', onUnhandled);
+        assert(unhandled.length === 0, 'a rejected AudioContext.resume() must not become an unhandled rejection');
         const noAudio = ringtone.startRingtone({});
         assert(typeof noAudio === 'function' && typeof noAudio() === 'undefined', 'a window without Web Audio must return a harmless stop function');
       } finally { await bundle.dispose(); }

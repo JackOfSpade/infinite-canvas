@@ -136,19 +136,47 @@ const ROLE_FEATURES = [
   [/\bprototyp\w*\b|\bexperiment\w*\b/iu, 3],
 ];
 
+const itemTermsCache = new WeakMap();
+function itemTerms(item) {
+  const cached = itemTermsCache.get(item);
+  if (cached && cached.text === item.text) return cached.terms;
+  const entry = { text: item.text, terms: terms(item.text) };
+  itemTermsCache.set(item, entry);
+  return entry.terms;
+}
+
+// Role themes and listing do not depend on the question, so one prompt build
+// that ranks many questions prepares them, and each item's role score, once.
+let lastRankingContext = null;
+function rankingContext(themes, listing) {
+  if (lastRankingContext && lastRankingContext.themes === themes && lastRankingContext.listing === listing) return lastRankingContext;
+  lastRankingContext = {
+    themes, listing, targets: `${themes} ${listing}`,
+    themeTerms: terms(themes), listingTerms: terms(listing), roleScores: new WeakMap(),
+  };
+  return lastRankingContext;
+}
+
+function roleScoreFor(context, item) {
+  const cached = context.roleScores.get(item);
+  if (cached && cached.text === item.text) return cached.score;
+  const sourceTerms = itemTerms(item);
+  const themeOverlap = [...context.themeTerms].filter(term => sourceTerms.has(term)).length;
+  const listingOverlap = [...context.listingTerms].filter(term => sourceTerms.has(term)).length;
+  const featureScore = ROLE_FEATURES.reduce((score, [pattern, weight]) => score + (pattern.test(context.targets) && pattern.test(item.text) ? weight : 0), 0);
+  const score = themeOverlap * 2 + listingOverlap + featureScore;
+  context.roleScores.set(item, { text: item.text, score });
+  return score;
+}
+
 /** Ranking selects grounded material; listing words never license a claim. */
 export function interviewEvidenceRank(question, evidence, roleThemes = [], jobListing = '') {
   const themes = Array.isArray(roleThemes) ? roleThemes.join(' ') : String(roleThemes || '');
   const listing = typeof jobListing === 'string' ? jobListing : JSON.stringify(jobListing || '');
-  const targets = `${themes} ${listing}`;
-  const themeTerms = terms(themes);
-  const listingTerms = terms(listing);
+  const context = rankingContext(themes, listing);
+  const { targets } = context;
   const ranked = evidence.filter(item => item.kind === 'career').map(item => {
-    const sourceTerms = terms(item.text);
-    const themeOverlap = [...themeTerms].filter(term => sourceTerms.has(term)).length;
-    const listingOverlap = [...listingTerms].filter(term => sourceTerms.has(term)).length;
-    const featureScore = ROLE_FEATURES.reduce((score, [pattern, weight]) => score + (pattern.test(targets) && pattern.test(item.text) ? weight : 0), 0);
-    const roleScore = themeOverlap * 2 + listingOverlap + featureScore;
+    const roleScore = roleScoreFor(context, item);
     const questionFit = interviewQuestionFit(question, item.text, [item]);
     const domainMismatch = /\b(?:medical|patients?|therapists?|flight|aviation|FAA|NOTAMs?)\b/iu.test(item.text)
       && !/\b(?:medical|health|patients?|therapists?|flight|aviation|FAA|NOTAMs?)\b/iu.test(targets);

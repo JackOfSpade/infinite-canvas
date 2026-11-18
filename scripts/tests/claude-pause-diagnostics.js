@@ -210,4 +210,21 @@ export default [
       }
     }),
   },
+  {
+    name: 'claude pause: a state that marks no account limited still gets a finite resume time',
+    run: () => isched(() => {
+      const fixture = accountFixture();
+      fixture.layer.claudeAccountLimitState = () => ({ accountCount: 1, activeId: 'default', accounts: [], limited: [], eligible: [] });
+      setClaudeAccountLayerForTest(fixture.layer);
+      try {
+        const before = Date.now();
+        const reported = reportClaudeUsageLimit({ task: 'job-scoring' });
+        assert(reported.paused === true, 'the pause is kept');
+        const { resumeAt } = claudeUsageLimit();
+        assert(Number.isFinite(resumeAt) && resumeAt >= before + 600_000 - 1000, `resumeAt falls back to the probe interval, got ${resumeAt}`);
+      } finally {
+        setClaudeAccountLayerForTest(null);
+      }
+    }),
+  },
 ];

@@ -1,9 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { PauseCircle } from 'lucide-react';
 import { ClaudeProgressCard } from './ClaudeProgress';
 import { useProgressClock } from '../hooks/useProgressClock';
 import { deriveCareerCompilationProgress } from '../utils/careerCompilationProgress';
 import { useCareerCompilationProgress } from '../hooks/useCareerCompilationProgress';
+import { useIsMountedRef } from '../hooks/useIsMountedRef';
 
 const duration = seconds => `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 
@@ -16,8 +17,7 @@ export function CareerCompilationProgress({ progress, onPauseAndSave, compact = 
   const [pausing, setPausing] = useState(false);
   const [notice, setNotice] = useState('');
   const pausingRef = useRef(false);
-  const mounted = useRef(true);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const mounted = useIsMountedRef();
   const pause = async () => {
     if (pausingRef.current || !onPauseAndSave) return;
     pausingRef.current = true; setPausing(true);

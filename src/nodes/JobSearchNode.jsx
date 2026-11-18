@@ -399,10 +399,15 @@ function normalizeResumeProfileFingerprint(value) {
 // The main process owns the AI/web-research semantics. This deliberately only
 // normalizes its response envelope so the renderer can keep older app builds
 // working while the preference APIs roll out.
+// The result for a run where no preference evaluation was performed.
+function unevaluatedPreferenceResult(jobs) {
+  return { jobs, candidatePool: jobs, matchedCount: null, filteredCount: null, evaluation: null };
+}
+
 function normalizePreferenceEvaluation(result, fallbackJobs) {
   const fallback = Array.isArray(fallbackJobs) ? fallbackJobs : [];
   if (!result || result.success === false) {
-    return { jobs: fallback, candidatePool: fallback, matchedCount: null, filteredCount: null, evaluation: null };
+    return unevaluatedPreferenceResult(fallback);
   }
   const jobs = Array.isArray(result.jobs)
     ? result.jobs
@@ -501,38 +506,18 @@ function savedAnalysisRoleTitles(snapshot) {
     : [];
 }
 
-// FIX 5: detectQueryOperators (jobTitleMatch.js) flags Boolean/operator
-// syntax (leading "-", NOT/AND/OR, "field:", quotes) that a job board will
-// not honor as an operator — measured behaviour is that boards ignore it,
-// zero out results entirely, or (ZipRecruiter, negation) invert the intent.
-// It was deleted from the UI with the standalone Target role box and is
-// referenced by no other application code, but the risk it guards against is
-// now LARGER: queries are built from the RESOLVED titles unconditionally
-// (deriveSearchTitles), so a title the user typed with quotes or a leading
-// minus — kept verbatim inside the AI's resolved list — goes to every job
-// board VERBATIM, with no other chokepoint that would ever catch it. This
-// is advisory only — never blocks, cancels, or retries a search, exactly like
-// SearchBriefAdvisories below, whose amber advisory visual contract this
-// deliberately mirrors so the two read as one family. Kept as a SEPARATE
-// plain function rather than folded into SearchBriefAdvisories itself:
-// SearchBriefAdvisories lives in JobSearchDoneState.jsx (out of this file's
-// edit scope) and only accepts a `searchBriefPlan` plan object, with no slot
-// for a client-side detector's output — this is called as a plain expression
-// (`{titleOperatorAdvisory(...)}`, not a JSX `<Tag/>`) next to the draft
-// SearchBriefAdvisories call site. The completed state receives the detected
-// tokens as data and decides how to present its saved-plan note.
-// DELIBERATELY lowercase, not a capitalized `<TitleOperatorAdvisory/>` JSX
-// component: this file's single default export is one enormous component
-// (JobSearchNode), and React Compiler's eslint plugin analyzes every
-// capitalized top-level function that returns JSX as an independent
-// component to auto-memoize. A second such component in this file made that
-// analysis bail out on JobSearchNode itself — confirmed by reverting this
-// exact rename during development, which took the file from 12
-// react-compiler errors to 0 — silently reverting every one of its manual
-// memoizations and turning latent (harmless-when-compiled) ref-during-render
-// patterns into real errors. A lowercase plain function returning a React
-// element is invisible to that heuristic and sidesteps the whole class of
-// failure.
+// Finds the Boolean/operator syntax (leading "-", NOT/AND/OR, "field:",
+// quotes) in resolved search titles. Job boards do not honor it: they ignore
+// it, return no results, or (ZipRecruiter, negation) invert the intent. Queries
+// are built from the resolved titles, so a title the user typed with quotes or
+// a leading minus reaches every job board verbatim; this is the only place it
+// can be caught. The result is advisory only and never blocks, cancels or
+// retries a search. The completed state receives the detected tokens as data
+// and decides how to present its saved-plan note.
+// This is deliberately a lowercase plain function and not a capitalized
+// component. React Compiler treats every capitalized top-level function that
+// returns JSX as a separate component, and a second one in this file made its
+// analysis bail out on JobSearchNode itself.
 function titleOperatorHits(titles) {
   const hits = new Set();
   for (const title of (Array.isArray(titles) ? titles : [])) {
@@ -609,6 +594,15 @@ function terminalResultDisposition(terminalOutcome) {
   if (terminalOutcome === 'preference-filtered') return 'preference-filtered';
   if (terminalOutcome === 'incomplete') return 'incomplete';
   return typeof terminalOutcome === 'string' && terminalOutcome ? terminalOutcome : null;
+}
+
+// The inverse of terminalResultDisposition: a stored result disposition back to
+// the terminal outcome name. Dispositions without their own outcome name pass
+// through unchanged.
+function terminalOutcomeFromDisposition(disposition) {
+  if (disposition === 'empty-complete') return 'zero';
+  if (disposition === 'scored') return 'populated';
+  return disposition;
 }
 
 function searchRunOutcome(status, {
@@ -1039,11 +1033,7 @@ async function waitForCommittedSearchOutcome({ getNode, nodeId, outcome, cancell
         runId: live.jobRunId,
         resultDisposition: live.resultDisposition,
         terminalStatus: live.resultDisposition === 'incomplete' ? 'failed' : 'completed',
-        terminalOutcome: live.resultDisposition === 'empty-complete'
-          ? 'zero'
-          : live.resultDisposition === 'scored'
-            ? 'populated'
-            : live.resultDisposition,
+        terminalOutcome: terminalOutcomeFromDisposition(live.resultDisposition),
         scoreReadyCount: Array.isArray(live.scoredJobs) ? live.scoredJobs.length : null,
         fingerprint: moduleFingerprint(live.scoredJobs),
         manualAiRunId: manualRetirement.runId,
@@ -1858,11 +1848,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const terminalOutcome = ['zero', 'populated', 'collection-only', 'preference-filtered', 'incomplete']
       .includes(descriptor?.terminalOutcome)
       ? descriptor.terminalOutcome
-      : (expectedDisposition === 'empty-complete'
-          ? 'zero'
-          : expectedDisposition === 'scored'
-            ? 'populated'
-            : expectedDisposition || 'unknown');
+      : (terminalOutcomeFromDisposition(expectedDisposition) || 'unknown');
     const terminalStatus = ['completed', 'failed', 'aborted'].includes(descriptor?.terminalStatus)
       ? descriptor.terminalStatus
       : (terminalOutcome === 'incomplete' ? 'failed' : 'completed');
@@ -2623,14 +2609,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const fallbackJobs = Array.isArray(jobs) ? jobs : [];
     const pinnedCareerSnapshotId = normalizedJobCareerSnapshotId(careerSnapshotId);
     if (!activeJobPreferences) {
-      return { jobs: fallbackJobs, candidatePool: fallbackJobs, matchedCount: null, filteredCount: null, evaluation: null };
+      return unevaluatedPreferenceResult(fallbackJobs);
     }
     // Older main processes do not expose this IPC yet. Keep their existing
     // search behavior rather than pretending a preference was verified.
     if (!window.electronAPI?.evaluateJobPreferences) {
-      return { jobs: fallbackJobs, candidatePool: fallbackJobs, matchedCount: null, filteredCount: null, evaluation: null };
+      return unevaluatedPreferenceResult(fallbackJobs);
     }
-    if (!canCommit()) return { jobs: fallbackJobs, candidatePool: fallbackJobs, matchedCount: null, filteredCount: null, evaluation: null, superseded: true };
+    if (!canCommit()) return { ...unevaluatedPreferenceResult(fallbackJobs), superseded: true };
     updateGlobal(id, () => canCommit() ? { hubState: 'evaluating-preferences', jobCount: fallbackJobs.length } : null);
     const result = await window.electronAPI.evaluateJobPreferences({
       jobs: fallbackJobs,
@@ -2649,7 +2635,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       searchLocation: locationSnapshot?.searchLocation || null,
       remoteResidences: locationSnapshot?.remoteResidences || null,
     });
-    if (!canCommit()) return { jobs: fallbackJobs, candidatePool: fallbackJobs, matchedCount: null, filteredCount: null, evaluation: null, superseded: true };
+    if (!canCommit()) return { ...unevaluatedPreferenceResult(fallbackJobs), superseded: true };
     if (result?.success === false) {
       const error = new Error(result.error || 'Failed to evaluate Job Preferences');
       throw error;
@@ -3316,14 +3302,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
    * cancellation epoch, and releasing only its own guard token. Mirrors the marketplace
    * synthesizeAndPrice pattern.
    */
-  // Post-scoring: STORE the scored jobs + summary counts → mark done. The Job
-  // Search Module no longer buckets or spawns the results cascade — that moved to
-  // the Job Board Module, which reads data.scoredJobs from each connected search
-  // module, re-buckets the union, and displays the merged tree. Shared by the
-  // real-time path (runScoringAndSpawn) and the async batch path (the poll
-  // effect) so both leave the hub in the same done summary state. (`profile`,
-  // `originalPos` is still passed by callers but no longer
-  // needed here.)
+  // Post-scoring: store the scored jobs and summary counts, then mark done.
+  // The Job Board Module buckets and spawns the results cascade; it reads
+  // data.scoredJobs from each connected search module. Shared by the real-time
+  // path (runScoringAndSpawn) and the async batch path (the poll effect) so
+  // both leave the hub in the same done summary state.
   const finishScoringAndSpawn = useCallback(async ({
     scoredJobs, gatheredCount, scrapedCount, scrapeWarnings = [], collectionScopeCaveats = [],
     aiSkipped = false, collectionOnly = false, testMode = false,
@@ -3475,7 +3458,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const runScoringAndSpawn = useCallback(async ({
     profile, careerData = data.careerData, jobs, gatheredCount,
     scrapedCount = Array.isArray(jobs) ? jobs.length : 0,
-    scrapeWarnings, collectionScopeCaveats = data.collectionScopeCaveats, originalPos,
+    scrapeWarnings, collectionScopeCaveats = data.collectionScopeCaveats,
     jobRunId = null, cancelled, locationSnapshot = null, completeRun = true,
     manualAiRunId = null, resultMode = 'replace',
     appendBaseData = null, appendCanCommit = () => true,
@@ -3596,12 +3579,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
     const outcome = await finishScoringAndSpawn({
       scoredJobs: scoreResult.scoredJobs,
-      profile,
       gatheredCount,
       scrapedCount,
       scrapeWarnings,
       collectionScopeCaveats,
-      originalPos,
       aiSkipped: !!scoreResult.aiSkipped,
       collectionOnly: !!scoreResult.collectionOnly,
       testMode: !!scoreResult.testMode,
@@ -4072,7 +4053,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     }
     // Provider work is intentionally path-free. File aliases are normalized by
     // startProcessing into the compiler phase before they can reach here.
-    const paths = [];
     if (!providedProfile) {
       return searchRunOutcome('not-ready', { error: 'This Job Search module has no career files or stored profile.' });
     }
@@ -4131,10 +4111,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const cancelled = () => locallyCancelled()
       || (typeof parentCancelled === 'function' && parentCancelled())
       || !canCommitAnalysisOperation();
-    // Kept outside the try so a rejected compiler handoff can atomically mark
-    // this exact receipt failed in the shared error path.
-    let compilationGeneration = null;
-    let compilationAttempt = null;
     try {
       if (!orchestratorNodeId) throw new Error('A board-managed search requires an orchestrator node id.');
       updateGlobal(currentId, { queuedModuleRun: null });
@@ -4456,10 +4432,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // stale "{N} jobs" until each source's first fresh event arrives this run).
       document.dispatchEvent(new CustomEvent('job-source-progress-reset', { detail: { hubId: id } }));
 
-      // Snapshot the node position so we can spawn siblings near it even if
-      // the user navigates away and unmounts this layer of the canvas.
-      const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
-
       updateGlobal(currentId, {
         errorMessage: null,
         rerunOutcome: null,
@@ -4478,12 +4450,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // until a later render. Keep this run's career material local so every
       // following AI step sees the fresh files immediately.
       let activeCareerData = laneTurnData.careerData || '';
-      // A path is compiler input only.  Allocate a durable attempt before
-      // opening it, then CAS its result back onto this exact import generation.
-      // This fences a clear/re-drop while an attachment handoff is pending.
-      compilationGeneration = laneTurnData.careerImportGeneration
+      const compilationGeneration = laneTurnData.careerImportGeneration
         || freshImportCapability
-        || (paths.length > 0 ? createJobCareerImportCapability(currentId) : null);
+        || null;
 
       // Spawn (or reuse) one platform card per active job source only after the
       // login gate passes. ensureSourceCards intentionally frames all source
@@ -4870,7 +4839,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // part-way, for this run to skip. Fresh runs only, like the windows.
         sourceFinishedQueries: runSourceFinishedQueries,
         runOrigin,
-        profileInputMode: paths.length > 0 ? 'fresh-files' : 'stored-profile',
+        profileInputMode: 'stored-profile',
         ...(providerPhaseOnly ? { providerPhaseOnly: true } : {}),
         ...(boardRecoveryClaim ? { boardRecoveryClaim } : {}),
       });
@@ -5292,7 +5261,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         preferenceFilteredCount: preferenceResult.filteredCount,
         preferenceEvaluation: preferenceResult.evaluation,
         preferenceCandidatePool: preferenceResult.candidatePool,
-        originalPos,
         jobRunId: searchResult.runId || null,
         cancelled,
         locationSnapshot: runLocationSnapshot,
@@ -5330,16 +5298,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           }
           return searchRunOutcome('cancelled', { runId: result?.runId || jobRunIdRef.current });
         }
-      }
-      if (compilationAttempt) {
-        updateGlobal(currentId, (node) => {
-          const failed = failCareerImportCompilation(node?.data?.careerImportCompilation, {
-            generation: compilationGeneration,
-            attemptId: compilationAttempt.attemptId,
-            error: error?.message,
-          });
-          return failed ? { careerImportCompilation: failed } : null;
-        });
       }
       // User cancelled (Reset) OR deleted the hub mid-pipeline. The
       // Node-deleted branch handles the race where the backend abort
@@ -5705,7 +5663,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       runOrigin = 'initial',
       manualAiRunId = null,
       queueManagedByBoard = false,
-      queueManagedExternally = false,
       parentCancelled = null,
       orchestratorNodeId = null,
       boardRunId = null,
@@ -5719,7 +5676,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       runOrigin,
       manualAiRunId,
       queueManagedByBoard,
-      queueManagedExternally,
       parentCancelled,
       orchestratorNodeId,
       boardRunId,
@@ -6254,7 +6210,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         rerunNotice: null,
         reanalysisNotice: null,
       });
-      const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
       const activeJobPreferences = continuationData.pendingJobPreferences
         ?? continuationData.jobPreferences
         ?? '';
@@ -6379,7 +6334,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         preferenceFilteredCount: preferenceResult.filteredCount,
         preferenceEvaluation: preferenceResult.evaluation,
         preferenceCandidatePool: preferenceResult.candidatePool,
-        originalPos,
         jobRunId: activeJobRunId,
         cancelled,
         locationSnapshot,
@@ -7093,7 +7047,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         mode: resumingFinishedSavedListings ? 'finish-with-saved-listings' : 'resume',
       });
 
-      const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
       // A malformed/future plan is sanitized to null on manifest read. The raw
       // user preference text is still durable, so recover a plan rather than
       // treating it as empty and accidentally admitting every staged job.
@@ -7472,7 +7425,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         profile, jobs: preferenceResult.jobs,
         careerSnapshotId: admittedResumeCareerSnapshotId,
         gatheredCount: visibleGatheredCount,
-        scrapeWarnings: finalWarnings, collectionScopeCaveats: finalCollectionScopeCaveats, originalPos,
+        scrapeWarnings: finalWarnings, collectionScopeCaveats: finalCollectionScopeCaveats,
         activeJobPreferences, jobPreferencesInterpretation,
         preferenceMatchedCount: preferenceResult.matchedCount,
         preferenceFilteredCount: preferenceResult.filteredCount,
@@ -10723,11 +10676,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             runId: terminalData.jobRunId || null,
             resultDisposition: terminalData.resultDisposition || null,
             terminalStatus: terminalData.resultDisposition === 'incomplete' ? 'failed' : 'completed',
-            terminalOutcome: terminalData.resultDisposition === 'empty-complete'
-              ? 'zero'
-              : terminalData.resultDisposition === 'scored'
-                ? 'populated'
-                : terminalData.resultDisposition,
+            terminalOutcome: terminalOutcomeFromDisposition(terminalData.resultDisposition),
             scoreReadyCount: Array.isArray(terminalData.scoredJobs) ? terminalData.scoredJobs.length : null,
             fingerprint: moduleFingerprint(terminalData.scoredJobs),
             manualAiRunId,
@@ -12505,7 +12454,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       cancelCleanSourceCardDismiss();
       updateGlobal(currentId, { _boardRollbackSourceProgressFence: null });
       resetSourceProgress();
-      const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
       const activeJobPreferences = String(snapshot.jobPreferences ?? laneTurnData.jobPreferences ?? '').trim();
       const jobPreferencesInterpretation = snapshot.jobPreferencePlan
         ?? snapshot.preferencePlan
@@ -12692,7 +12640,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           preferenceFilteredCount: preferenceResult.filteredCount,
           preferenceEvaluation: preferenceResult.evaluation,
           preferenceCandidatePool: preferenceResult.candidatePool,
-          originalPos,
           cancelled,
           jobRunId: snapshot.runId || null,
           // Re-analysis snapshots have no search-run lifecycle. Only complete

@@ -1,3 +1,4 @@
+import { isTimedRetrySourceWarning } from '../../src/utils/jobSourceWarningPolicy.js';
 import { assert, canAttemptJobSourceResolve, isDescriptionRecoveryWarningCode, isJobSourceWarningGating, isTerminalSourceStatus, reconcileTerminalJobSourceWarningProjection } from '../test-dependencies.js';
 import { isSolveIpcCancellation, isSolveIpcFailure, solveIpcFailureMessage } from '../../src/utils/solveIpcFailure.js';
 import fs from 'node:fs';
@@ -178,8 +179,8 @@ export default [
         && accounts.includes('verifySellMonitorLogin(platformId, { signal: verifyAbort.signal })')
         && accounts.includes('signal,'),
       'startup timeout aborts and awaits the actual verifier instead of releasing a detached reader');
-      assert(accounts.includes("handleSafe('open-login-window', async (_event, { platformId }, signal)")
-        && accounts.includes("handleSafe('check-and-login', async (_event, { platformId }, signal)"),
+      assert(accounts.includes("handleSafe('open-login-window', async (event, { platformId }, signal)")
+        && accounts.includes("handleSafe('check-and-login', async (event, { platformId }, signal)"),
       'Accounts login entrypoints pass sender cancellation into the shared single-flight');
       assert(accounts.includes('openLoginWindow(platformId, sender, signal)')
         && accounts.includes('completeLoginWindowVerification(platformId, result, { signal })')
@@ -418,14 +419,15 @@ export default [
         && jobSource.includes('!hasVisibleResolverControl\n      || !sourceResolveRunId'),
       'one visibility predicate gates both the Solve/Continue control and its recovery polling');
       const gate = new Function(
-        'warningCanResolve', 'progress', 'hasWarn', 'hasInfo', 'warningBlocksScoring',
+        'isTimedRetrySourceWarning', 'warningCanResolve', 'progress', 'hasWarn', 'hasInfo', 'warningBlocksScoring',
         `return Boolean(${jobSource.slice(gateStart + 'const hasVisibleResolverControl = Boolean('.length, gateEnd)});`,
       );
 
       const labelAt = jobSource.indexOf("{resolving ? 'Running…'");
       assert(labelAt !== -1, 'the button label is still a single inline expression');
       const labelLine = jobSource.slice(labelAt, jobSource.indexOf('\n', labelAt)).trim();
-      const label = new Function('resolving', 'progress', `return (${labelLine.replace(/^\{/, '').replace(/\}$/, '')});`);
+      const labelFn = new Function('isTimedRetrySourceWarning', 'resolving', 'progress', `return (${labelLine.replace(/^\{/, '').replace(/\}$/, '')});`);
+      const label = (...args) => labelFn(isTimedRetrySourceWarning, ...args);
 
       const titleAt = jobSource.indexOf('title={hubLocked');
       assert(titleAt !== -1, 'the button hover title is still an inline expression keyed off hubLocked');
@@ -463,13 +465,17 @@ export default [
         isJobSourceWarningGating(w),
       ];
 
-      assert(!!gate(...renderInputs(warning)),
+      const gateWith = (...args) => gate(isTimedRetrySourceWarning, ...args);
+      const hardBlock = { ...warning, code: 'cloudflare-hard-block', resumeState: undefined };
+      assert(!!gateWith(...renderInputs(hardBlock)) && label(false, { url: null, warning: hardBlock }) === 'Retry',
+        'a hard-block warning shows its Retry control through the shared timed-retry policy');
+      assert(!!gate(isTimedRetrySourceWarning, ...renderInputs(warning)),
         'a native-challenge warning with no actionLabel and no url still renders its action button');
       // Proves the gate is single-threaded: remove the resumeState disjunct's
       // input and the button disappears entirely. That is the incident shape.
-      assert(!gate(...renderInputs({ ...warning, resumeState: undefined })),
+      assert(!gateWith(...renderInputs({ ...warning, resumeState: undefined })),
         'resumeState is the only disjunct carrying a native-challenge button, so the gate may not be simplified away');
-      assert(!gate(...renderInputs({
+      assert(!gateWith(...renderInputs({
         ...warning,
         code: 'country-source-skipped',
         severity: 'info',
@@ -721,6 +727,18 @@ export default [
         === JSON.stringify(['cloudflare-hard-block', 'description-listing-unavailable']),
       'the failed-restore path supersedes the same way, so a failed Solve cannot accumulate either');
       return { gatesSurviveRestore: true, cleanResolveUnchanged: true, descriptionDomainSuperseded: true };
+    },
+  },
+  {
+    name: 'a link with a URL survives a cleared label, and a blank listing URL reads as Open Site',
+    run: () => {
+      const link = fs.readFileSync(new URL('../../src/nodes/LinkNode.jsx', import.meta.url), 'utf8');
+      assert(link.includes('() => !inputRef.current?.innerText?.trim() && !hasUrl,'),
+        'a link that still has a URL is not deleted on blur when its label is cleared');
+      const card = fs.readFileSync(new URL('../../src/nodes/MarketplaceCardNode.jsx', import.meta.url), 'utf8');
+      assert(card.includes("{url ? 'Open Listing' : 'Open Site'}") && !card.includes('data.listingUrl ? '),
+        'the button label and title follow the trimmed listing URL that openInBrowser uses');
+      return { linkKeptWithUrl: true, trimmedListingUrl: true };
     },
   },
 ];

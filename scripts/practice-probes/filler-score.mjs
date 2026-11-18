@@ -12,7 +12,9 @@
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
-export const RECALL_THRESHOLD = 0.8; // recall >= 0.8 => analysis stays local
+// Recall of at least 4/5 keeps analysis local; kept as integers to avoid float error at the boundary.
+const RECALL_NUMERATOR = 4;
+const RECALL_DENOMINATOR = 5;
 export const WER_INCONCLUSIVE_ABOVE = 0.5;
 
 const SCRIPT_START = '<!-- SCRIPT START -->';
@@ -156,8 +158,7 @@ export function scoreTranscript(scriptMarkdown, transcript) {
   if (hyp.length === 0 || fillersReference === 0 || wer > WER_INCONCLUSIVE_ABOVE) {
     verdict = 'INCONCLUSIVE';
   } else {
-    // Integer compare avoids float error at the exact 0.8 boundary.
-    verdict = fillersRecalled * 5 >= fillersReference * 4 ? 'local' : 'cloud';
+    verdict = fillersRecalled * RECALL_DENOMINATOR >= fillersReference * RECALL_NUMERATOR ? 'local' : 'cloud';
   }
   return {
     fillersReference,

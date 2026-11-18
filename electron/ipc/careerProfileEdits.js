@@ -25,8 +25,7 @@ import { validateResponseSchema } from './schemaValidation.js';
 const PAGE_PROPERTIES = CAREER_PROFILE_PAGE_SCHEMA.properties;
 const ENTITY_GROUPS = ['roles', 'achievements', 'projects', 'skills', 'education', 'certifications', 'otherEvidence'];
 const PATCH_GROUPS = ['rolePatches', 'projectPatches'];
-const COVERAGE_DISPOSITIONS = PAGE_PROPERTIES.segmentCoverage.items.properties.disposition.enum;
-const DECISION_ORIGINS = new Set(['audit', 'repair', 'adjudication']);
+export const DECISION_ORIGINS = new Set(['audit', 'repair', 'adjudication']);
 
 function canonicalJson(value) {
   if (value === undefined) return 'undefined';

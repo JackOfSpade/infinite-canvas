@@ -167,7 +167,9 @@ async function acquireLock(outDir) {
       return async () => { await fs.rm(file, { force: true }); };
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
-      const lock = JSON.parse(await fs.readFile(file, 'utf8'));
+      let lock;
+      try { lock = JSON.parse(await fs.readFile(file, 'utf8')); } catch { throw new Error('Cannot verify output lock owner.'); }
+      if (!lock || typeof lock !== 'object') throw new Error('Cannot verify output lock owner.');
       if (lock.host !== os.hostname()) throw new Error('Output is locked by another host.');
       try { process.kill(lock.pid, 0); }
       catch (probeError) {

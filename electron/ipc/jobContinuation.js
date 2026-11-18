@@ -18,6 +18,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { logger } from '../logger.js';
 import {
+  createPathLock,
   readLastRunReceipt,
   jobRunPathScopeForCanvas,
   normalizeJobRunProfileFingerprint,
@@ -44,7 +45,7 @@ const KINDS = new Set(['late-source-refresh', 'source-recovery']);
 const OPERATIONS = new Set(['search-jobs-single-source', 'resolve-job-source', 'resume-job-source']);
 const RECOVERY_MODES = new Set(['automatic', 'manual']);
 const PARENT_ARTIFACT_SLOTS = new Set(['current']);
-const locks = new Map();
+const withLock = createPathLock();
 // ownerKey (canonical canvas + intent) -> execution. Intent ids deliberately
 // omit canvas spelling, so keying only by intentId made cloned canvases collide.
 const activeExecutions = new Map();
@@ -94,7 +95,7 @@ function claimExecution(canvasFilePath, intentId, sender, recoveryLease = null, 
 
 export function releaseJobContinuationExecution(intentId, leaseToken, sender) {
   const current = executionsByLeaseToken.get(leaseToken);
-  if (!current || current.leaseToken !== leaseToken || current.sender !== sender) return false;
+  if (!current || current.sender !== sender) return false;
   if (current.intentId !== intentId) return false;
   activeExecutions.delete(current.ownerKey);
   executionsByLeaseToken.delete(leaseToken);
@@ -172,6 +173,13 @@ function sameAuthorityReceipt(left, right) {
   const b = jobAnalysisOperationAuthorityReceipt(right);
   return !!a && !!b && a.operationId === b.operationId && a.revision === b.revision
     && stableJson(a.semanticBase) === stableJson(b.semanticBase);
+}
+
+async function removeContinuationSidecar(filePath) {
+  await fs.promises.unlink(filePath).catch(error => {
+    if (error?.code !== 'ENOENT') throw error;
+  });
+  await fsyncDirectory(path.dirname(filePath));
 }
 
 async function fsyncDirectory(directory) {
@@ -569,20 +577,6 @@ async function atomicWrite(filePath, store) {
   }
 }
 
-async function withLock(filePath, callback) {
-  const previous = locks.get(filePath) || Promise.resolve();
-  let release;
-  const current = new Promise(resolve => { release = resolve; });
-  locks.set(filePath, current);
-  await previous.catch(() => {});
-  try {
-    return await callback();
-  } finally {
-    release();
-    if (locks.get(filePath) === current) locks.delete(filePath);
-  }
-}
-
 async function withRecoveryOwner(canvasFilePath, callback) {
   const recoveryLease = await acquireCanvasRecoveryRead(canvasFilePath);
   try {
@@ -679,8 +673,8 @@ export async function claimJobContinuation(canvasFilePath, args = {}, { sender =
     const automaticOperation = boundedToken(args.automaticOperation, 80) || 'execute';
     const automaticAttemptKey = `${ownerCanvasFilePath}\u0000${intent.intentId}\u0000${automaticOperation}`;
     if (args.autoResume === true && automaticAttempts.has(automaticAttemptKey)) return { ok: false, attempted: true, reason: 'automatic-attempted' };
-    // Holding a recovery read lease across live execution is still required for
-    // Save As, but acquire it only after authority→sidecar admission releases.
+    // Holding a recovery read lease across live execution is required for Save
+    // As. It is acquired while the exact-authority callback still holds its locks.
     const lease = await acquireCanvasRecoveryRead(ownerCanvasFilePath, { owner: sender });
     const execution = claimExecution(lease.canvasFilePath || ownerCanvasFilePath, intent.intentId, sender, lease, intent);
     if (!execution.ok) { lease.release(); return execution; }
@@ -896,10 +890,7 @@ export async function completeJobContinuation(canvasFilePath, {
     }
     store.intents = store.intents.filter(intent => intent.intentId !== token);
     try {
-      if (store.intents.length === 0) await fs.promises.unlink(filePath).catch(error => {
-        if (error?.code !== 'ENOENT') throw error;
-      });
-      if (store.intents.length === 0) await fsyncDirectory(path.dirname(filePath));
+      if (store.intents.length === 0) await removeContinuationSidecar(filePath);
       else await atomicWrite(filePath, store);
       return { ok: true, removed: true };
     } catch (error) {
@@ -967,10 +958,7 @@ export async function clearJobContinuations(canvasFilePath, {
   }, async ({ store, intent, filePath }) => {
     const retained = store.intents.filter(row => row.intentId !== intent.intentId);
     try {
-      if (retained.length === 0) await fs.promises.unlink(filePath).catch(error => {
-        if (error?.code !== 'ENOENT') throw error;
-      });
-      if (retained.length === 0) await fsyncDirectory(path.dirname(filePath));
+      if (retained.length === 0) await removeContinuationSidecar(filePath);
       else await atomicWrite(filePath, { ...store, intents: retained });
       return { ok: true, removed: 1 };
     } catch (error) {
@@ -1010,10 +998,7 @@ export async function retireTerminalJobContinuations(canvasFilePath, {
       const removed = store.intents.length - retained.length;
       try {
         if (removed && retained.length) await atomicWrite(filePath, { ...store, intents: retained });
-        else if (removed) {
-          await fs.promises.unlink(filePath);
-          await fsyncDirectory(path.dirname(filePath));
-        }
+        else if (removed) await removeContinuationSidecar(filePath);
         return { ok: true, removed };
       } catch (error) {
         logger.warn(`[JobContinuation] terminal retirement failed: ${error?.message || error}`);

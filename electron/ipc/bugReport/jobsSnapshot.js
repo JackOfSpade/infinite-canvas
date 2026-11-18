@@ -18,7 +18,7 @@ import { formatJobAnalysisRecoveryLifecycleMarkdown, readJobAnalysisRecoveryLife
 import { hasProviderGatheredBoundary, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, sanitizeLastRunReceipt, sanitizeJobRunCollectionDiagnostics } from '../jobRunStaging.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
 import { isGoogleJobsInternalUrl } from '../../../src/utils/jobListingUrl.js';
-import { ago, closeReportDiagnostic, modelTag, pipelineScope, formatAge, projectReportDiagnostic, redactReportLocalPathsInText, redactReportOpaqueIds, redactReportPath, redactReportUrl, redactReportUrlsInText } from './helpers.js';
+import { ago, closeReportDiagnostic, modelTag, pipelineScope, formatAge, projectReportDiagnostic, reportCorrelationDigest, redactReportLocalPathsInText, redactReportOpaqueIds, redactReportPath, redactReportUrl, redactReportUrlsInText } from './helpers.js';
 import { buildApplicationOutputMarkdown } from './applicationOutput.js';
 import { classifyUnparseableSalary, hasMojibake, mojibakeExcerpt } from './jobQualityChecks.js';
 // The real annualizer the app buckets jobs with (JobSearchNode's Job Tree +
@@ -106,15 +106,6 @@ export function formatDetailReprobeAttempt(event) {
   return parts.join(' ');
 }
 
-// Report correlations must let a reader join rows from one export without
-// publishing a node, job, or run identifier that can be reused outside it.
-// A short one-way digest is stable within a report and deliberately reveals no
-// substring of the source value.
-function reportCorrelationDigest(value, fallback = 'not recorded') {
-  if (typeof value !== 'string' || !value) return fallback;
-  return `#${crypto.createHash('sha256').update(value).digest('hex').slice(0, 10)}`;
-}
-
 // Keep APPOUTPUT on the same card/window attribution boundary as the regular
 // Application Generation receipt. The last application record is process-wide;
 // a report must never borrow another window's opt-in prose sample.
@@ -157,15 +148,6 @@ export function buildJobsConfigSnapshot() {
   };
 }
 
-/**
- * Render what a `verification-text` challenge verdict actually rested on.
- *
- * `reason=verification-text` alone is uncheckable: it names neither the phrase
- * that matched nor the size of the document it matched inside. Both are what
- * separate a genuine anti-bot interstitial from ordinary posting copy that
- * happens to use the same words, so a report that omits them can only be
- * trusted, never verified.
- */
 // How a check ended: how long it stayed open and what input reached the page
 // meanwhile (challengeInputProbe.js). Counts only; a click inside the check's
 // own frame is visible only as focus moving into it.
@@ -182,7 +164,7 @@ function formatChallengeInputEvidence(e) {
 // like `title=captured` above — the report publishes only its presence; the
 // producer already bounded the recorded text to 120 chars. The centre element
 // and frame count are structural and are printed as read.
-export function formatPanelWalkInterruptEvidence(e) {
+function formatPanelWalkInterruptEvidence(e) {
   if (!e || e.phase !== 'panel-walk-interrupt') return null;
   const verdict = ['check', 'popup', 'covered', 'none', 'unknown'].includes(e.verdict) ? e.verdict : 'unknown';
   const failure = e.failure === 'click' ? 'click' : 'panel-timeout';
@@ -199,6 +181,15 @@ export function formatPanelWalkInterruptEvidence(e) {
   return bits.join(' ');
 }
 
+/**
+ * Render what a `verification-text` challenge verdict actually rested on.
+ *
+ * `reason=verification-text` alone is uncheckable: it names neither the phrase
+ * that matched nor the size of the document it matched inside. Both are what
+ * separate a genuine anti-bot interstitial from ordinary posting copy that
+ * happens to use the same words, so a report that omits them can only be
+ * trusted, never verified.
+ */
 export function formatChallengeTextEvidence(entry) {
   if (!entry) return '';
   const chars = Number(entry.bodyTextLength);
@@ -562,18 +553,21 @@ function boundedRegularFileRead(filePath, maxBytes = MAX_RECOVERY_METADATA_BYTES
   }
 }
 
+const OWNER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
+const METADATA_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+
 function safeArtifactOwner(scope) {
   if (!scope) return null;
   try {
     const owner = decodeURIComponent(scope);
-    return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/.test(owner) ? owner : null;
+    return OWNER_ID_PATTERN.test(owner) ? owner : null;
   } catch {
     return null;
   }
 }
 
 function safeOwnerId(ownerId) {
-  return typeof ownerId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/.test(ownerId)
+  return typeof ownerId === 'string' && OWNER_ID_PATTERN.test(ownerId)
     ? ownerId
     : null;
 }
@@ -584,7 +578,7 @@ function safeOwnerId(ownerId) {
 // unrelated artifact discovery or receipt rendering rules.
 function safeSnapshotMetadataIdentifier(value) {
   const text = typeof value === 'string' ? value.trim() : '';
-  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(text) ? text : null;
+  return METADATA_ID_PATTERN.test(text) ? text : null;
 }
 
 function artifactScopeMatchesOwner(artifact, ownerId) {
@@ -749,19 +743,6 @@ function recoveryArtifactsForCanvas(canvasFilePath, currentJobHubIds = []) {
     artifacts: all.slice(0, MAX_RECOVERY_ARTIFACT_SCOPES),
     omittedCount: omittedByScope,
     scanTruncated,
-  };
-}
-
-function recoveryPathsForCanvas(canvasFilePath, currentJobHubIds = []) {
-  if (!canvasFilePath || typeof canvasFilePath !== 'string') return null;
-  const dir = path.dirname(canvasFilePath);
-  const base = path.basename(canvasFilePath).replace(/\.json$/i, '');
-  const analysisFallbackDir = path.join(app.getPath('userData'), 'job-search');
-  return {
-    manifest: path.join(dir, `${base}${JOB_RUN_MANIFEST_SUFFIX}`),
-    staging: path.join(dir, `${base}${JOB_RUN_STAGING_SUFFIX}`),
-    analysisFallbackDir,
-    recoveryArtifacts: recoveryArtifactsForCanvas(canvasFilePath, currentJobHubIds),
   };
 }
 
@@ -1236,12 +1217,8 @@ function formatArtifactReceipts(artifacts, currentNodeIds, livePipeline, attribu
   return lines;
 }
 
-function readRecoveryText(filePath, maxBytes = MAX_RECOVERY_METADATA_BYTES) {
-  return boundedRegularFileRead(filePath, maxBytes);
-}
-
 function parseRecoveryJson(filePath, maxBytes = MAX_RECOVERY_METADATA_BYTES) {
-  const read = readRecoveryText(filePath, maxBytes);
+  const read = boundedRegularFileRead(filePath, maxBytes);
   if (!read.exists || read.errorCode) return read;
   if (read.truncated) return {
     ...read,
@@ -1574,7 +1551,7 @@ function sameSnapshotReportMetadata(left, right) {
 }
 
 function oversizedSnapshotMetadataParse(filePath) {
-  const read = readRecoveryText(filePath, MAX_RECOVERY_SNAPSHOT_METADATA_PREFIX_BYTES);
+  const read = boundedRegularFileRead(filePath, MAX_RECOVERY_SNAPSHOT_METADATA_PREFIX_BYTES);
   if (!read.exists || read.errorCode) return read;
   const { text, ...readMetadata } = read;
   const envelope = firstTopLevelReportMetadata(text);
@@ -1604,7 +1581,7 @@ function parseRecoverySnapshotJson(filePath) {
 }
 
 function oversizedSnapshotMetadata(text) {
-  const prefix = typeof text === 'string' ? text.slice(0, 16 * 1024) : '';
+  const prefix = typeof text === 'string' ? text.slice(0, MAX_RECOVERY_SNAPSHOT_METADATA_PREFIX_BYTES) : '';
   const stringField = (name, validator = value => value) => {
     const match = prefix.match(new RegExp(`"${name}"\\s*:\\s*"([^"\\\\]{0,180})"`));
     return match ? validator(match[1]) : null;
@@ -1660,10 +1637,7 @@ function snapshotOwnerId(snapshot) {
 
 function snapshotOwnedByHub(snapshot, canvasFilePath, ownerId) {
   if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return false;
-  const normalizeOwner = (value) => typeof value === 'string'
-    && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(value.trim())
-    ? value.trim()
-    : null;
+  const normalizeOwner = safeSnapshotMetadataIdentifier;
   const expectedOwner = normalizeOwner(ownerId);
   if (!expectedOwner) return false;
   // Keep this in lock-step with jobs.js's exact ownership classifier. A
@@ -2204,6 +2178,32 @@ function boardStaleReasonFact(value) {
     : null;
 }
 
+const COLLECTION_CAP_TYPES = ['per-platform', 'jobs-per-platform', 'pages-per-platform', 'auto-jobs-per-platform', 'auto-pages-per-platform'];
+
+function linkedInRecoveryCounts(jobs) {
+  const pool = jobs.filter(job => job?.source === 'linkedin');
+  const deferred = pool.filter(job =>
+    String(job?.snippet || job?.description || '').replace(/\s+/g, ' ').trim().length < JOB_DESCRIPTION_EVIDENCE_MIN_CHARS,
+  );
+  return { pool, deferred };
+}
+
+function snippetLengthSummary(lens) {
+  lens.sort((a, b) => a - b);
+  const min = lens[0], median = lens[Math.floor(lens.length / 2)], max = lens[lens.length - 1];
+  const empty = lens.filter(l => l === 0).length;
+  const emptyFlag = empty > 0 ? ` ⚠️ ${empty} empty` : '';
+  return `min ${min} / median ${median} / max ${max} chars${emptyFlag}`;
+}
+
+function eventAgeMs(ts) {
+  return Date.now() - (ts || Date.now());
+}
+
+function cardPosition(index) {
+  return Number.isFinite(index) && index > 0 ? `#${index}` : '#?';
+}
+
 function collectionBoundCap(cap, stopReason) {
   if (!cap || typeof cap !== 'object' || Array.isArray(cap)) return null;
   const type = String(cap.type || '').trim();
@@ -2212,7 +2212,7 @@ function collectionBoundCap(cap, stopReason) {
   const limit = typeof cap.limit === 'number' && Number.isSafeInteger(cap.limit) && cap.limit > 0
     ? cap.limit
     : null;
-  if (!['per-platform', 'jobs-per-platform', 'pages-per-platform', 'auto-jobs-per-platform', 'auto-pages-per-platform'].includes(type) || limit == null) return null;
+  if (!COLLECTION_CAP_TYPES.includes(type) || limit == null) return null;
   const expectedStops = type === 'per-platform'
     ? new Set(['per-source-cap'])
     : type === 'jobs-per-platform' || type === 'auto-jobs-per-platform'
@@ -2268,7 +2268,7 @@ function sourceCaps(source) {
     // 'source-internal' is displayed but is deliberately NOT accepted by
     // collectionBoundCap below: it is an app collection/enrichment budget,
     // not a user-selected cap or proof of provider exhaustion.
-    if (!['per-platform', 'jobs-per-platform', 'pages-per-platform', 'auto-jobs-per-platform', 'auto-pages-per-platform', 'source-internal'].includes(type) || limit == null) continue;
+    if (![...COLLECTION_CAP_TYPES, 'source-internal'].includes(type) || limit == null) continue;
     const key = `${type}:${limit}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -3796,9 +3796,7 @@ export function buildJobCompletionAssessment(
     ? (hasExhaustedReachable
       ? ` Every ${countrySkippedSources.length > 0 ? 'applicable ' : ''}source traversed its full reachable candidate set.`
       : ` Every ${countrySkippedSources.length > 0 ? 'applicable ' : ''}source traversed its full advertised candidate set.`)
-    : unprovenSources.length > 0
-      ? ` Gather completeness is unproven for ${unprovenSources.length} source(s) (${unprovenSources.map(source => `\`${source.id}\``).join(', ')}): they reported no corpus size, so this verdict covers the stages after collection.`
-    : ' No per-source gather coverage was retained, so this verdict covers the stages after collection.';
+    : ` Gather completeness is unproven for ${unprovenSources.length} source(s) (${unprovenSources.map(source => `\`${source.id}\``).join(', ')}): they reported no corpus size, so this verdict covers the stages after collection.`;
   // A durable receipt proves the run WROTE its score-ready output; it says
   // nothing about whether a board ever rendered it. Without this, a completed
   // run whose board was cleared or whose Combine was cancelled read as a clean
@@ -4978,13 +4976,7 @@ ${rows.join('\n')}
 `;
 }
 
-/**
- * File-backed crash/quit recovery facts for FULL and the focused RECOVERY
- * report lens.  Never render a prompt, AI response, job title, or job body:
- * this is strictly metadata/counts required to establish whether a restart can
- * recover an interrupted collection/scoring handoff.
- */
-const AUTHORITY_SUMMARY_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+const AUTHORITY_SUMMARY_IDENTIFIER = METADATA_ID_PATTERN;
 const AUTHORITY_SUMMARY_SHA256 = /^[a-f0-9]{64}$/;
 const AUTHORITY_SUMMARY_SLOT = /^(?:current|success:[1-3]|checkpoint:[a-f0-9]{24})$/;
 const AUTHORITY_SUMMARY_FIELDS = new Set([
@@ -5065,7 +5057,7 @@ function canonicalAuthoritySummary(record, expectedCanvasPath, expectedHubId) {
 
 function operationAuthorityRecoverySummary(canvasFilePath, ownerIds) {
   const owners = [...new Set((ownerIds instanceof Set ? [...ownerIds] : Array.isArray(ownerIds) ? ownerIds : [])
-    .filter(owner => typeof owner === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(owner)))].slice(0, MAX_RECOVERY_ARTIFACT_SCOPES);
+    .filter(owner => authoritySummaryIdentifier(owner) !== null))].slice(0, MAX_RECOVERY_ARTIFACT_SCOPES);
   const lines = [];
   for (const owner of owners) {
     try {
@@ -5085,9 +5077,14 @@ function operationAuthorityRecoverySummary(canvasFilePath, ownerIds) {
   return lines.length ? [`### Durable operation authority`, ...lines] : ['### Durable operation authority', '- No active Job Search hub authority sidecars were eligible for this report.'];
 }
 
+/**
+ * File-backed crash/quit recovery facts for FULL and the focused RECOVERY
+ * report lens.  Never render a prompt, AI response, job title, or job body:
+ * this is strictly metadata/counts required to establish whether a restart can
+ * recover an interrupted collection/scoring handoff.
+ */
 export function buildJobRecoverySnapshot(canvasFilePath, currentNodeIds = new Set(), currentJobHubIds = currentNodeIds, reportWindowId = null) {
-  const paths = recoveryPathsForCanvas(canvasFilePath, currentJobHubIds);
-  if (!paths) {
+  if (!canvasFilePath || typeof canvasFilePath !== 'string') {
     return `
 ## Job Recovery Diagnostics
 > Durable crash/quit-recovery metadata. Job contents and AI prompt/response text are never included.
@@ -5096,7 +5093,7 @@ export function buildJobRecoverySnapshot(canvasFilePath, currentNodeIds = new Se
 `;
   }
 
-  const artifactListing = paths.recoveryArtifacts;
+  const artifactListing = recoveryArtifactsForCanvas(canvasFilePath, currentJobHubIds);
   const artifacts = artifactListing.artifacts;
   const sidecarArtifacts = artifacts.filter(artifact => artifact.manifest || artifact.staging);
   const receiptArtifacts = artifacts.filter(artifact => artifact.receipt);
@@ -5529,7 +5526,7 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
   }
 
   const collisionWarnings = [];
-  for (const [_, items] of acceptedByHash.entries()) {
+  for (const items of acceptedByHash.values()) {
     if (items.length > 1) {
       const descriptors = items.map(item => {
         const batchNum = boardDiagnosticValue(item, 'batch');
@@ -5687,7 +5684,7 @@ export function postPipelineRecoveryAttemptCount(telemetry, pipeline) {
       count++;
     }
   }
-  return trailSaturated ? { count, atLeast: true } : { count, atLeast: false };
+  return { count, atLeast: trailSaturated };
 }
 
 export function formatGlassdoorCacheProvenance(entry = {}) {
@@ -5827,29 +5824,6 @@ function historyDropEvidenceLines(samples, totalDropped, indent = '') {
   ];
 }
 
-/**
- * Renders the last job-search pipeline funnel (search → scoring → bucketing).
- *
- * This is the load-bearing section for "did we analyze all the jobs we found?"
- * reports. The in-memory node tallies that would otherwise answer it
- * (totalScoredCount / finalSourceCounts on the hub) evaporate the moment the
- * user deletes the hub — which is exactly when these reports get filed — and
- * the raw funnel numbers otherwise live only in the 60-line log ring buffer,
- * which scrolls. getJobsTelemetry() captures them in the main process so they
- * survive both.
- *
- * Crucially, it separates *expected* drops (dedup / too-old / already-seen
- * history) from *unexpected* losses: jobs that reached the scorer but came
- * back as placeholder filler (matchScore=50, "AI format error"), and jobs the
- * abort signal cut off before they were ever scored. A bare "Scored N jobs"
- * log line hides both.
- */
-// `omitJobAudit` (XJOBAUDIT filter code, bugReportCodes.js) collapses the five
-// bulky PER-JOB/PER-LOCATION audit enumerations below — taxonomy placement,
-// scoring evidence, all-source role relevance, the Glassdoor location cache,
-// and the deferred-listing samples — into a one-line marker each. It never touches the funnel numbers,
-// stop reasons, warnings, or per-source outcomes that surround them: those are
-// exactly what a reader debugging a filtered job report still needs.
 // One Indeed browser-session preflight, rendered as observations only (contract:
 // jobsTelemetry.indeedSession, electron/ipc/jobs.js). Shared by the single-owner
 // section and the per-hub block below so the two can never drift: the same facts
@@ -5969,6 +5943,29 @@ function boardWorkTelemetryLines(records, ownership = {}) {
   return lines;
 }
 
+/**
+ * Renders the last job-search pipeline funnel (search → scoring → bucketing).
+ *
+ * This is the load-bearing section for "did we analyze all the jobs we found?"
+ * reports. The in-memory node tallies that would otherwise answer it
+ * (totalScoredCount / finalSourceCounts on the hub) evaporate the moment the
+ * user deletes the hub — which is exactly when these reports get filed — and
+ * the raw funnel numbers otherwise live only in the 60-line log ring buffer,
+ * which scrolls. getJobsTelemetry() captures them in the main process so they
+ * survive both.
+ *
+ * Crucially, it separates *expected* drops (dedup / too-old / already-seen
+ * history) from *unexpected* losses: jobs that reached the scorer but came
+ * back as placeholder filler (matchScore=50, "AI format error"), and jobs the
+ * abort signal cut off before they were ever scored. A bare "Scored N jobs"
+ * log line hides both.
+ */
+// `omitJobAudit` (XJOBAUDIT filter code, bugReportCodes.js) collapses the five
+// bulky PER-JOB/PER-LOCATION audit enumerations below — taxonomy placement,
+// scoring evidence, all-source role relevance, the Glassdoor location cache,
+// and the deferred-listing samples — into a one-line marker each. It never touches the funnel numbers,
+// stop reasons, warnings, or per-source outcomes that surround them: those are
+// exactly what a reader debugging a filtered job report still needs.
 export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath, localApplications = [], omitJobAudit = false, currentJobHubIds = currentNodeIds, currentJobBoardIds = new Set(), boardTelemetryOwnership = {}) {
   let t;
   // Older direct callers/tests do not have the renderer's typed hub index.
@@ -6697,7 +6694,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const count = Number(raw);
         return Number.isFinite(count) ? Math.max(0, count) : 0;
       };
-      const got = entries
+      const providerReturnedRows = entries
         .filter(([, v]) => providerReturned(v) > 0 || Number(v?.count || 0) > 0)
         .map(([k, v]) => `${k}=${providerReturned(v)} → ${Math.max(0, Number(v?.count) || 0)}`);
       // Preserve a terminal post-search resume outcome when the original row
@@ -6711,7 +6708,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           const label = recovery.kind === 'resolve' ? 'Solve resolved' : 'resume resolved';
           return `${sourceId}=${label}${recovery.count == null ? '' : ` → ${recovery.count}`}`;
         });
-      const renderedSources = [...got, ...resumed];
+      const renderedSources = [...providerReturnedRows, ...resumed];
       lines.push(`- Per source (provider returned → retained before target-role/history/evidence gates): ${renderedSources.length ? renderedSources.join(', ') : '(none)'}`);
       for (const [sourceId, value] of entries) {
         const enrichment = value?.enrichment;
@@ -6739,7 +6736,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // probe an unlinked next page, which is reported explicitly below.
       for (const [sid, v] of entries) {
         if (v.claimedTotal == null) continue;
-        const got = Number(v.count) || 0;
+        const collectedRaw = Number(v.count) || 0;
         // State both numbers; do NOT call the difference a loss. The kept count
         // is already past the age filter, the per-platform cap and cross-source
         // dedup, so a source correctly capped at 50 of 520 is not missing 470.
@@ -6752,7 +6749,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         // number. What CAN separate the two is the per-platform cap, the board's
         // own server-side date filter, and paging stopping early.
         lines.push(
-          `  - \`${sid}\` completeness: collected ${got} raw row(s); the board advertised ~${v.claimedTotal} for this query`
+          `  - \`${sid}\` completeness: collected ${collectedRaw} raw row(s); the board advertised ~${v.claimedTotal} for this query`
           + ' (pre-filter count — the gap reflects the per-platform cap, the board-side date filter, or a walk that ended early)',
         );
         if (v.directContinuation) {
@@ -7237,21 +7234,15 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         savedSnapshotJobs = snapJobs;
         savedRecoveryJobs = recoveryJobs;
         lines.push('- Saved scrape snapshot (current run): 0 jobs — no snippet, salary, or field-quality rows to report.');
-        const linkedInRecovery = recoveryJobs.filter(job => job?.source === 'linkedin');
+        const { pool: linkedInRecovery, deferred: linkedInDeferred } = linkedInRecoveryCounts(recoveryJobs);
         if (linkedInRecovery.length > 0) {
-          const linkedInDeferred = linkedInRecovery.filter(job =>
-            String(job?.snippet || job?.description || '').replace(/\s+/g, ' ').trim().length < JOB_DESCRIPTION_EVIDENCE_MIN_CHARS,
-          );
           lines.push(`- ⚠️ LinkedIn recovery pool: ${linkedInRecovery.length} candidate(s) retained separately from scoring; ${linkedInDeferred.length} still below the ${JOB_DESCRIPTION_EVIDENCE_MIN_CHARS}-character evidence threshold and remain available to Solve.`);
         }
       } else {
         savedSnapshotJobs = snapJobs;
         savedRecoveryJobs = recoveryJobs;
         if (recoveryJobs.length > 0) {
-          const linkedInRecovery = recoveryJobs.filter(job => job?.source === 'linkedin');
-          const linkedInDeferred = linkedInRecovery.filter(job =>
-            String(job?.snippet || job?.description || '').replace(/\s+/g, ' ').trim().length < JOB_DESCRIPTION_EVIDENCE_MIN_CHARS,
-          );
+          const { pool: linkedInRecovery, deferred: linkedInDeferred } = linkedInRecoveryCounts(recoveryJobs);
           if (linkedInRecovery.length > 0) {
             lines.push(linkedInDeferred.length > 0
               ? `- ⚠️ LinkedIn recovery pool: ${linkedInRecovery.length} candidate(s) retained separately from scoring; ${linkedInDeferred.length} still below the ${JOB_DESCRIPTION_EVIDENCE_MIN_CHARS}-character evidence threshold and remain available to Solve.`
@@ -7267,19 +7258,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const entries = Object.entries(bySource);
         if (entries.length === 1) {
           const [[, lens]] = entries;
-          lens.sort((a, b) => a - b);
-          const min = lens[0], median = lens[Math.floor(lens.length / 2)], max = lens[lens.length - 1];
-          const empty = lens.filter(l => l === 0).length;
-          const emptyFlag = empty > 0 ? ` ⚠️ ${empty} empty` : '';
-          lines.push(`- Snippet lengths (saved snapshot): min ${min} / median ${median} / max ${max} chars${emptyFlag}`);
+          lines.push(`- Snippet lengths (saved snapshot): ${snippetLengthSummary(lens)}`);
         } else {
           lines.push('- Snippet lengths per source (saved snapshot):');
           for (const [src, lens] of entries) {
-            lens.sort((a, b) => a - b);
-            const min = lens[0], median = lens[Math.floor(lens.length / 2)], max = lens[lens.length - 1];
-            const empty = lens.filter(l => l === 0).length;
-            const emptyFlag = empty > 0 ? ` ⚠️ ${empty} empty` : '';
-            lines.push(`  - \`${src}\`: min ${min} / median ${median} / max ${max} chars${emptyFlag}`);
+            lines.push(`  - \`${src}\`: ${snippetLengthSummary(lens)}`);
           }
         }
 
@@ -7331,7 +7314,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
             total: 0,
             salaryPresent: 0,
             salaryUnparseable: 0,
-            salaryLostCadence: 0, salaryCadenceContextEx: [],
+            salaryLostCadence: 0, salaryCadenceContext: 0,
             salaryImplausibleAnnual: 0,
             salaryProse: 0,
             postedEmpty: 0,
@@ -7370,7 +7353,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
                 // distinguish "the provider omitted it everywhere" from "our
                 // list-field extraction failed to reconcile evidence we already
                 // captured," without retaining the pay text itself.
-                if (q.salaryCadenceContextEx.length < 3) {
+                if (q.salaryCadenceContext < 3) {
                   const payLine = String(j.snippet || '')
                     .split(/\r?\n/)
                     .map(line => line.replace(/\s+/g, ' ').trim())
@@ -7379,7 +7362,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
                       && /\b(?:pay|salary|compensation|wage|rate)\b/i.test(line)
                       && /\b(?:year|yr|yearly|annual|annually|annum|hour|hr|hourly|week|wk|weekly|month|mo|monthly|day|daily)s?\b|\/\s*(?:yr|hr|wk|mo|day)\b/i.test(line));
                   if (payLine) {
-                    q.salaryCadenceContextEx.push({ present: true });
+                    q.salaryCadenceContext++;
                   }
                 }
               } else {
@@ -7429,8 +7412,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
               // pages and omits it on others, so never promise an extractor fix
               // or imply a cadence that the source did not actually provide.
               breakdown.push(`${q.salaryLostCadence} money-shaped but cadence missing — extractor could not recover a unit, so these remain Unspecified rather than guessing (values withheld)`);
-              if (q.salaryCadenceContextEx.length > 0) {
-                breakdown.push(`recovered-description pay context exists for ${q.salaryCadenceContextEx.length} bounded sample(s), so cadence reconciliation is possible without guessing (values withheld)`);
+              if (q.salaryCadenceContext > 0) {
+                breakdown.push(`recovered-description pay context exists for ${q.salaryCadenceContext} bounded sample(s), so cadence reconciliation is possible without guessing (values withheld)`);
               }
             }
             if (q.salaryImplausibleAnnual > 0) {
@@ -7672,7 +7655,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     }
     const a = browserScrape.active;
     if (a) {
-      const ageMs = Date.now() - (a.ts || Date.now());
+      const ageMs = eventAgeMs(a.ts);
       const bits = [
         a.phase ? `phase ${a.phase}` : null,
         a.srcName || a.sourceId ? `source ${a.srcName || a.sourceId}` : null,
@@ -7808,7 +7791,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     if (originsNotInRecent.length > 0) {
       lines.push('- Source/query origin phases (retained — these are emitted once per source and would otherwise age out of the ring below):');
       for (const e of originsNotInRecent) {
-        const ageMs = Date.now() - (e.ts || Date.now());
+        const ageMs = eventAgeMs(e.ts);
         const bits = [
           e.phase || 'event',
           e.srcName || e.sourceId || null,
@@ -7822,7 +7805,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     if (recent.length > 0) {
       lines.push('- Recent browser-scrape phases:');
       for (const e of recent) {
-        const ageMs = Date.now() - (e.ts || Date.now());
+        const ageMs = eventAgeMs(e.ts);
         // Chrome-spawn/connect phases get extra fields surfaced directly in the
         // report so the reader immediately knows pid/alive/poll-count without
         // having to cross-reference the raw log.
@@ -7872,7 +7855,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const shown = fieldAnomalies.slice(-12);
       lines.push('- Detail-recovery diagnostics (retained independently of recent phases):');
       for (const e of shown) {
-        const ageMs = Date.now() - (e.ts || Date.now());
+        const ageMs = eventAgeMs(e.ts);
         const label = [
           e.phase,
           e.srcName || e.sourceId || null,
@@ -8021,7 +8004,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const samples = Array.isArray(e.failureSamples) ? e.failureSamples.slice(0, 6) : [];
         for (const sample of samples) {
           const index = Number(sample?.itemIndex);
-          const position = Number.isFinite(index) && index > 0 ? `#${index}` : '#?';
+          const position = cardPosition(index);
           // Card keys frequently embed a listing title/company. Preserve that an
           // identity was recorded without exporting the listing-level value.
           const key = sample?.key ? ' identity recorded' : '';
@@ -8033,7 +8016,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           lines.push('    - Blocking popup handling:');
           for (const sample of modalSamples) {
             const index = Number(sample?.itemIndex);
-            const position = Number.isFinite(index) && index > 0 ? `#${index}` : '#?';
+            const position = cardPosition(index);
             const stage = sample?.stage ? ' · stage recorded' : '';
             const signature = sample?.signature ? ' · signature recorded' : '';
             const control = sample?.control ? ' · control recorded' : '';
@@ -8050,7 +8033,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           : [];
         for (const sample of applyMissSamples) {
           const index = Number(sample?.itemIndex);
-          const position = Number.isFinite(index) && index > 0 ? `#${index}` : '#?';
+          const position = cardPosition(index);
           const provider = sample?.preferredSource ? 'recorded (withheld)' : '(unrecorded provider)';
           const labels = Array.isArray(sample?.candidateLabels) && sample.candidateLabels.length
             ? ` · ${sample.candidateLabels.length} visible candidate label(s) recorded`
@@ -8099,7 +8082,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           lines.push('    - Click transition samples (expected → hit):');
           for (const sample of transitions) {
             const index = Number(sample?.itemIndex ?? sample?.index);
-            const position = Number.isFinite(index) && index > 0 ? `#${index}` : '#?';
+            const position = cardPosition(index);
             const physicalIndex = Number(sample?.physicalIndex);
             const physicalTotal = Number(sample?.physicalTotal);
             const physicalPosition = Number.isFinite(physicalIndex) && physicalIndex > 0
@@ -8140,19 +8123,6 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     }
   }
 
-  // Glassdoor's location filter is keyed by a numeric locId that has to be
-  // resolved through a Cloudflare-gated in-browser autocomplete, and a failed
-  // resolve SKIPS the whole source. Whether a cached, country-verified entry
-  // existed is therefore the difference between "this run had to make that
-  // fragile call" and "it should never have needed to" — unanswerable from the
-  // rest of the report, so it is printed whenever the question can come up.
-  // Glassdoor ACCEPTS a nation-tier locId and echoes the requested country in
-  // its page header, but does not filter on it (measured: `_IN1` returned
-  // Ontario listings titled "United States jobs"; one province out-counted all
-  // of Canada). Reported from telemetry rather than as a source warning — the
-  // warning channel would both occupy the single per-source slot ahead of a real
-  // block and, because any info-severity warning maps to terminal status
-  // 'skipped', make a fully successful run read as skipped.
   // Scroll-source reveal outcome. Rendered because the failure it detects is
   // SILENT by construction: Google's list only loads on trusted wheel input, and
   // scrolling it any other way produces a clean run of ~20 cards that terminates
@@ -8188,6 +8158,13 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     }
   }
 
+  // Glassdoor ACCEPTS a nation-tier locId and echoes the requested country in
+  // its page header, but does not filter on it (measured: `_IN1` returned
+  // Ontario listings titled "United States jobs"; one province out-counted all
+  // of Canada). Reported from telemetry rather than as a source warning — the
+  // warning channel would both occupy the single per-source slot ahead of a real
+  // block and, because any info-severity warning maps to terminal status
+  // 'skipped', make a fully successful run read as skipped.
   const nationTierNotes = originPool.filter(e => e?.phase === 'location-nation-tier-unenforced');
   if (nationTierNotes.length > 0) {
     lines.push('\n### Country scope not enforced');
@@ -8201,6 +8178,12 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     }
   }
 
+  // Glassdoor's location filter is keyed by a numeric locId that has to be
+  // resolved through a Cloudflare-gated in-browser autocomplete, and a failed
+  // resolve SKIPS the whole source. Whether a cached, country-verified entry
+  // existed is therefore the difference between "this run had to make that
+  // fragile call" and "it should never have needed to" — unanswerable from the
+  // rest of the report, so it is printed whenever the question can come up.
   const locationSkips = originPool.filter(e => e?.phase === 'location-resolution-failed');
   let glassdoorLocCache = {};
   try { glassdoorLocCache = getGlassdoorLocIdCache() || {}; } catch { /* store may not be ready */ }
@@ -8339,12 +8322,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           ? ` · **${e.recoveryRecommendation === 'skip' ? 'Skip' : 'Retry'} recommended after ${e.consecutiveNoMatchPasses} unchanged full-list check${e.consecutiveNoMatchPasses === 1 ? '' : 's'}**`
           : '';
         lines.push(`  - Resolve detail enrichment: attempted ${e.attempted || 0}${targetNote} → recovered this attempt ${e.succeeded ?? e.enriched ?? 0} → still empty ${e.empty || 0} ${verdict}${providerNote}${completeNote}${unavailableNote}${recommendationNote}${failureNote}`);
-        for (const _ of Array.isArray(e.unavailableSamples) ? e.unavailableSamples : []) {
-          lines.push('    - unavailable listing recorded (details withheld)');
-        }
-        for (const _ of Array.isArray(e.emptySamples) ? e.emptySamples : []) {
-          lines.push('    - missing listing recorded (details withheld)');
-        }
+        const unavailableSampleCount = Array.isArray(e.unavailableSamples) ? e.unavailableSamples.length : 0;
+        const emptySampleCount = Array.isArray(e.emptySamples) ? e.emptySamples.length : 0;
+        lines.push(...Array.from({ length: unavailableSampleCount }, () => '    - unavailable listing recorded (details withheld)'));
+        lines.push(...Array.from({ length: emptySampleCount }, () => '    - missing listing recorded (details withheld)'));
       }
       if (r.extracted > 0 && r.kept === 0 && r.historyDropped === r.extracted && languageDropped === 0) {
         lines.push('  - _(every extracted job was already shown on a prior run — correctly suppressed, not re-analyzed)_');
@@ -8571,12 +8552,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const completionSnapshotJobs = savedRecoveryJobs.length > 0
         ? savedRecoveryJobs
         : savedSnapshotJobs;
-      const snapshotLinkedInIncomplete = completionSnapshotJobs.filter(job =>
-        job?.source === 'linkedin'
-          && String(job?.snippet || job?.description || '').replace(/\s+/g, ' ').trim().length < JOB_DESCRIPTION_EVIDENCE_MIN_CHARS,
-      );
+      const { pool: savedLinkedInPool, deferred: snapshotLinkedInIncomplete } = linkedInRecoveryCounts(completionSnapshotJobs);
       const telemetryEmpty = Number(lastReal.stillEmpty) || 0;
-      const hasSavedLinkedIn = completionSnapshotJobs.some(job => job?.source === 'linkedin');
+      const hasSavedLinkedIn = savedLinkedInPool.length > 0;
       const empty = hasSavedLinkedIn
         ? Math.max(telemetryEmpty, snapshotLinkedInIncomplete.length)
         : telemetryEmpty;
@@ -8647,20 +8625,15 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // A model can successfully return a score for an empty listing-card row.
     // Keep that transport success distinct from the quality of the evidence it
     // received; otherwise the green score count reads as a clean analysis.
-    const scoreVerdict = fullEvidence
-      ? '✅ all analyzed with full descriptions'
+    const scoreVerdictLabel = (selectedWording) => (fullEvidence
+      ? `✅ all ${selectedWording ? 'selected jobs ' : ''}analyzed with full descriptions`
       : clean && incompleteDescriptions > 0
         ? '⚠️ scored but low-evidence'
         : clean
-          ? '✅ all received real model scores'
-          : '';
-    const selectedScoreVerdict = fullEvidence
-      ? '✅ all selected jobs analyzed with full descriptions'
-      : clean && incompleteDescriptions > 0
-        ? '⚠️ scored but low-evidence'
-        : clean
-          ? '✅ all selected jobs received real model scores'
-          : '';
+          ? `✅ all ${selectedWording ? 'selected jobs ' : ''}received real model scores`
+          : '');
+    const scoreVerdict = scoreVerdictLabel(false);
+    const selectedScoreVerdict = scoreVerdictLabel(true);
     const selected = s.selectedForScoring ?? s.input; // back-compat with pre-cap telemetry
     lines.push(`\n### Scoring${ago(s.ts)}`);
     if (s.cappedForBudget > 0) {
@@ -8682,7 +8655,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // for same-source replacement and every retry: a sequence such as
     // 3→7→7→15→52→54 contributes +51, while latest-attempt-only
     // telemetry would contribute +2 and falsely label 49 jobs as carry-over.
-    const resumeOnlyGathered = Object.entries(t.resumeAttempts || {}).reduce((sum, [sourceId]) => {
+    const resumeOnlyGathered = Object.keys(t.resumeAttempts || {}).reduce((sum, sourceId) => {
       if (t.resolves?.[sourceId]) return sum;
       const attempt = latestResolvedResumeAttempt(t, sourceId, t.search?.ts);
       return sum + (resolvedResumeCount(attempt) || 0);

@@ -9,7 +9,6 @@ import { withListingClosed, withListingLiveness } from '../../electron/ipc/offic
 import { __runWithIpcRequestContextForTests } from '../../electron/ipc/ipcUtils.js';
 import {
   listingEvidenceKey, recordListingEvidence, readListingEvidence, memoListingVerdict, readListingVerdictMemo,
-  tripListingLivenessBreaker, isListingLivenessBreakerTripped,
 } from '../../electron/ipc/listingLivenessStore.js';
 import {
   LISTING_LIVENESS_RULES, classifyListingLiveness, evidenceFromHtml, finalizeListingEvidence, listingLivenessPageProbe,
@@ -164,8 +163,6 @@ export default [
       assert.equal(readListingEvidence(row(1)), null);
       assert.equal(memoListingVerdict(row(1), { verdict: 'open' }), false);
       assert.equal(readListingVerdictMemo(row(1)), null);
-      tripListingLivenessBreaker();
-      assert.equal(isListingLivenessBreakerTripped(), false);
       __runWithIpcRequestContextForTests({ livenessEvidence: new Map() }, () => {
         const first = row(0);
         assert.equal(recordListingEvidence(first, { id: 'first' }), true);
@@ -175,13 +172,9 @@ export default [
         for (let index = 1; index <= 5_000; index++) recordListingEvidence(row(index), { id: index });
         assert.equal(readListingEvidence(first), null, 'oldest entry evicted at the cap');
         assert.deepEqual(readListingEvidence(row(5_000)), { id: 5_000 });
-        assert.equal(isListingLivenessBreakerTripped(), false);
-        tripListingLivenessBreaker();
-        assert.equal(isListingLivenessBreakerTripped(), true);
       });
       __runWithIpcRequestContextForTests({ livenessEvidence: new Map() }, () => {
         assert.equal(readListingEvidence(row(5_000)), null);
-        assert.equal(isListingLivenessBreakerTripped(), false);
       });
     },
   },

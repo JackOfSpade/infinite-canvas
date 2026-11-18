@@ -18,6 +18,7 @@
  * to render. It never touches IPC, disk, or the DOM, and it must never throw
  * — a crash here would take the whole dock down mid-paste.
  */
+import { cyrb53 } from './cyrb53.js';
 
 // Short answers ("Done.", "Yes, proceed") are legitimately repeatable across
 // unrelated prompts, so anything shorter is never fingerprinted at all —
@@ -37,23 +38,9 @@ export function normalizePastedResponse(text) {
   return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
 }
 
-// cyrb53: a cheap, well-distributed 53-bit non-cryptographic hash. Good
-// enough here because the fingerprint only ever guards against this dock
-// accidentally re-submitting its OWN prior text, never an adversarial
-// collision — and it runs on every keystroke, so anything cryptographic
-// would be wasted work.
-function cyrb53(str, seed = 0) {
-  let h1 = 0xdeadbeef ^ seed;
-  let h2 = 0x41c6ce57 ^ seed;
-  for (let i = 0; i < str.length; i += 1) {
-    const ch = str.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
-}
+// The fingerprint only guards against this dock re-submitting its OWN prior
+// text, never an adversarial collision, and it runs on every keystroke, so the
+// cheap non-cryptographic cyrb53 hash is enough.
 
 /**
  * A stable identity for a pasted response, or '' when the text is too short
@@ -155,49 +142,33 @@ export function assessPastedResponse({ response, activeRequest, queuedRequests, 
   // person with no escape, so this has to be conclusive.
   const identity = extractPasteEnvelopeIdentity(text);
 
+  const otherQueuedBlock = (field, value, detail) => {
+    const owner = queued.find((request) => isOtherQueued(request) && request[field] === value);
+    if (!owner) return null;
+    return {
+      block: {
+        reason: 'other-queued-prompt',
+        ownerRequestId: owner.requestId ?? null,
+        ownerLabel: null,
+        detail,
+      },
+      notice: null,
+    };
+  };
+
   if (identity.handoffCode) {
-    const owner = queued.find((request) => isOtherQueued(request) && request.handoffCode === identity.handoffCode);
-    if (owner) {
-      return {
-        block: {
-          reason: 'other-queued-prompt',
-          ownerRequestId: owner.requestId ?? null,
-          ownerLabel: null,
-          detail: `carries handoff code ${identity.handoffCode}`,
-        },
-        notice: null,
-      };
-    }
+    const verdict = otherQueuedBlock('handoffCode', identity.handoffCode, `carries handoff code ${identity.handoffCode}`);
+    if (verdict) return verdict;
   }
 
   if (identity.jobId && identity.jobId !== activeRequest.jobId) {
-    const owner = queued.find((request) => isOtherQueued(request) && request.jobId === identity.jobId);
-    if (owner) {
-      return {
-        block: {
-          reason: 'other-queued-prompt',
-          ownerRequestId: owner.requestId ?? null,
-          ownerLabel: null,
-          detail: `carries job id ${identity.jobId}`,
-        },
-        notice: null,
-      };
-    }
+    const verdict = otherQueuedBlock('jobId', identity.jobId, `carries job id ${identity.jobId}`);
+    if (verdict) return verdict;
   }
 
   for (const stamp of identity.pushStamps) {
-    const owner = queued.find((request) => isOtherQueued(request) && request.handoffCode === stamp);
-    if (owner) {
-      return {
-        block: {
-          reason: 'other-queued-prompt',
-          ownerRequestId: owner.requestId ?? null,
-          ownerLabel: null,
-          detail: `carries handoff code ${stamp}`,
-        },
-        notice: null,
-      };
-    }
+    const verdict = otherQueuedBlock('handoffCode', stamp, `carries handoff code ${stamp}`);
+    if (verdict) return verdict;
   }
 
   // Rule 3/4: DUPLICATE CONTENT.

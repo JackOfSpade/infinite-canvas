@@ -99,6 +99,13 @@ const ColorSection = ({ label, colors, value, onSwatchClick, onInputChange, onIn
   );
 };
 
+// Hex, rgb()/rgba() or a CSS colour name. The name arm checks shape only, so
+// a half-typed name passes.
+function isAcceptableColor(value, allowEmpty = false) {
+  if (value === '') return allowEmpty;
+  return /^#[0-9a-fA-F]{3,8}$/.test(value) || /^rgba?\(/.test(value) || /^[a-zA-Z]+$/.test(value);
+}
+
 /**
  * Reusable Customize dialog
  */
@@ -195,7 +202,7 @@ export function CustomizeDialog({
   const handleColorInput = (val) => {
     setTextColor(val);
     // Support CSS named colors alongside hex/rgba
-    if (/^#[0-9a-fA-F]{3,8}$/.test(val) || /^rgba?\(/.test(val) || /^[a-zA-Z]+$/.test(val)) {
+    if (isAcceptableColor(val)) {
       appliedTextColorRef.current = val;
       emit({ textColor: val });
     }
@@ -206,7 +213,7 @@ export function CustomizeDialog({
   // hex code) must not be written into node data. Revert to the last value
   // that DID pass validation rather than emit garbage CSS.
   const handleColorBlur = (val) => {
-    if (/^#[0-9a-fA-F]{3,8}$/.test(val) || /^rgba?\(/.test(val) || /^[a-zA-Z]+$/.test(val)) return;
+    if (isAcceptableColor(val)) return;
     setTextColor(appliedTextColorRef.current);
   };
 
@@ -220,7 +227,7 @@ export function CustomizeDialog({
   const handleBgColorInput = (val) => {
     const finalColor = val === '' ? null : val;
     setBackgroundColor(finalColor);
-    if (val === '' || /^#[0-9a-fA-F]{3,8}$/.test(val) || /^rgba?\(/.test(val) || /^[a-zA-Z]+$/.test(val)) {
+    if (isAcceptableColor(val, true)) {
       appliedBgColorRef.current = finalColor;
       emit({ backgroundColor: finalColor });
     }
@@ -228,7 +235,7 @@ export function CustomizeDialog({
 
   // Same revert-on-invalid-blur behavior as the text color field above.
   const handleBgColorBlur = (val) => {
-    if (val === '' || /^#[0-9a-fA-F]{3,8}$/.test(val) || /^rgba?\(/.test(val) || /^[a-zA-Z]+$/.test(val)) return;
+    if (isAcceptableColor(val, true)) return;
     setBackgroundColor(appliedBgColorRef.current);
   };
 

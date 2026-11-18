@@ -102,6 +102,13 @@ test('a run that never finishes times out instead of polling forever', async () 
   assert.ok(calls.filter(call => call.init.method === 'GET').length >= 1);
 });
 
+test('a zero poll interval polls again instead of reporting a timeout', async () => {
+  const { fetch, calls } = fakeFetch({ results: [json(202, { status: 'running' }), completed('late reply')] });
+  const reply = await runParallelTask({ input: PROMPT, key: KEY, fetch, pollSeconds: 0 });
+  assert.equal(reply.text, 'late reply');
+  assert.equal(calls.filter(call => call.init.method === 'GET').length, 2);
+});
+
 test('an aborted signal stops the run with the abort code', async () => {
   const controller = new AbortController();
   const { fetch } = fakeFetch({

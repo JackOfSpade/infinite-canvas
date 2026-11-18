@@ -4,6 +4,7 @@
 import { JSDOM } from 'jsdom';
 import { htmlToText } from 'html-to-text';
 import { isKnownAtsHost, strictEmployerEqual } from './officialSourceHosts.js';
+import { CLOSED_POSTING_TEXT } from './officialPostingFields.js';
 import { extractOfficialPostingNuxtData } from './officialPostingNuxtData.js';
 import { normalizeLocationInput } from '../../src/utils/jobLocation.js';
 
@@ -149,7 +150,7 @@ function currentJobDetail(doc, route, { sourceUrl, employer }) {
   const locationFacts = currentJobLocation(main, job, locations[0].replace(/^Location\s*:\s*/iu, ''));
   if (!locationFacts) return [];
   const notices = [...main.querySelectorAll('.job-notice,.job-status,[data-job-status],[role="alert"]')].map(node => text(node.innerHTML)).join('\n');
-  const closed = /\b(?:no longer accepting applications|position has been filled|job is no longer available)\b/iu.test(description + '\n' + notices);
+  const closed = CLOSED_POSTING_TEXT.test(description + '\n' + notices);
   const flag = value => value === true || value === 'true';
   const off = value => value === false || value === 'false';
   if (['hidden', 'is_posted', 'publish_to_cws'].some(name => job[name] !== undefined
@@ -233,7 +234,7 @@ function nativeCareersDetail(doc, route, { sourceUrl, employer }) {
   if (locations.length > 1) return [];
   return candidate({ title, description, identifier: route.id, applyUrl: [...targets][0],
     location: locations.length ? text(locations[0].innerHTML).replace(/^Locations?\s*:\s*/iu, '') : '',
-    live: !/\b(?:no longer accepting applications|position has been filled|job is no longer available)\b/iu.test(description),
+    live: !CLOSED_POSTING_TEXT.test(description),
   }, { sourceUrl, employer });
 }
 
@@ -313,7 +314,7 @@ export function extractOfficialPostingPageData({ body, sourceUrl, employer = '',
   const applyUrl = applyLinks.map(el => https(el.getAttribute('href') || el.getAttribute('action'), sourceUrl)).find(Boolean);
   const localForm = article.querySelector('form') && /\bapply (?:for|to) (?:this|the) (?:role|job|position)\b/iu.test(description);
   if (!applyUrl && !localForm) return [];
-  const closed = /\b(?:no longer accepting applications|position has been filled|job is no longer available)\b/iu.test(description);
+  const closed = CLOSED_POSTING_TEXT.test(description);
   return candidate({ title: text(heading.innerHTML), description, live: !closed, applyUrl: sourceUrl, identifier: queryRoute?.id || '',
     location: plain(article.querySelector('[itemprop="jobLocation"],[data-job-location]')?.textContent) }, { sourceUrl, employer });
 }

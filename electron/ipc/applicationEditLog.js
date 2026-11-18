@@ -23,8 +23,15 @@ export function modelLabel() {
 function storePath(root) { return path.join(root, 'application-improvement'); }
 function stateFile(root) { return path.join(storePath(root), 'state.json'); }
 function blank(label) { return { version: 1, modelLabel: label, countSinceSession: 0, pairs: [], summaries: [] }; }
+function withArrays(state) {
+  if (state && typeof state === 'object') {
+    if (!Array.isArray(state.pairs)) state.pairs = [];
+    if (!Array.isArray(state.summaries)) state.summaries = [];
+  }
+  return state;
+}
 async function read(root) {
-  try { return JSON.parse(await fs.promises.readFile(stateFile(root), 'utf8')); }
+  try { return withArrays(JSON.parse(await fs.promises.readFile(stateFile(root), 'utf8'))); }
   catch (error) { if (error?.code === 'ENOENT') return blank(modelLabel()); throw error; }
 }
 async function write(root, state) {
@@ -122,36 +129,41 @@ function outOfOrder(values) {
  * summaries and the gate's diffs always describe the same edits.
  */
 function pairBlocks(before, after) {
-    const pairs = [];
-    const freeAfter = new Set(after.keys());
-    const freeBefore = [];
-    for (const [i, block] of before.entries()) {
-      const j = [...freeAfter].find(index => after[index].text === block.text);
-      if (j === undefined) freeBefore.push(i);
-      else { freeAfter.delete(j); pairs.push({ i, j }); }
+  const pairs = [];
+  const freeAfter = new Set(after.keys());
+  const afterByText = new Map();
+  for (const [j, block] of after.entries()) {
+    if (!afterByText.has(block.text)) afterByText.set(block.text, []);
+    afterByText.get(block.text).push(j);
+  }
+  const freeBefore = [];
+  for (const [i, block] of before.entries()) {
+    const j = afterByText.get(block.text)?.shift();
+    if (j === undefined) freeBefore.push(i);
+    else { freeAfter.delete(j); pairs.push({ i, j }); }
+  }
+  // A leftover block in the same section and kind that keeps at least half its words is a rewrite.
+  const candidates = [];
+  for (const i of freeBefore) {
+    const a = before[i].text.split(' ');
+    for (const j of freeAfter) {
+      if (after[j].kind !== before[i].kind || after[j].section !== before[i].section) continue;
+      const b = after[j].text.split(' ');
+      const kept = commonWords(a, b);
+      const score = (2 * kept) / (a.length + b.length);
+      if (score >= 0.5) candidates.push({ i, j, score, wordsRemoved: a.length - kept, wordsAdded: b.length - kept });
     }
-    // A leftover block in the same section and kind that keeps at least half its words is a rewrite.
-    const candidates = [];
-    for (const i of freeBefore) {
-      const a = before[i].text.split(' ');
-      for (const j of freeAfter) {
-        if (after[j].kind !== before[i].kind || after[j].section !== before[i].section) continue;
-        const b = after[j].text.split(' ');
-        const kept = commonWords(a, b);
-        const score = (2 * kept) / (a.length + b.length);
-        if (score >= 0.5) candidates.push({ i, j, score, wordsRemoved: a.length - kept, wordsAdded: b.length - kept });
-      }
-    }
-    const rewrittenBefore = new Set();
-    for (const candidate of candidates.sort((x, y) => y.score - x.score)) {
-      if (rewrittenBefore.has(candidate.i) || !freeAfter.has(candidate.j)) continue;
-      rewrittenBefore.add(candidate.i);
-      freeAfter.delete(candidate.j);
-      pairs.push({ ...candidate, rewritten: true });
-    }
-    pairs.sort((x, y) => x.i - y.i);
-    const moved = outOfOrder(pairs.map(pair => pair.j));
-    return { pairs, moved, freeBefore, rewrittenBefore, freeAfter };
+  }
+  const rewrittenBefore = new Set();
+  for (const candidate of candidates.sort((x, y) => y.score - x.score)) {
+    if (rewrittenBefore.has(candidate.i) || !freeAfter.has(candidate.j)) continue;
+    rewrittenBefore.add(candidate.i);
+    freeAfter.delete(candidate.j);
+    pairs.push({ ...candidate, rewritten: true });
+  }
+  pairs.sort((x, y) => x.i - y.i);
+  const moved = outOfOrder(pairs.map(pair => pair.j));
+  return { pairs, moved, freeBefore, rewrittenBefore, freeAfter };
 }
 
 /**
@@ -217,17 +229,22 @@ function sinceSession(state) {
   return Number.isFinite(Date.parse(state?.lastSessionAt)) ? Date.parse(state.lastSessionAt) : -Infinity;
 }
 
-/** Non-superseded pairs since the last session with at least one content edit, oldest first. */
-export function editedPairsSinceSession(state) {
+/** Non-superseded pairs generated since the last session, oldest first. */
+function livePairsSinceSession(state) {
   const since = sinceSession(state);
   return (state?.pairs || [])
     .filter(pair => !pair.supersededAt && Date.parse(pair.generatedAt) >= since)
-    .sort((left, right) => String(left.generatedAt).localeCompare(String(right.generatedAt)))
+    .sort((left, right) => String(left.generatedAt).localeCompare(String(right.generatedAt)));
+}
+
+/** Non-superseded pairs since the last session with at least one content edit, oldest first. */
+export function editedPairsSinceSession(state) {
+  return livePairsSinceSession(state)
     .map(pair => ({ pair, diffs: editDiffs(pair.generated, pair.saved) }))
     .filter(entry => entry.diffs.length > 0);
 }
 
-export const GATE_PROMPT_VERSION = 2;
+const GATE_PROMPT_VERSION = 2;
 export const GATE_MIN_EDITED_BUNDLES = 3;
 export const GATE_RECURRENCE_MIN = 3;
 
@@ -282,7 +299,9 @@ export async function writeGenerationGate(root, record) {
 /** Read the state and its edited pairs in one consistent snapshot. */
 export async function generationGateInputs(root) {
   return serialize(async () => {
-    const state = await alignModel(root, await read(root));
+    const stored = await read(root);
+    const state = await alignModel(root, stored);
+    if (state !== stored) await write(root, state);
     const editedPairs = editedPairsSinceSession(state);
     return { state, editedPairs, gate: normalizeGate(state.generationGate) };
   });
@@ -456,11 +475,7 @@ const EDIT_OPS = new Set(['added', 'removed', 'rewritten', 'moved']);
  * generation was not sent), and neither does a pair reviewed by a past session.
  */
 export function recurringEditSections(state, { window = RECURRING_WINDOW, min = RECURRING_MIN_BUNDLES } = {}) {
-  const since = sinceSession(state);
-  const recent = (state?.pairs || [])
-    .filter(pair => !pair.supersededAt && Date.parse(pair.generatedAt) >= since)
-    .sort((left, right) => String(left.generatedAt).localeCompare(String(right.generatedAt)))
-    .slice(-window);
+  const recent = livePairsSinceSession(state).slice(-window);
   if (recent.length < min) return [];
   const ids = new Set(recent.map(pair => pair.id));
   const bundlesByKey = new Map();

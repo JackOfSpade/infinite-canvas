@@ -142,7 +142,7 @@ export default [
       assert(match, 'Board registers and removes a canvas-file-nodes-dropped-on-hub listener');
       const body = match[1];
       assert(/e\.detail\?\.hubId !== id \|\| e\.detail\?\.hubType !== 'jobboard'\) return;/.test(body), 'listener checks hubId and hubType === jobboard');
-      assert(/void compileCareerOverride\(\{\s*filePaths: files\.map\(file => file\.filePath\),/.test(body), 'listener calls compileCareerOverride with file paths');
+      assert(/void compileCareerOverride\(careerFileRequest\(files\.map\(file => \(\{ path: file\.filePath, name: file\.filename \}\)\)\)\);/.test(body), 'listener calls compileCareerOverride with file paths');
       assert(/dragHover=\{data\.dragHover \|\| null\} dropsBlocked=\{data\.dragHover\?\.kind !== 'accept'\}/.test(source),
         'HubContainer receives dragHover and only unblocks for an accept verdict');
       return { verified: true };

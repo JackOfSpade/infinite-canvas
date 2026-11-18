@@ -141,9 +141,14 @@ export function coverageSourceIdsForLocation(sourceIds, searchLocationText) {
 }
 
 /** Prefer a platform's own bookmark; otherwise fall back to the hub anchor. */
-export function jobSearchSourceAnchor(data, nodeId, sourceId) {
+export function jobSearchSourceAnchor(
+  data,
+  nodeId,
+  sourceId,
+  normalizedCoverage = normalizeSourceCoverage(data?.sourceCoverage),
+) {
   if (isSafeSourceId(sourceId)) {
-    const sourceCoverage = normalizeSourceCoverage(data?.sourceCoverage);
+    const sourceCoverage = normalizedCoverage;
     if (hasOwn(sourceCoverage, sourceId)) {
       return { timestamp: sourceCoverage[sourceId].coverageStartedAt, source: 'source-coverage' };
     }
@@ -174,10 +179,11 @@ export function resolveJobSearchSourceWindows(
   }
 
   const sourceWindows = {};
+  const normalizedCoverage = normalizeSourceCoverage(data?.sourceCoverage);
   let runWindow = null;
   let runAnchor = null;
   for (const sourceId of ids) {
-    const anchor = jobSearchSourceAnchor(data, nodeId, sourceId);
+    const anchor = jobSearchSourceAnchor(data, nodeId, sourceId, normalizedCoverage);
     const window = serializeJobSearchWindow(
       resolveJobSearchDateWindow(anchor.timestamp, now, initialLookbackDays),
       anchor.source,
@@ -457,8 +463,9 @@ export function latestSourceCompletedAt(data, sourceIds = null) {
 
 /** Platforms whose bookmark is older than the newest one, oldest first. */
 export function sourcesBehindLatest(data, nodeId, sourceIds) {
+  const normalizedCoverage = normalizeSourceCoverage(data?.sourceCoverage);
   const anchors = uniqueSourceIds(sourceIds)
-    .map(sourceId => ({ sourceId, timestamp: jobSearchSourceAnchor(data, nodeId, sourceId).timestamp }));
+    .map(sourceId => ({ sourceId, timestamp: jobSearchSourceAnchor(data, nodeId, sourceId, normalizedCoverage).timestamp }));
   if (anchors.length < 2) return [];
   const timestamps = anchors.map(anchor => anchor.timestamp).filter(timestamp => timestamp != null);
   if (timestamps.length === 0) return [];

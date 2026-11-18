@@ -41,10 +41,14 @@ const IMAGE_TRACKER_PATTERNS = ['pixel', 'tracker', 'beacon', '1x1'];
 
 // ── Persistent Session Directory ────────────────────────────────────────────
 let _userDataDir = null;
+function browserDataDirPath() {
+  const base = app?.getPath?.('userData') || path.join(process.env.HOME || process.env.USERPROFILE || '.', '.infinite-canvas');
+  return path.join(base, 'browser-data');
+}
+
 export async function getUserDataDir() {
   if (_userDataDir) return _userDataDir;
-  const base = app?.getPath?.('userData') || path.join(process.env.HOME || process.env.USERPROFILE || '.', '.infinite-canvas');
-  const dir = path.join(base, 'browser-data');
+  const dir = browserDataDirPath();
   try {
     await fs.promises.access(dir);
   } catch {
@@ -197,8 +201,8 @@ async function collectLivePages(browser) {
     .filter(url => url && url !== 'about:blank');
 }
 
-// host+path only, bounded — enough to identify what's open without the report
-// growing unboundedly on a long query string.
+// host, path and query string, bounded — enough to identify what's open
+// without the report growing unboundedly on a long query string.
 const ACTIVITY_URL_MAX = 90;
 function truncateActivityUrl(rawUrl) {
   let hostPath;
@@ -409,8 +413,7 @@ export async function closeOwnedBrowserProcess(browser, {
  * whether a successful login ever checkpointed the profile before restart.
  */
 export function getBrowserProfileDiagnostics() {
-  const userDataDir = _userDataDir
-    || path.join(app?.getPath?.('userData') || path.join(process.env.HOME || process.env.USERPROFILE || '.', '.infinite-canvas'), 'browser-data');
+  const userDataDir = _userDataDir || browserDataDirPath();
   const snapshotFile = (filePath) => {
     try {
       const stat = fs.statSync(filePath);
@@ -497,16 +500,8 @@ async function waitForProfileReleaseAfterLaunchAbort(userDataDir) {
 
 function launchSignalFor(callerSignal, deadlineController) {
   if (!callerSignal) return deadlineController.signal;
-  // Electron's supported Node runtime has AbortSignal.any(); preserve a
-  // caller-provided cancellation signal while adding our owned deadline.
-  if (typeof AbortSignal?.any === 'function') {
-    return AbortSignal.any([callerSignal, deadlineController.signal]);
-  }
-  const combined = new AbortController();
-  const forward = (signal) => () => combined.abort(signal.reason);
-  callerSignal.addEventListener?.('abort', forward(callerSignal), { once: true });
-  deadlineController.signal.addEventListener?.('abort', forward(deadlineController.signal), { once: true });
-  return combined.signal;
+  // Preserve a caller-provided cancellation signal while adding our owned deadline.
+  return AbortSignal.any([callerSignal, deadlineController.signal]);
 }
 
 /**
@@ -1114,10 +1109,6 @@ export function getIndeedSessionResetOrigins() {
   return INDEED_SESSION_RESET_HOSTS.map(host => `https://${host}`);
 }
 
-async function closeOwnedSessionResetBrowser(browser) {
-  await closeOwnedBrowserProcess(browser, { label: 'Session-reset browser' });
-}
-
 /**
  * Clear the saved session for Indeed alone, without deleting the shared Chrome
  * profile. This is intentionally not generic: its caller must not be able to
@@ -1190,7 +1181,7 @@ export async function resetPlatformSession(platformId) {
   } finally {
     if (cdp) await cdp.detach().catch(() => {});
     if (page) await page.close().catch(() => {});
-    await closeOwnedSessionResetBrowser(browser);
+    await closeOwnedBrowserProcess(browser, { label: 'Session-reset browser' });
     releaseProfileReservation();
   }
 }
@@ -1434,9 +1425,11 @@ async function _fetchDiceKeyFromBundle(scan = {}) {
 
   // Extract Next.js JS bundle URLs — prioritise config/api/app/main chunks first
   const allBundleUrls = [...html.matchAll(/<script[^>]+src="([^"]+\.js[^"]*)"/g)]
-    .map(m => m[1].startsWith('http') ? m[1] : `https://www.dice.com${m[1]}`)
-    .filter(u => u.includes('_next') || u.includes('/static/'));
-  const bundleUrls = [...allBundleUrls].sort((a, b) => {
+    .map((m) => {
+      try { return new URL(m[1], 'https://www.dice.com/').href; } catch { return ''; }
+    })
+    .filter(u => u && (u.includes('_next') || u.includes('/static/')));
+  const bundleUrls = allBundleUrls.sort((a, b) => {
     const hi = s => /config|api|app|main|index/i.test(s) ? 0 : 1;
     return hi(a) - hi(b);
   }).slice(0, 35);

@@ -3,9 +3,9 @@
  */
 import electronPkg from 'electron';
 import { AsyncLocalStorage } from 'node:async_hooks';
-const { ipcMain } = electronPkg;
 import { logger } from '../logger.js';
 import { ensureListingLivenessRules } from './listingLivenessCalibration.js';
+const { ipcMain } = electronPkg;
 
 // AI handoffs can be reached several async layers below an IPC handler. Keep
 // the originating WebContents in async-local state so a sensitive manual-AI
@@ -676,13 +676,13 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
       const beforeReplyResult = typeof options.beforeReply === 'function'
         ? await options.beforeReply({ event, args, signal, result, channel })
         : null;
-      
+
       // Guard: Window may have been closed during await
       if (event.sender.isDestroyed() && !isRendererIndependent()) return { success: false, error: 'Window closed', errorCode: ipcErrorCode(signal.reason) || 'IPC_SENDER_DESTROYED' };
       // A cooperative handler may finish just after its cancellation signal
       // fired. Do not report that detached work as successful.
       if (signal.aborted) return { success: false, error: abortErrorMessage(signal), errorCode: ipcErrorCode(signal.reason), ...(options.reportCancellation === true ? { cancelled: true } : {}) };
-      
+
       return {
         success: true,
         ...result,
@@ -694,8 +694,8 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
       }
       const failureStack = compactErrorStack(e);
       logger.error(`[${channel}] failed:`, e?.message || String(e), ...(failureStack ? [`stack: ${failureStack}`] : []));
-      return { 
-        success: false, 
+      return {
+        success: false,
         error: e?.message || String(e),
         errorCode: ipcErrorCode(e),
         capability: ipcErrorCapability(e),

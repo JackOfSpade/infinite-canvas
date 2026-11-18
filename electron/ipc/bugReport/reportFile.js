@@ -24,7 +24,7 @@ import path from 'path';
 
 const { app } = electronPkg;
 
-export const SAVED_REPORT_DIR = 'bug-reports';
+const SAVED_REPORT_DIR = 'bug-reports';
 export const SAVED_REPORT_RETENTION = 20;
 export const SAVED_REPORT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 

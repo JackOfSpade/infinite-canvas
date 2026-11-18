@@ -88,37 +88,40 @@ function rangeSalaryAmounts(text, cadence) {
 // pay when its marker followed the number.  This deliberately only removes a
 // value when it is close to an excluded label, leaving the base value for the
 // regular range parser below.
+const EXCLUDED_PAY_MONEY = String.raw`(?:US\$|C\$|CA\$|(?:CAD|USD)\s*\$?|\$|€|£)?\s*[\d,.]+\s*(?:[km](?=$|[^a-z]|(?:usd|cad|eur|gbp|illion)\b))?`;
+const EXCLUDED_PAY_LABEL = String.raw`(?:commission(?:[-\s]?only)?|tips?|on[-\s]?target earnings|OTE|bonus(?:es)?|equity|stock(?:\s+options?)?|restricted stock|RSUs?|total\s+(?:comp(?:ensation)?|rewards?)|medical|dental|vision|health(?:care)? benefits?|insurance|retirement|pension|401\s*\(?k\)?|paid time off|PTO)`;
+// "€100k OTE", "equity worth $100k", "bonus: $20,000", and the
+// occasional parenthetical qualifier are all treated as excluded.  A short
+// bounded gap avoids deleting a separate base-pay sentence elsewhere in a
+// long scraped description.
+const EXCLUDED_AMOUNT_THEN_LABEL = new RegExp(`${EXCLUDED_PAY_MONEY}(?:\\s|,|:|\\(|\\[|\\-|–|—|/){0,8}(?:worth\\s+|up\\s+to\\s+|target\\s+)?${EXCLUDED_PAY_LABEL}\\b`, 'gi');
+const EXCLUDED_LABEL_THEN_AMOUNT = new RegExp(`${EXCLUDED_PAY_LABEL}\\b(?:\\s|,|:|\\(|\\[|\\+|\\-|–|—|/){0,12}(?:worth\\s+|up\\s+to\\s+|target\\s+)?${EXCLUDED_PAY_MONEY}`, 'gi');
 function removeExcludedPayAmounts(text) {
-  const money = String.raw`(?:US\$|C\$|CA\$|(?:CAD|USD)\s*\$?|\$|€|£)?\s*[\d,.]+\s*(?:[km](?=$|[^a-z]|(?:usd|cad|eur|gbp|illion)\b))?`;
-  const excluded = String.raw`(?:commission(?:[-\s]?only)?|tips?|on[-\s]?target earnings|OTE|bonus(?:es)?|equity|stock(?:\s+options?)?|restricted stock|RSUs?|total\s+(?:comp(?:ensation)?|rewards?)|medical|dental|vision|health(?:care)? benefits?|insurance|retirement|pension|401\s*\(?k\)?|paid time off|PTO)`;
-  // "€100k OTE", "equity worth $100k", "bonus: $20,000", and the
-  // occasional parenthetical qualifier are all treated as excluded.  A short
-  // bounded gap avoids deleting a separate base-pay sentence elsewhere in a
-  // long scraped description.
   return String(text || '')
-    .replace(new RegExp(`${money}(?:\\s|,|:|\\(|\\[|\\-|–|—|/){0,8}(?:worth\\s+|up\\s+to\\s+|target\\s+)?${excluded}\\b`, 'gi'), ' ')
-    .replace(new RegExp(`${excluded}\\b(?:\\s|,|:|\\(|\\[|\\+|\\-|–|—|/){0,12}(?:worth\\s+|up\\s+to\\s+|target\\s+)?${money}`, 'gi'), ' ');
+    .replace(EXCLUDED_AMOUNT_THEN_LABEL, ' ')
+    .replace(EXCLUDED_LABEL_THEN_AMOUNT, ' ');
 }
 
 // Remove only amounts locally tied to an extra, before detecting pay cadence.
 // The bounded gaps avoid reaching back across a separately stated salary.
+const EXTRA_PAY_MONEY = String.raw`(?:US\$|C\$|CA\$|(?:CAD|USD)\s*\$?|\$|€|£)?\s*[\d,.]*\d[\d,.]*\s*(?:[km](?=$|[^a-z]|(?:usd|cad|eur|gbp|illion)\b))?`;
+const EXTRA_PAY_RANGE = String.raw`${EXTRA_PAY_MONEY}(?:\s*(?:[-–—]|\bto\b)\s*${EXTRA_PAY_MONEY})?`;
+const EXTRA_PAY_AMOUNT_NOUN = String.raw`(?:stipends?|allowances?|budgets?|reimbursements?|relocation|sign(?:ing|-on)(?:\s+bonus)?)`;
+const EXTRA_PAY_EXTRA = String.raw`(?:${EXTRA_PAY_AMOUNT_NOUN}|tuition|housing)`;
+const EXTRA_PAY_UNIT = String.raw`(?:\s*(?:\/\s*(?:year|yr|month|mo|week|wk|hour|hr|day)\b|(?:per|a|an)\s+(?:year|yr|annum|month|mo|week|wk|hour|hr|day)\b|(?:annual(?:ly)?|yearly|monthly|weekly|hourly|daily)\b))?`;
+const EXTRA_PAY_MODIFIER = String.raw`\s+(?!(?:per|plus|and|or|with|to|a|an|the|year|years|yr|hour|hours|hr|month|months|mo|week|weeks|day|days|salary|base|pay|range|annually)\b)[a-z-]+\b`;
+const EXTRA_PAY_CONNECTOR = String.raw`(?:\s*(?:\b(?:of|up|to|worth|valued|at|package|assistance|bonus)\b|[:\-(]))`;
+const EXTRA_PAY_BEFORE = new RegExp(String.raw`(?<![\w.,$€£])${EXTRA_PAY_RANGE}${EXTRA_PAY_UNIT}(?:${EXTRA_PAY_MODIFIER}){0,3}\s+\b${EXTRA_PAY_AMOUNT_NOUN}\b`, 'gi');
+const EXTRA_PAY_AFTER = new RegExp(String.raw`\b${EXTRA_PAY_EXTRA}\b${EXTRA_PAY_CONNECTOR}{0,4}\s*${EXTRA_PAY_RANGE}${EXTRA_PAY_UNIT}`, 'gi');
+// Preserve separately delimited, shorthand benefit clauses such as
+// "$80k/year; $5k housing" without treating "housing included" as a noun.
+const EXTRA_PAY_STANDALONE_BENEFIT = new RegExp(String.raw`[;,]\s*${EXTRA_PAY_RANGE}${EXTRA_PAY_UNIT}\s+\b(?:tuition|housing)\b(?=\s*(?:[;,.]|$))`, 'gi');
+const EXTRA_PAY_MONEY_TEST = new RegExp(EXTRA_PAY_MONEY, 'i');
 function removeExtraPayAmounts(text) {
-  const money = String.raw`(?:US\$|C\$|CA\$|(?:CAD|USD)\s*\$?|\$|€|£)?\s*[\d,.]*\d[\d,.]*\s*(?:[km](?=$|[^a-z]|(?:usd|cad|eur|gbp|illion)\b))?`;
-  const range = String.raw`${money}(?:\s*(?:[-–—]|\bto\b)\s*${money})?`;
-  const amountNoun = String.raw`(?:stipends?|allowances?|budgets?|reimbursements?|relocation|sign(?:ing|-on)(?:\s+bonus)?)`;
-  const extra = String.raw`(?:${amountNoun}|tuition|housing)`;
-  const unit = String.raw`(?:\s*(?:\/\s*(?:year|yr|month|mo|week|wk|hour|hr|day)\b|(?:per|a|an)\s+(?:year|yr|annum|month|mo|week|wk|hour|hr|day)\b|(?:annual(?:ly)?|yearly|monthly|weekly|hourly|daily)\b))?`;
-  const modifier = String.raw`\s+(?!(?:per|plus|and|or|with|to|a|an|the|year|years|yr|hour|hours|hr|month|months|mo|week|weeks|day|days|salary|base|pay|range|annually)\b)[a-z-]+\b`;
-  const connector = String.raw`(?:\s*(?:\b(?:of|up|to|worth|valued|at|package|assistance|bonus)\b|[:\-(]))`;
-  const before = new RegExp(String.raw`(?<![\w.,$€£])${range}${unit}(?:${modifier}){0,3}\s+\b${amountNoun}\b`, 'gi');
-  const after = new RegExp(String.raw`\b${extra}\b${connector}{0,4}\s*${range}${unit}`, 'gi');
-  // Preserve separately delimited, shorthand benefit clauses such as
-  // "$80k/year; $5k housing" without treating "housing included" as a noun.
-  const standaloneBenefit = new RegExp(String.raw`[;,]\s*${range}${unit}\s+\b(?:tuition|housing)\b(?=\s*(?:[;,.]|$))`, 'gi');
   const original = String(text || '');
-  const remaining = original.replace(before, ' ').replace(after, ' ').replace(standaloneBenefit, ' ');
+  const remaining = original.replace(EXTRA_PAY_BEFORE, ' ').replace(EXTRA_PAY_AFTER, ' ').replace(EXTRA_PAY_STANDALONE_BENEFIT, ' ');
   // A lone stipend or allowance may itself be the stated pay.
-  return new RegExp(money, 'i').test(remaining) ? remaining : original;
+  return EXTRA_PAY_MONEY_TEST.test(remaining) ? remaining : original;
 }
 
 // When a listing explicitly labels an amount as base salary/base pay, prefer
@@ -126,13 +129,14 @@ function removeExtraPayAmounts(text) {
 // "commission + $80k base salary" is a usable $80k offer—not a commission
 // figure—and the inverse wording is equally common.  Keeping only the marked
 // span also ensures a following OTE/bonus number cannot leak back in.
+// The unit belongs to the base figure too. Leaving `/hour`, `/week`, or
+// `/month` behind while extracting the marked span would silently turn a
+// valid rate into an annual $45/$2,000/$8,000 offer.
+const BASE_PAY_CADENCE = String.raw`(?:\s*(?:\/\s*(?:h|hr|hour|wk|week|mo|month|day)|(?:per|an?)\s+(?:hour|hr|week|wk|month|mo|day|year)|every\s+(?:two|2)\s+weeks|\b(?:hourly|bi-?\s?weekly|fortnightly|semi-?\s?monthly|weekly|monthly|daily|annual(?:ly)?|yearly)\b))?`;
+const BASE_PAY_CASH_AMOUNT = String.raw`${EXCLUDED_PAY_MONEY}(?:\s*(?:[-–—]|\bto\b)\s*${EXCLUDED_PAY_MONEY})?(?:\s*(?:CAD|USD|EUR|GBP)\b)?${BASE_PAY_CADENCE}`;
+const BASE_PAY_TRAILING = new RegExp(`(${BASE_PAY_CASH_AMOUNT})\\s*(?:annual\\s+)?base\\s+(?:salary|pay)\\b`, 'gi');
+const BASE_PAY_LEADING = new RegExp(`\\bbase\\s+(?:salary|pay)\\s*(?::|is|of|-)?\\s*(${BASE_PAY_CASH_AMOUNT})`, 'gi');
 function explicitBasePayText(text) {
-  const money = String.raw`(?:US\$|C\$|CA\$|(?:CAD|USD)\s*\$?|\$|€|£)?\s*[\d,.]+\s*(?:[km](?=$|[^a-z]|(?:usd|cad|eur|gbp|illion)\b))?`;
-  // The unit belongs to the base figure too. Leaving `/hour`, `/week`, or
-  // `/month` behind while extracting the marked span would silently turn a
-  // valid rate into an annual $45/$2,000/$8,000 offer.
-  const cadence = String.raw`(?:\s*(?:\/\s*(?:h|hr|hour|wk|week|mo|month|day)|(?:per|an?)\s+(?:hour|hr|week|wk|month|mo|day|year)|every\s+(?:two|2)\s+weeks|\b(?:hourly|bi-?\s?weekly|fortnightly|semi-?\s?monthly|weekly|monthly|daily|annual(?:ly)?|yearly)\b))?`;
-  const cashAmount = String.raw`${money}(?:\s*(?:[-–—]|\bto\b)\s*${money})?(?:\s*(?:CAD|USD|EUR|GBP)\b)?${cadence}`;
   const portions = [];
   const seen = new Set();
   const add = (match) => {
@@ -142,10 +146,8 @@ function explicitBasePayText(text) {
       portions.push(value);
     }
   };
-  const trailing = new RegExp(`(${cashAmount})\\s*(?:annual\\s+)?base\\s+(?:salary|pay)\\b`, 'gi');
-  const leading = new RegExp(`\\bbase\\s+(?:salary|pay)\\s*(?::|is|of|-)?\\s*(${cashAmount})`, 'gi');
-  for (const match of String(text || '').matchAll(trailing)) add(match[1]);
-  for (const match of String(text || '').matchAll(leading)) add(match[1]);
+  for (const match of String(text || '').matchAll(BASE_PAY_TRAILING)) add(match[1]);
+  for (const match of String(text || '').matchAll(BASE_PAY_LEADING)) add(match[1]);
   return portions.length ? portions.join(' ') : '';
 }
 
@@ -735,13 +737,6 @@ export function compensationAssessment({ offer, competitiveRanges, marketCurrenc
   };
 }
 
-/**
- * Resolve a listing/residence place to the one compensation market we can
- * safely compare.  The ladder intentionally stops at the most-specific
- * deterministic field available: city, then subdivision, then country.
- * `value` retains available parent geography so a Toronto, ON cohort cannot
- * accidentally merge with a Toronto in another market.
- */
 function stripTrailingPostalCode(raw) {
   // Board location fields routinely append an address-style postal code
   // ("Toronto, ON M5V 1K4", "Austin, TX 78701-1234"). A postal code is
@@ -814,6 +809,13 @@ function isNonGeographicCompensationLocation(raw) {
     || /\bremote\b/i.test(value);
 }
 
+/**
+ * Resolve a listing/residence place to the one compensation market we can
+ * safely compare.  The ladder intentionally stops at the most-specific
+ * deterministic field available: city, then subdivision, then country.
+ * `value` retains available parent geography so a Toronto, ON cohort cannot
+ * accidentally merge with a Toronto in another market.
+ */
 export function canonicalizeCompensationLocation(location = {}) {
   const suppliedDisplay = stripTrailingPostalCode(location?.display);
   const coarseCountry = recognizedAnywhereCountry(suppliedDisplay) || recognizedCoarseLocationCountry(suppliedDisplay);

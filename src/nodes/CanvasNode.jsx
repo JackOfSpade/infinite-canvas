@@ -16,6 +16,12 @@ const MIN_SIZE    = 80;
 const MAX_SIZE    = 600;
 const DEFAULT_SIZE = 160;
 
+// Arc length the title is assumed to need before its rendered width has been
+// measured, capped to 90% of the half-circumference.
+function estimatedTitleArc(title, fontSize, totalArc, arcPad) {
+  return Math.min(totalArc * 0.90, (title || 'Sub-Canvas').length * fontSize * 0.62 + 16 + arcPad);
+}
+
 export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, width }) {
   // currentSize is updated both from the width prop (via useEffect) AND synchronously
   // during active resize so SIZE is always fresh without waiting for ResizeObserver.
@@ -135,8 +141,6 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   // id and commitTitle are stable; isEditing is the trigger; inputRef/containerRef are refs.
   }, [isEditing, id, commitTitle]);
 
-
-
   // ── Continuously-rotating SVG resize cursor ───────────────────────────────
   const getResizeCursor = useCallback((clientX, clientY) => {
     const rect = containerRef.current?.getBoundingClientRect();
@@ -167,7 +171,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
 
   // Angle (degrees) from circle center to pointer, in Math.atan2 convention:
   //   0° = right,  90° = bottom,  ±180° = left,  -90° = top.
-  // Used by isInTitleZone, getResizeCursor, and event logging.
+  // Used by the title-zone test, getResizeCursor, and event logging.
   const getAngleFromCenter = useCallback((clientX, clientY) => {
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return 0;
@@ -185,20 +189,6 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     if (!rect) return { cx: 0, cy: 0 };
     return { cx: rect.left + rect.width / 2, cy: rect.top + rect.height / 2 };
   }, []);
-
-  // Returns true when the pointer is in the "title zone" — the top arc of the
-  // circle where the curved title text lives.
-  //
-  // The arc path `M 0,R A R,R 0 0,1 SIZE,R` with sweep=1 (clockwise in SVG
-  // screen coords) traces the TOP semicircle: left equator → top (R, 0) → right
-  // equator. In Math.atan2 convention (y increases downward):
-  //   • right equator = 0°,  top = -90°,  left equator ≈ ±180°
-  // The title text lives at negative angles (top half-plane, clientY < center).
-  // Resize is triggered from the bottom half (positive angles, 0° to 180°).
-  const isInTitleZone = useCallback((clientX, clientY) => {
-    const a = getAngleFromCenter(clientX, clientY);
-    return a <= 0;   // top half-plane: right equator (0°) → top (-90°) → left equator (-180°)
-  }, [getAngleFromCenter]);
 
   // ── Native pointer listeners ──────────────────────────────────────────────
   //
@@ -237,7 +227,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
       const totalArc = Math.PI * (s / 2);
       const textArc  = ml > 0
         ? Math.min(totalArc * 0.95, ml + arcPad)
-        : Math.min(totalArc * 0.90, (t || 'Sub-Canvas').length * fSize * 0.62 + 16 + arcPad);
+        : estimatedTitleArc(t, fSize, totalArc, arcPad);
       const halfDeg  = (textArc / totalArc) * 90;
       const a        = getAngleFromCenter(clientX, clientY);
       return a >= (-90 - halfDeg) && a <= (-90 + halfDeg);
@@ -259,7 +249,8 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
         const tgt = e.target;
         const isSvgText = tgt.nodeName === 'text' || tgt.nodeName === 'textPath' ||
                           tgt.nodeName === 'tspan' || !!tgt.closest('text');
-        if (isSvgText && !liveRef.current.isEditing && isInTitleZone(e.clientX, e.clientY)) {
+        if (isSvgText && !liveRef.current.isEditing && getAngleFromCenter(e.clientX, e.clientY) <= 0) {
+          // Title zone: the top half-plane, where the curved title text lives.
           // RF's capture-phase drag listener already fired. Mirror the normal title-zone
           // path: capture the pointer so onUp fires reliably, record position for
           // snap-back, and let onUp start editing (so TitleZoneActive is always cleaned up).
@@ -518,11 +509,11 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
       TitleZoneActive.delete(id);
     };
   // All callbacks (getDistToEdge, getEdgeZone, getAngleFromCenter, getCircleCenter,
-  // getResizeCursor, isInTitleZone, mainFlow) are stable across renders (useCallback
+  // getResizeCursor, mainFlow) are stable across renders (useCallback
   // with no deps or stable deps). id is stable for the component's lifetime. State
   // setters are stable. liveRef gives fresh isEditing/title/data/SIZE without
   // re-registering listeners.
-  }, [id, mainFlow, getDistToEdge, getEdgeZone, getAngleFromCenter, getCircleCenter, getResizeCursor, isInTitleZone]);
+  }, [id, mainFlow, getDistToEdge, getEdgeZone, getAngleFromCenter, getCircleCenter, getResizeCursor]);
 
   // ── Derived values ────────────────────────────────────────────────────────
   const canvasData = data.canvasData || {
@@ -547,7 +538,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   // sweep-flag=1 (clockwise in SVG screen coords) traces the TOP semicircle:
   // left equator → top (R, 0) → right equator. This places the title text at
   // the top of the circle (angle ≈ -90°), consistent with:
-  //   • isInTitleZone (a <= 0 = negative-Y half-plane = top)
+  //   • the title-zone test (angle <= 0 = negative-Y half-plane = top)
   //   • the input overlay (top: -(fontSize + spacing) — above the container)
   //   • the title click zone div (top: 0 — at the container's top edge)
   // sweep=0 (counterclockwise) would trace the BOTTOM arc instead.
@@ -682,8 +673,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
             const measured   = textRef.current?.getComputedTextLength?.() ?? 0;
             const textArcLen = measured > 0
               ? Math.min(totalArcLen * 0.95, Math.max(0, measured + arcPad - sw))
-              : Math.min(totalArcLen * 0.90,
-                  (title || 'Sub-Canvas').length * fontSize * 0.62 + 16 + arcPad);
+              : estimatedTitleArc(title, fontSize, totalArcLen, arcPad);
             // Negative dashoffset shifts the start of the dash backwards by half
             // the gap, centering the highlighted segment at the arc's midpoint (top).
             const dashOffset  = -((totalArcLen - textArcLen) / 2);
@@ -725,7 +715,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
 
         {/* ── Title edit click zone ─────────────────────────────────────────── */}
         {/* Intentionally has NO data-no-resize — we want onDown's geometry     */}
-        {/* check (isInTitleZone) to handle rim clicks consistently rather than  */}
+        {/* check (the title-zone angle) to handle rim clicks consistently rather than  */}
         {/* the data-no-resize early-return which skips stopPropagation and lets */}
         {/* RF start a drag. This div is kept for two purposes:                  */}
         {/*   1. cursor: 'text' overlay so hovering the text shows a text cursor */}

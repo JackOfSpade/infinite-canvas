@@ -287,9 +287,8 @@ export function migrateSkillOpportunityHistogram(snapshot) {
   };
 }
 
-function mergeAnalysisIntoRoles(inputRoles, analysis, timestamp) {
+function mergeAnalysisIntoRoles(roles, analysis, timestamp) {
   const normalizedAnalysis = compactSkillOpportunityAnalysis(analysis);
-  const roles = copyRoles(inputRoles);
   const { role: requestedRole } = normalizedAnalysis;
   const roleNames = [requestedRole.canonicalName, requestedRole.sourceTitle]
     .map(normalizeOpportunityName)
@@ -335,14 +334,13 @@ function mergeAnalysisIntoRoles(inputRoles, analysis, timestamp) {
     if (timestamp < skill.firstSeenAt) skill.firstSeenAt = timestamp;
     if (timestamp > skill.lastSeenAt) skill.lastSeenAt = timestamp;
   }
-  return roles;
 }
 
 function rebuildRoles(baselineRoles, contributions) {
-  let roles = copyRoles(baselineRoles);
+  const roles = copyRoles(baselineRoles);
   const ordered = [...contributions].sort(compareContributions);
   for (const contribution of ordered) {
-    roles = mergeAnalysisIntoRoles(roles, contribution.analysis, contribution.recordedAt);
+    mergeAnalysisIntoRoles(roles, contribution.analysis, contribution.recordedAt);
   }
   return roles;
 }

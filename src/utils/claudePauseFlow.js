@@ -55,8 +55,12 @@ export function stopRunningClaude(keys) {
 }
 
 export async function resumeClaude(keys) {
-  for (const each of keys) await api()?.releaseClaude?.(each);
-  setFlow(keys[0], null);
+  try {
+    for (const each of keys) await api()?.releaseClaude?.(each);
+    setFlow(keys[0], null);
+  } catch (error) {
+    setFlow(keys[0], { phase: 'paused', error: error?.message || 'Resume could not be confirmed.' });
+  }
 }
 
 // Test seam: flows are module-level.

@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { normalizeOfficialPosting, officialHttpsUrl, boundedOfficialPostingTrail, normalizeOfficialPostingFetchFailure, OFFICIAL_FETCH_FAILURE_LIMIT } from './officialPostingFields.js';
+import { OFFICIAL_LEVELS, normalizeOfficialPosting, officialHttpsUrl, boundedOfficialPostingTrail, normalizeOfficialPostingFetchFailure, OFFICIAL_FETCH_FAILURE_LIMIT } from './officialPostingFields.js';
 import { officialSmartRecruitersAdapterUrl } from './officialPostingExtractors.js';
 import { extractAtsTenant } from './officialSourceHosts.js';
 import { resolveScrapedEmployer } from './officialPostingMatch.js';
@@ -24,7 +24,7 @@ export function shouldPersistOfficialPostingResult(value, { signal, researchRan 
   if (!posting) return false;
   if (officialPostingNegativeNeedsRecheck(posting)) return false;
   const trail = posting.trail || [];
-  if (['L1', 'L2', 'L3', 'L4'].includes(posting.level)) {
+  if (OFFICIAL_LEVELS.has(posting.level)) {
     if (posting.outcome === 'closed') return trail.includes('closed') && trail.includes('semantic-match-v1')
       && /^[a-f0-9]{64}$/u.test(posting.semanticMatch?.sourceHash || '');
     const partial = trail.includes('fetch-timeout') || trail.includes('crawl-budget') || trail.includes('crawl-partial');

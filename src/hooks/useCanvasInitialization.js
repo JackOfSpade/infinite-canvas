@@ -207,10 +207,9 @@ export function useCanvasInitialization({
       }
       inputWaitSince = null;
 
-      // Shared with the manual save in useCanvasPersistence — flushes any
-      // in-progress contenteditable edit (a text node the user is still
-      // typing into) before serializing, so a debounce window landing
-      // mid-edit can't silently persist stale pre-edit text.
+      // Shared with the manual save in useCanvasPersistence: announce the save
+      // first, then buildSaveData below flushes any in-progress contenteditable
+      // edit before serializing.
       await announceSaving();
       if (cancelled || !isCurrentGeneration()) return;
       let data;

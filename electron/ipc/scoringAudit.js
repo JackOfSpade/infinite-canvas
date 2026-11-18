@@ -62,11 +62,14 @@ export function buildScoringAudit(batchRows, { limit = AUDIT_LIMIT } = {}) {
   const prepared = source.map((entry, index) => {
     const job = entry?.job || {};
     const fp = textFingerprint(job.snippet || job.description || '');
+    const collapsedReason = String(job.reasoning || '').replace(/\s+/g, ' ').trim();
+    const title = String(job.title || '').slice(0, 120);
+    const company = String(job.company || '').slice(0, 100);
     return {
       index,
       batch: Number(entry?.batch) || 0,
-      title: String(job.title || '').slice(0, 120),
-      company: String(job.company || '').slice(0, 100),
+      title,
+      company,
       location: String(job.location || '').slice(0, 100),
       source: String(job.source || '').slice(0, 40),
       url: String(job.url || '').slice(0, URL_LIMIT),
@@ -84,11 +87,13 @@ export function buildScoringAudit(batchRows, { limit = AUDIT_LIMIT } = {}) {
       // Live scoring replaces potentially unsupported model prose with a
       // deterministic grounded explanation. Deliberately never retain the
       // provider's raw narrative in compact diagnostics.
-      reason: String(job.reasoning || '').replace(/\s+/g, ' ').trim().slice(0, REASON_LIMIT),
-      placeholder: PLACEHOLDER_REASONS.has(String(job.reasoning || '').replace(/\s+/g, ' ').trim()),
+      reason: collapsedReason.slice(0, REASON_LIMIT),
+      placeholder: PLACEHOLDER_REASONS.has(collapsedReason),
       descriptionChars: fp.normalized.length,
       descriptionFingerprint: fp.hash,
       _normalizedDescription: fp.normalized,
+      _titleKey: normalizedText(title),
+      _companyKey: normalizedText(company),
     };
   });
 
@@ -107,8 +112,7 @@ export function buildScoringAudit(batchRows, { limit = AUDIT_LIMIT } = {}) {
     for (let j = i + 1; j < bounded.length; j++) {
       const a = bounded[i], b = bounded[j];
       if (a.batch === b.batch || a.score == null || b.score == null) continue;
-      if (normalizedText(a.title) !== normalizedText(b.title)
-        || normalizedText(a.company) !== normalizedText(b.company)) continue;
+      if (a._titleKey !== b._titleKey || a._companyKey !== b._companyKey) continue;
       if (!samePostingText(a._normalizedDescription, b._normalizedDescription)) continue;
       const delta = Math.abs(a.score - b.score);
       if (delta < LARGE_DELTA) continue;

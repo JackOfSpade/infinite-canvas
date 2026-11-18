@@ -401,6 +401,20 @@ export default [
         const matchHit = (await createJobRoleScreenVerdictStore(dir, { maxEntries: 50 }).lookup(keyA, ['carpenter'], { now: 6 })).get('carpenter');
         assert(matchHit?.outcome === 'match', `a match answer replaces a stored mismatch, got ${JSON.stringify(matchHit)}`);
 
+        // A failed save of use times must not throw away the verdicts found.
+        const blockedDir = await nodeFs.mkdtemp(nodePath.join(nodeOs.tmpdir(), 'ic-role-verdicts-blocked-'));
+        try {
+          const blocked = createJobRoleScreenVerdictStore(blockedDir, { maxEntries: 50 });
+          await blocked.record(keyA, [{ title: 'product manager', outcome: 'match', reason: '', company: 'Acme' }], { now: 1 });
+          const savedFile = (await nodeFs.readdir(blockedDir))[0];
+          await nodeFs.rm(nodePath.join(blockedDir, savedFile));
+          await nodeFs.mkdir(nodePath.join(blockedDir, savedFile, 'occupied'), { recursive: true });
+          const survived = await blocked.lookup(keyA, ['product manager'], { now: 2 });
+          assert(survived.get('product manager')?.outcome === 'match', 'a failed use-time save still returns the verdicts that were found');
+        } finally {
+          await nodeFs.rm(blockedDir, { recursive: true, force: true });
+        }
+
         // LRU eviction, made falsifiable: 'alpha' is inserted FIRST but touched
         // (looked up) after 'beta' and 'gamma', so recency and insertion order
         // disagree. A stable sort by insertion order alone keeps the last three

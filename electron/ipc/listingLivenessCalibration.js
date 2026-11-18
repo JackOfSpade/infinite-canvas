@@ -88,12 +88,21 @@ export function createListingLivenessCalibrationStore(root) {
   let tempSequence = 0;
 
   async function read() {
+    let text;
     try {
-      const text = await fs.readFile(file, 'utf8');
+      text = await fs.readFile(file, 'utf8');
+    } catch (error) {
+      // A missing file starts all candidates in shadow. Any other read failure
+      // says nothing about what is stored, so it must not look like an empty
+      // document that a later write would store over real counters.
+      if (error?.code === 'ENOENT') return defaultDocument();
+      throw error;
+    }
+    try {
       return normalizeDocument(JSON.parse(text));
     } catch {
-      // A missing or corrupt file starts all candidates in shadow. The next
-      // accepted answer rewrites a clean bounded document before promotion.
+      // A corrupt file starts all candidates in shadow. The next accepted
+      // answer rewrites a clean bounded document before promotion.
       return defaultDocument();
     }
   }
@@ -109,7 +118,7 @@ export function createListingLivenessCalibrationStore(root) {
     }
   }
 
-  async function snapshot() { return snapshotOf(await read()); }
+  async function snapshot() { return snapshotOf(await read().catch(() => defaultDocument())); }
 
   async function recordAiAnswer({ ruleKey, evidence = {}, verdict, now = Date.now() } = {}) {
     return lock.withLock(async () => {

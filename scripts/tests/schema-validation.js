@@ -68,6 +68,17 @@ export default [
     },
   },
   {
+    name: 'structured-output validation: string length limits count characters, not UTF-16 units',
+    run: () => {
+      const schema = { type: 'string', minLength: 3, maxLength: 3 };
+      assert(validateResponseSchema('\u{1F600}\u{1F600}\u{1F600}', schema).length === 0,
+        'three astral characters satisfy a three-character limit');
+      assert(validateResponseSchema('\u{1F600}\u{1F600}', schema).some((error) => error.message.includes('at least 3')),
+        'two astral characters are still too short');
+      return { ok: true };
+    },
+  },
+  {
     name: 'Claude structured-output validation: unsupported schema keywords fail as configuration errors',
     run: () => {
       const schema = { type: 'object', minProperties: 1 };

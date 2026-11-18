@@ -865,6 +865,20 @@ export default [
     },
   },
   {
+    name: 'practice call eleven: draws sharing a page cache read each page once and still apply exclusions',
+    async run() {
+      const rows = Array.from({ length: 12 }, (_, index) => candidate(`lib-${index}`, index % 2 ? 'female' : 'male'));
+      const harness = sharedVoicesFetch({ rows });
+      const pageCache = new Map();
+      const first = await drawVoice({ fetch: harness.fetch, key: KEY, random: () => 0, pageSize: 5, pageCache });
+      assert.equal(first.voice.voiceId, 'lib-0');
+      const callsAfterFirst = harness.calls.length;
+      const second = await drawVoice({ fetch: harness.fetch, key: KEY, random: (() => { const values = [0, 0.1]; return () => values.shift() ?? 0.1; })(), pageSize: 5, pageCache, excludeVoiceIds: ['lib-0'] });
+      assert.equal(harness.calls.length, callsAfterFirst, 'the second draw reads no page again');
+      assert.notEqual(second.voice.voiceId, 'lib-0', 'a cached row is still excluded');
+    },
+  },
+  {
     name: 'practice call eleven: drawVoice skips a row outside the high-quality tier even when the library returns one',
     async run() {
       const rows = [

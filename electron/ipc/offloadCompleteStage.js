@@ -6,18 +6,19 @@
 // turns stay byte-identical, which keeps the provider's prefix cache warm.
 import childProcess from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { CLAUDE_HANDOFF_SYSTEM_PROMPT, ClaudeRunnerError, claudeCatalogSystemAppend, splitCareerCatalog } from './claudeApplicationRunner.js';
 import { offloadReasoning } from './aiCallProviders.js';
 
-export const OFFLOAD_DEFAULT_BIN = '/Users/jack/.local/bin/offload';
+const OFFLOAD_DEFAULT_BIN = path.join(os.homedir(), '.local/bin/offload');
 export const OFFLOAD_MAX_TOKENS = 32000;
 export const OFFLOAD_TIMEOUT_MS = 900000;
 const OUTPUT_CAP_BYTES = 16 * 1024 * 1024;
 const SESSION_FILE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 
 /** The CLI path: an explicit option, then INFINITE_CANVAS_OFFLOAD_BIN, then the installed default. */
-export function resolveOffloadBin(binPath, env = process.env) {
+function resolveOffloadBin(binPath, env = process.env) {
   if (typeof binPath === 'string' && binPath) return binPath;
   const fromEnv = env?.INFINITE_CANVAS_OFFLOAD_BIN;
   return typeof fromEnv === 'string' && fromEnv ? fromEnv : OFFLOAD_DEFAULT_BIN;
@@ -177,7 +178,7 @@ export function offloadEmptyAnswer(result) {
 }
 
 /** The CLI's usage counters in the Claude usage shape. */
-export function offloadUsage(result) {
+function offloadUsage(result) {
   const raw = result?.usage && typeof result.usage === 'object' ? result.usage : {};
   return {
     input_tokens: raw.cacheMissTokens ?? 0,
@@ -188,17 +189,35 @@ export function offloadUsage(result) {
   };
 }
 
+/** The CLI reasoning request for a level, after the cancel pre-check. Throws the runner's OFFLOAD_* and CLAUDE_CANCELLED codes. */
+export function offloadRequestReasoning(reasoning, signal) {
+  let request;
+  try { request = offloadReasoning(reasoning ?? 'high'); } catch {
+    throw new ClaudeRunnerError('OFFLOAD_INVALID_REQUEST', 'The offload reasoning level is not valid.');
+  }
+  if (signal?.aborted) throw new ClaudeRunnerError('CLAUDE_CANCELLED', 'Offload run was cancelled.');
+  return request;
+}
+
+/** The result fields shared by every answered offload call. */
+export function offloadAnswerFields(result, route) {
+  return {
+    model: typeof result.model === 'string' ? result.model : route,
+    durationMs: Number.isFinite(result.latencyMs) ? result.latencyMs : null,
+    usage: offloadUsage(result),
+    costUsd: typeof result.costUsd === 'number' ? result.costUsd : undefined,
+    provider: 'offload',
+    route,
+  };
+}
+
 export function createOffloadCompleteStage({ binPath, nodePath = null, spawnImpl = childProcess.spawn, transcriptDir, fsImpl = fs, route = 'deepseek-flash' } = {}) {
   const files = promisesOf(fsImpl);
   return async function runOffloadStage({ text, pageImages = [], signal, stage, sessionId, resume = false, route: callRoute, reasoning } = {}) {
     if (Array.isArray(pageImages) && pageImages.length > 0) {
       throw new ClaudeRunnerError('OFFLOAD_UNSUPPORTED', 'Page images cannot be sent through the offload provider.');
     }
-    let reasoningRequest;
-    try { reasoningRequest = offloadReasoning(reasoning ?? 'high'); } catch {
-      throw new ClaudeRunnerError('OFFLOAD_INVALID_REQUEST', 'The offload reasoning level is not valid.');
-    }
-    if (signal?.aborted) throw new ClaudeRunnerError('CLAUDE_CANCELLED', 'Offload run was cancelled.');
+    const reasoningRequest = offloadRequestReasoning(reasoning, signal);
     const file = sessionFile(transcriptDir, sessionId);
     const split = splitCareerCatalog(text);
     let messages;
@@ -228,15 +247,10 @@ export function createOffloadCompleteStage({ binPath, nodePath = null, spawnImpl
     await saveSession(files, transcriptDir, file, [...messages, { role: 'assistant', content: answer }]);
     return {
       text: answer,
-      model: typeof result.model === 'string' ? result.model : useRoute,
-      durationMs: Number.isFinite(result.latencyMs) ? result.latencyMs : null,
-      usage: offloadUsage(result),
-      costUsd: typeof result.costUsd === 'number' ? result.costUsd : undefined,
+      ...offloadAnswerFields(result, useRoute),
       summaryCount: 0,
       summaryChars: 0,
       thinkingDisplay: 'omitted',
-      provider: 'offload',
-      route: useRoute,
     };
   };
 }

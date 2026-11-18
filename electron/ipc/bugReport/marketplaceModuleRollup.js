@@ -77,8 +77,7 @@ export function buildMarketplaceModuleRollup(nodes) {
       // need a stable discriminator, so use the shared one-way report digest.
       const label = `${multi ? `${reportCorrelationDigest(String(m.nodeId || ''))}/` : ''}${platformId}`;
       const readCol = rsRead || rsUnread ? `${rsRead}r/${rsUnread}u` : '—';
-      // Escape the markdown table delimiter — `summary` is free-form AI text
-      // (often a quoted buyer message) that can contain a literal `|`.
+      // The free-form summary is withheld, so only its presence is reported.
       const summary = (r.summary || r.message) ? 'recorded (content withheld)' : '';
       rows.push(
         `| ${label} | ${status} | ${Number.isFinite(ts) && ts ? formatAge(ts) : 'never'} | ${attention.length} (${high}) | ${readCol} | ${sources.length} (${srcErr}/${srcBlocked}) | ${summary || '—'} |`,
@@ -94,16 +93,14 @@ export function buildMarketplaceModuleRollup(nodes) {
         const itemLines = ordered.slice(0, CAP).map((a) => {
           const urgency = a?.urgency === 'high' ? '🔴 high' : '⚪ low';
           const cat = a?.category ? ' category recorded' : '';
-          const headline = a?.headline ? 'headline recorded' : '';
-          const evidence = a?.evidence ? 'evidence recorded' : '';
-          // WHICH watch URL this flag came from. A "(no source — link is dead)" row is
-          // itself the answer to "the link did not take me to source": the model's
-          // claimed sourceUrl didn't match a scanned hub URL so it was dropped, OR the
-          // flag came from a notifications/activity feed that no longer shows the item.
+          const headline = a?.headline ? 'headline recorded' : '(no headline)';
+          const evidence = a?.evidence ? ' · evidence: “evidence recorded”' : '';
+          // A "(none)" source means the flag carried no usable source URL, so the
+          // jump-to-source link is dead.
           const src = a?.sourceUrl
             ? ' · src: recorded (withheld)'
             : ' · src: (none — jump-to-source link is dead)';
-          return `  - ${urgency}${cat} — ${headline || '(no headline)'}${evidence ? ` · evidence: “${evidence}”` : ''}${src}`;
+          return `  - ${urgency}${cat} — ${headline}${evidence}${src}`;
         });
         if (ordered.length > CAP) itemLines.push(`  - …and ${ordered.length - CAP} more item(s)`);
         detailBlocks.push(`- **${label}**${rsRead || rsUnread ? ` _(${rsRead} read / ${rsUnread} unread message(s) detected)_` : ''}:\n${itemLines.join('\n')}`);
@@ -135,14 +132,12 @@ export function buildMarketplaceModuleRollup(nodes) {
           .filter(s => s?.title || s?.finalUrl)
           .slice(0, 4)
           .map((s) => {
-            const title = s.title ? 'captured' : '';
-            const finalUrl = s.finalUrl ? 'recorded' : '';
             const flags = [
               s.appleEventsDisabled ? 'apple-events-off' : '',
               s.loggedOut ? 'logged-out' : '',
               s.challenged ? 'challenge' : '',
             ].filter(Boolean).join(', ');
-            return `  - trace: ${title ? 'title captured (withheld)' : 'title=(not captured)'}${finalUrl ? ' · final URL recorded (withheld)' : ''}${flags ? ` · ${flags}` : ''}`;
+            return `  - trace: ${s.title ? 'title captured (withheld)' : 'title=(not captured)'}${s.finalUrl ? ' · final URL recorded (withheld)' : ''}${flags ? ` · ${flags}` : ''}`;
           });
         blockedBlocks.push(`- **${label}** (overall: ${status}):\n${reasonLines.join('\n')}`);
         if (titleLines.length > 0) blockedBlocks[blockedBlocks.length - 1] += `\n${titleLines.join('\n')}`;

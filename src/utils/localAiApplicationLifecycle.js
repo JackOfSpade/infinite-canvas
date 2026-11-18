@@ -147,12 +147,13 @@ export function activeApplicationDocuments(data) {
   return local && localApplicationBlocksOfficialPostingLookup(local) ? documentsOfJob(local) : NO_DOCUMENTS;
 }
 
+/** A `runningDocument` value meaning the job produces both documents. */
+export const BOTH_APPLICATION_DOCUMENTS = 'both';
+
 /**
  * @param runningDocument the document whose run is being prepared or queued in
  *   this renderer, before any job pointer exists.
  */
-export const BOTH_APPLICATION_DOCUMENTS = 'both';
-
 export function applicationDocumentButtonState(kind, { data, runningDocument = null } = {}) {
   const exists = savedApplicationDocuments(data)[kind] === true;
   // A job with no scope produces both documents, so setting it up occupies both.

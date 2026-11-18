@@ -153,7 +153,7 @@ export function retryableCancelledJobCareerImportCapability(data, { nodeId } = {
   return token;
 }
 
-export function exactJobCareerImportConsumption(data, {
+function exactJobCareerImportConsumption(data, {
   capability,
   boardRunId,
   nodeId,

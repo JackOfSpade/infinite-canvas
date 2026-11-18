@@ -77,6 +77,8 @@ export function importCanvasInterviews(state, interviews, now = Date.now()) {
   return { state: next, added, skipped: (Array.isArray(interviews) ? interviews.length : 0) - added };
 }
 
+export const RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u;
+
 /** Worker run ids an interview may still own, so deleting it can retire them. */
 export function interviewRunIds(data) {
   const ids = [
@@ -85,5 +87,5 @@ export function interviewRunIds(data) {
     data?.interviewHelperManualAiCleanup?.runId,
     ...(Array.isArray(data?.interviewHelperManualAiRetirementReceipts) ? data.interviewHelperManualAiRetirementReceipts.map(receipt => receipt?.runId) : []),
   ];
-  return [...new Set(ids.filter(id => typeof id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u.test(id)))];
+  return [...new Set(ids.filter(id => typeof id === 'string' && RUN_ID_RE.test(id)))];
 }

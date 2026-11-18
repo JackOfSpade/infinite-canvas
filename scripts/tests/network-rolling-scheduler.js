@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { assert } from '../test-dependencies.js';
 import { runRollingWorkers } from '../../src/utils/handoffScheduler.js';
-import { registerNetworkHandlers } from '../../electron/ipc/network.js';
+import { registerNetworkHandlers, scanForTitle } from '../../electron/ipc/network.js';
 
 const diceExtractorSource = readFileSync(new URL('../../electron/extractors/apiExtractors.js', import.meta.url), 'utf8');
 const stealthBrowserSource = readFileSync(new URL('../../electron/ipc/stealthBrowser.js', import.meta.url), 'utf8');
@@ -118,5 +118,25 @@ export default [{
       && stealthBrowserSource.includes('await runRollingWorkers({'),
     'Dice bundle probing must use the shared rolling pool and stop successor claims after the first key');
     return { detailPool: 'ordered rolling', bundlePool: 'early stopping rolling' };
+  },
+}, {
+  name: 'Title scan over growing text finds the same title as one scan of the whole text',
+  run: () => {
+    const pieces = ['<title>', '</title>', '<title', '>', '<', '/', 'title', 'Name', ' x', '<b>', '</b>', 'TITLE', '<TITLE lang="en">', ' ', '\n', '</titl', '<div>'];
+    let seed = 7;
+    const random = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+    for (let round = 0; round < 3000; round += 1) {
+      let text = '';
+      for (let count = Math.floor(random() * 9) + 1; count > 0; count -= 1) text += pieces[Math.floor(random() * pieces.length)];
+      const whole = /<title[^>]*>([^<]+)<\/title>/i.exec(text);
+      let grown = ''; let scanFrom = 0; let found = null;
+      for (let at = 0; at < text.length && !found;) {
+        const end = Math.min(text.length, at + 1 + Math.floor(random() * 6));
+        grown += text.slice(at, end); at = end;
+        const scan = scanForTitle(grown, scanFrom);
+        found = scan.match; scanFrom = scan.scanFrom;
+      }
+      assert((found ? found[1] : null) === (whole ? whole[1] : null), `incremental scan matches the whole-text scan for ${JSON.stringify(text)}`);
+    }
   },
 }];

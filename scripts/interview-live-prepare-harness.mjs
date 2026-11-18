@@ -379,9 +379,6 @@ function redactResearchKey(value, key) {
   return text.split(secret).join('[REDACTED]').split(encodeURIComponent(secret)).join('[REDACTED]');
 }
 
-/** The Tavily key's redaction, still exported under its original name for callers of it. */
-export function redactTavilyKey(value, key) { return redactResearchKey(value, key); }
-
 /**
  * The effective research profile: the production qa-research pair unless
  * --research-profile overrides its model/effort. Everything else (ultracode and

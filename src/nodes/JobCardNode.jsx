@@ -41,6 +41,33 @@ import { jobCompensationDisplay } from '../utils/jobCompensationDisplay';
 import { beginOfficialPostingPreparation, getOfficialPostingPreparation, subscribeOfficialPostingPreparation,
   projectOfficialPostingGenerationJob, officialPostingPreparationSourceKey, officialPostingPreparationNeedsRefresh } from '../utils/officialPostingPreparation';
 
+// Every card on a Board asks the same question on every store update, so the
+// answer is kept per (nodes array, edges array) and shared by all of them.
+const salaryCareerKeyCache = new WeakMap();
+
+function salaryCareerKeyForBoard(board, nodes, edges) {
+  let byEdges = salaryCareerKeyCache.get(nodes);
+  if (!byEdges) {
+    byEdges = new WeakMap();
+    salaryCareerKeyCache.set(nodes, byEdges);
+  }
+  let byBoard = byEdges.get(edges);
+  if (!byBoard) {
+    byBoard = new Map();
+    byEdges.set(edges, byBoard);
+  }
+  const cached = byBoard.get(board.id);
+  if (cached && cached.boardData === board.data) return cached.key;
+  const connected = new Set(getConnectedJobSearchIds(board.id, nodes, edges));
+  const selected = resolveSalaryCareerSnapshotId({
+    boardData: board.data,
+    searchModules: nodes.filter(node => node.type === 'jobhub' && connected.has(node.id)),
+  });
+  const key = selected.blocked ? 'pending' : selected.careerSnapshotId || '';
+  byBoard.set(board.id, { boardData: board.data, key });
+  return key;
+}
+
 // Accent color encodes the hiring-fit band: a compact evidence-based assessment
 // of full-process fit, not a guaranteed hiring outcome.
 function scoreColor(score) {
@@ -600,12 +627,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const liveSalaryCareerKey = useStore(useCallback(store => {
     const board = store.nodeLookup.get(data.hubId);
     if (board?.type !== 'jobboard') return undefined;
-    const connected = new Set(getConnectedJobSearchIds(board.id, store.nodes, store.edges));
-    const selected = resolveSalaryCareerSnapshotId({
-      boardData: board.data,
-      searchModules: store.nodes.filter(node => node.type === 'jobhub' && connected.has(node.id)),
-    });
-    return selected.blocked ? 'pending' : selected.careerSnapshotId || '';
+    return salaryCareerKeyForBoard(board, store.nodes, store.edges);
   }, [data.hubId]));
   const personalRecommendationCurrent = isCompensationRecommendationCurrent(personalRecommendation,
     liveSalaryCareerKey === undefined ? (data.compensationCareerSnapshotId ?? data.careerSnapshotId) : liveSalaryCareerKey);
@@ -1626,8 +1648,12 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // A failed check refuses generation deliberately: the same transport runs
       // generation, and the gate must not be bypassable by a transport failure.
       const gateRunId = 'application-gate:' + idRef.current + ':' + generateId();
-      const gate = await window.electronAPI.checkApplicationGenerationGate({ nodeId: idRef.current, manualAiRunId: gateRunId });
-      window.electronAPI.completeNonApiAiRun?.(gateRunId)?.catch?.(() => {});
+      let gate;
+      try {
+        gate = await window.electronAPI.checkApplicationGenerationGate({ nodeId: idRef.current, manualAiRunId: gateRunId });
+      } finally {
+        window.electronAPI.completeNonApiAiRun?.(gateRunId)?.catch?.(() => {});
+      }
       if (!gate?.success) throw new Error(gate?.error || 'The edit-history check did not complete.');
       if (gate.blocked) {
         const jobName = (card => [card?.title, card?.company].filter(Boolean).join(' at '))(getLiveNode(idRef.current)?.data);

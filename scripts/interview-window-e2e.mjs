@@ -41,7 +41,7 @@ async function chromeExecutable() {
   const installed = chromium.executablePath();
   if (await fs.access(installed).then(() => true, () => false)) return installed;
   const cache = path.join(os.homedir(), 'Library/Caches/ms-playwright');
-  const versions = (await fs.readdir(cache)).filter(name => /^chromium-\d+$/u.test(name)).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+  const versions = (await fs.readdir(cache).catch(() => [])).filter(name => /^chromium-\d+$/u.test(name)).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
   for (const version of versions) {
     for (const suffix of ['chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing', 'chrome-mac/Chromium.app/Contents/MacOS/Chromium', 'chrome-linux64/chrome']) {
       const candidate = path.join(cache, version, suffix);
@@ -144,7 +144,7 @@ export async function runInterviewWindowE2E({ outputDir, label = 'session', asse
             const card = document.querySelector('main.cue-card');
             const rect = element => { const box = element.getBoundingClientRect(); return { top: box.top, bottom: box.bottom, height: box.height, visible: box.top >= 0 && box.bottom <= innerHeight }; };
             const cues = [...card.querySelectorAll('li .glance-cue')];
-            return { firstPaintMs: renderMs, fullRenderMs: renderMs, cardText: card.textContent,
+            return { renderMs, cardText: card.textContent,
               titles: cues.map(item => item.title),
               words: card.textContent.trim().split(/\s+/u).filter(Boolean).length,
               boxes: [...card.querySelectorAll('li')].map(rect), controls: card.querySelectorAll('button, input, textarea, select, a, details, nav').length,
@@ -167,7 +167,7 @@ export async function runInterviewWindowE2E({ outputDir, label = 'session', asse
         } catch (error) {
           failures.push(`${size}/${scenario.id}: ${error.message}`);
           const screenshot = path.join(directory, `${size}-${scenario.id}-failure.png`);
-          await page.screenshot({ path: screenshot }); screenshots.push(screenshot);
+          try { await page.screenshot({ path: screenshot }); screenshots.push(screenshot); } catch { /* the page may already be closed; the original failure is already recorded */ }
           rows.push({ size, ...scenario, actualKind: 'error', correct: false });
           controller.nextQuestion(event);
         }
@@ -178,8 +178,8 @@ export async function runInterviewWindowE2E({ outputDir, label = 'session', asse
     }
     const latency = {};
     for (const size of ['compact', 'normal']) {
-      const measured = rows.filter(row => row.size === size && Number.isFinite(row.firstPaintMs));
-      latency[size] = Object.fromEntries(['firstPaintMs', 'fullRenderMs'].map(key => [key, { p50: percentile(measured.map(row => row[key]), .5), p95: percentile(measured.map(row => row[key]), .95) }]));
+      const measured = rows.filter(row => row.size === size && Number.isFinite(row.renderMs));
+      latency[size] = { renderMs: { p50: percentile(measured.map(row => row.renderMs), .5), p95: percentile(measured.map(row => row.renderMs), .95) } };
     }
     const report = { label, status: 'completed', createdAt: new Date().toISOString(), directory, executablePath, fixture: { roles: fixture.snapshot.profile.roles.length, achievements: fixture.snapshot.profile.achievements.length, cards: fixture.bank.cards.length },
       scope: 'Real React/CSS, Node controller/validation/matching/projection; injected synthetic loaders and IPC transport. No native Electron, production snapshot filesystem validation, refresh contention, or compositor timing.',
@@ -189,7 +189,7 @@ export async function runInterviewWindowE2E({ outputDir, label = 'session', asse
     if (assertQuality) {
       assert.deepEqual(failures, [], 'Browser session must complete without errors');
       assert.equal(rows.length, fixture.questions.length * 2, 'Every question must be measured at both sizes');
-      assert.ok(rows.every(row => Number.isFinite(row.fullRenderMs)), 'Every session question must finish rendering');
+      assert.ok(rows.every(row => Number.isFinite(row.renderMs)), 'Every session question must finish rendering');
       assert.equal(report.accuracy.correct, report.accuracy.total, 'All expected prepared matches, honest cues and abstentions must agree');
       assert.ok(Object.values(listening).every(Boolean), 'Listening must start when the card opens');
       assert.ok(rows.every(row => !row.horizontalOverflow), 'No horizontal overflow');

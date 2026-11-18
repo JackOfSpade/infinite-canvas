@@ -124,9 +124,10 @@ export default [
     async run() {
       const source = await fs.readFile(new URL('electron/extractors/indeedBrowser.js', SOURCE_ROOT), 'utf8');
       for (const [label, input] of [['fast', 'allJobs'], ['slow', 'missingDescJobs']]) {
-        const pattern = new RegExp(`const (?:missingDescJobs|residualDescJobs) = ${input}\\.filter\\(job =>\\s*([^;]+?)\\s*\\);`, 'u');
-        const predicate = source.match(pattern)?.[1];
-        assert.ok(predicate, `missing ${label} re-enrich filter`);
+        const pattern = new RegExp(`const (?:missingDescJobs|residualDescJobs) = ${input}\\.filter\\(canStillBeReEnriched\\);`, 'u');
+        assert.ok(pattern.test(source), `missing ${label} re-enrich filter`);
+        const predicate = source.match(/function canStillBeReEnriched\(job\) \{\s*return ([^;]+?);\s*\}/u)?.[1];
+        assert.ok(predicate, 'missing the shared re-enrich predicate');
         const eligible = new Function('job', 'indeedDescriptionLength', 'DESCRIPTION_EVIDENCE_MIN_CHARS', `return ${predicate};`);
         const length = job => String(job?.snippet || '').length;
         assert.equal(eligible({ snippet: '', descriptionDeferredReason: 'description-pending-liveness' }, length, 400), true,
@@ -207,9 +208,10 @@ export default [
     async run() {
       const source = await fs.readFile(new URL('electron/extractors/indeedBrowser.js', SOURCE_ROOT), 'utf8');
       const eligible = (input, name) => {
-        const pattern = new RegExp(`const ${name} = ${input}\\.filter\\(job =>\\s*([^;]+?)\\s*\\);`, 'u');
-        const predicate = source.match(pattern)?.[1];
-        assert.ok(predicate, `missing ${name} filter`);
+        const pattern = new RegExp(`const ${name} = ${input}\\.filter\\(canStillBeReEnriched\\);`, 'u');
+        assert.ok(pattern.test(source), `missing ${name} filter`);
+        const predicate = source.match(/function canStillBeReEnriched\(job\) \{\s*return ([^;]+?);\s*\}/u)?.[1];
+        assert.ok(predicate, 'missing the shared re-enrich predicate');
         return new Function('job', 'indeedDescriptionLength', 'DESCRIPTION_EVIDENCE_MIN_CHARS', `return ${predicate};`);
       };
       const fastEligible = eligible('allJobs', 'missingDescJobs');

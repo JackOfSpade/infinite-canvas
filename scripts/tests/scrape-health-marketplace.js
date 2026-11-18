@@ -85,6 +85,21 @@ export default [
     },
   },
   {
+    name: 'Marketplace: a response body that fails mid-read is a task-failed block for PriceCharting and AptDeco, not a raw throw',
+    async run() {
+      const original = globalThis.fetch;
+      globalThis.fetch = async () => ({ ok: true, status: 200, url: 'https://example.com/x', text: async () => { throw new Error('body stream aborted'); } });
+      try {
+        for (const fetcher of [fetchAptDecoComps, fetchPriceChartingComps]) {
+          const result = await fetcher('mid century sofa');
+          assert.deepEqual(result.items, []);
+          assert.equal(result.warning?.code, 'task-failed');
+          assert.equal(result.warning?.severity, 'block');
+        }
+      } finally { globalThis.fetch = original; }
+    },
+  },
+  {
     // Measured 2026-11-05 by running the real extractors on the April fixtures in scripts/fixtures (no real saved rows exist).
     name: 'Marketplace fields: healthy fixtures read clean, with the measured yields',
     run() {

@@ -113,4 +113,3 @@ export function ClaudeTaskProgress({ requestId, compact = false, contextPrefix =
   return <ClaudeProgressCard {...present} contextLabel={contextLabel} compact={compact} region={region} footer={footer} />;
 }
 
-export default ClaudeProgress;

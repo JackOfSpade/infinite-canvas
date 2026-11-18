@@ -28,7 +28,7 @@ const SETTING_CONTROL_LABELS = {
 };
 
 // Renders the locked Search Brief plan's advisory fields — `settingConflicts`
-  // (brief prose that restates structured/automatic behavior, e.g.
+// (brief prose that restates structured/automatic behavior, e.g.
 // "LOCATION: Toronto only" while the structured Search location says Denver)
 // and `warnings` (ambiguity/self-contradiction within the brief itself).
 // Both are pure advisory: they never block, cancel, or retry a search, which
@@ -231,17 +231,11 @@ export function JobSearchDoneState({
 }) {
   const { addToast } = useToast();
   const preferencesHelpId = useId();
-  // FIX 2 (defence-in-depth): `resolvedRoles.length > 0` used to be the lock-
-  // existence sentinel here. A resolution that legitimately yields ZERO
-  // titles (a valid outcome) still WRITES `resolvedRoles: []`, which that
-  // sentinel cannot distinguish from "this hub has never locked" — the
-  // settings would render editable while the durable lock is engaged and a
-  // re-scan ignores any edit. `resolvedRolesMeta` is written IFF a
-  // resolution actually ran, so it is the sentinel that is true exactly when
-  // the lock exists, empty result or not. This mirrors
-  // `hasResolvedRoleLock` in JobSearchNode.jsx (the canonical definition,
-  // duplicated here rather than imported to avoid a circular import between
-  // the two modules — JobSearchNode.jsx already imports this file).
+  // The settings are frozen once a resolution has run. resolvedRolesMeta is written
+  // exactly when one did, so it is the sentinel: an empty resolvedRoles list is a
+  // valid locked result and cannot tell a locked hub from one that never locked.
+  // This repeats hasResolvedRoleLock from JobSearchNode.jsx, which imports this
+  // file, so importing it here would be circular.
   const settingsFrozen = !!(resolvedRolesMeta && typeof resolvedRolesMeta === 'object');
   // Searches run only from a Job Board. Without one connected there is no
   // standalone re-scan to offer, so the handler is withheld entirely and every

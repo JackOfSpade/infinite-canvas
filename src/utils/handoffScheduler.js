@@ -5,7 +5,7 @@
 // Ten is the reviewed safe fallback for hosts which do not advertise a
 // capability. It is a live-concurrency default, never a total-work limit.
 export const DEFAULT_HANDOFF_CONCURRENCY = 10;
-export const MAX_HANDOFF_CONCURRENCY = 64;
+const MAX_HANDOFF_CONCURRENCY = 64;
 
 export function resolveHandoffConcurrency(capability = null) {
   const source = capability && typeof capability === 'object' ? capability : {};

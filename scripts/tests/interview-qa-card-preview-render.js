@@ -175,6 +175,34 @@ function panelTests() {
         } finally { await bundle.module.act(async () => root.unmount()); await bundle.dispose(); }
       });
     },
+  }, {
+    name: 'interview card preview: editing an approach reminder line keeps that line\'s saved example',
+    async run() {
+      await withDom(async window => {
+        const bundle = await bundleComponent(path.resolve('src/components/InterviewQaPanel.jsx'), {});
+        const withApproach = { ...FOUNDATION, approach: [{ text: 'Split work into tasks', example: 'Example A' }, { text: 'Review early', example: 'Example B' }] };
+        const saved = [];
+        window.electronAPI = {
+          loadInterviewQa: async () => ({ foundation: { status: 'partial', cards: [withApproach] }, company: { status: 'partial', company: 'Acme', cards: [], foundationLinks: [] } }),
+          saveInterviewQaCard: async ({ card }) => { saved.push(card); return { cards: [card] }; },
+        };
+        const root = bundle.module.createRoot(window.document.getElementById('root'));
+        const act = async callback => bundle.module.act(async () => { await callback(); await flush(); });
+        try {
+          await act(() => root.render(bundle.module.React.createElement(bundle.module.InterviewQaPanel, { nodeId: 'interview-helper', snapshotId: SNAPSHOT })));
+          await bundle.module.act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); await flush(); });
+          await act(() => [...window.document.querySelectorAll('button')].find(item => item.textContent === 'Edit Q&A').click());
+          const article = [...window.document.querySelectorAll('[role="dialog"] article')].find(item => item.getAttribute('aria-label') === 'Tell me about yourself.');
+          await act(() => [...article.querySelectorAll('button')].find(item => item.textContent === 'Edit').click());
+          const form = window.document.querySelector('form[aria-label="Edit Tell me about yourself."]');
+          const area = [...form.querySelectorAll('label')].find(item => item.textContent.startsWith('Approach reminders')).querySelector('textarea');
+          await act(() => type(window, area, 'Split work into small tasks\nReview early'));
+          await act(() => form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })));
+          assert(saved.length === 1, `the edited card must be saved once, got ${saved.length}`);
+          assert(JSON.stringify(saved[0].approach) === JSON.stringify([{ text: 'Split work into small tasks', example: 'Example A' }, { text: 'Review early', example: 'Example B' }]), `an edited line must keep its example, got ${JSON.stringify(saved[0].approach)}`);
+        } finally { await bundle.module.act(async () => root.unmount()); await bundle.dispose(); }
+      });
+    },
   }];
 }
 

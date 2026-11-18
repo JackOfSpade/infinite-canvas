@@ -1273,6 +1273,18 @@ function careerDataRoleRegionsForSourceRoles(careerData, sourceRoles) {
   return regions;
 }
 
+// One-entry cache: the caller below runs once per role, evidence id and
+// scope-bearing sentence over the same career text and roles. The cached Map is
+// only read.
+let lastRoleRegions = { careerData: null, rolesKey: '', regions: null };
+function roleRegionsCached(careerData, roles) {
+  const rolesKey = JSON.stringify(roles);
+  if (lastRoleRegions.careerData !== careerData || lastRoleRegions.rolesKey !== rolesKey) {
+    lastRoleRegions = { careerData, rolesKey, regions: careerDataRoleRegionsForSourceRoles(careerData, roles) };
+  }
+  return lastRoleRegions.regions;
+}
+
 // A legacy text import has no entity IDs to relate an evidence record to a
 // role.  Its only safe substitute is a uniquely recognized role section.  The
 // application pipeline also uses this when a cover-letter sentence names a
@@ -1287,7 +1299,7 @@ export function careerQuoteHasDeterministicRoleScope(sourceRoles, roleId, quote,
       location: String(role.location || ''),
     }))
     .filter(role => role.id && (role.title || role.company));
-  const region = careerDataRoleRegionsForSourceRoles(careerData, roles).get(String(roleId || ''));
+  const region = roleRegionsCached(careerData, roles).get(String(roleId || ''));
   return Boolean(region && careerQuoteOccursInRoleCareerRegion(quote, region));
 }
 
@@ -1514,7 +1526,6 @@ const PROJECT_LISTING_OVERLAP_RULE = 'project-shares-job-listing-evidence-terms'
 // AND asked for, rather than true alone. A project answering nothing the
 // posting says has no listing quote to cite honestly, and that is the case
 // this exists to catch.
-export const PROJECT_JOB_RELEVANCE_RULE_TEXT = 'a project is carried only when it answers something this posting actually says: it cites at least one job-listing evidence item beside its career-data evidence, and its name and description share at least two meaningful terms with one of those cited listing quotes';
 const SKILL_ITEM_RULE = 'skill-item-occurs-in-cited-career-evidence';
 const SKILL_GROUP_RULE = 'skill-group-is-neutral-or-in-career-data';
 const SKILL_ITEM_FILTERABLE_NOUN_RULE = 'skill-item-is-a-filterable-name';

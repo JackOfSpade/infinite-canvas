@@ -288,7 +288,6 @@ export async function resolveTypedJob({ text, callText, readPage, signal, onStat
   researchText = typeof researchText === 'string' ? researchText.replace(/\r\n?/g, '\n').trim() : '';
   if (researchText.length > TYPED_JOB_RESEARCH_MAX_CHARS) researchText = researchText.slice(-TYPED_JOB_RESEARCH_MAX_CHARS);
   if (!researchText) throw typedJobError('typed-job-search-unavailable');
-  if (!researchText) throw typedJobError('typed-job-search-unavailable');
 
   const result = parseResearchResult(researchText);
   const organization = cleanField(result?.organization);
@@ -382,7 +381,7 @@ export function composeReadPage({ fetchPage, renderPage, readerPage, minChars = 
   const sources = [fetchPage, renderPage, readerPage].filter(fn => typeof fn === 'function');
   return async function readPage(url, { signal } = {}) {
     let best = { ok: false, text: '', finalUrl: '', status: 0 };
-    let publicHost = isPublicHostName(url);
+    const publicHost = isPublicHostName(url);
     for (const source of sources) {
       throwIfAborted(signal);
       // The reader tier is a third party: never hand it an address the plain fetch refused or that is not a public name.
@@ -392,7 +391,7 @@ export function composeReadPage({ fetchPage, renderPage, readerPage, minChars = 
         raw = await source(url, { signal });
       } catch (error) {
         if (isAbort(error, signal)) throw error;
-        if (error?.code === 'unsafe-address' || error?.code === 'unsafe-url') { publicHost = false; return { ok: false, text: '', finalUrl: url, status: 0 }; }
+        if (error?.code === 'unsafe-address' || error?.code === 'unsafe-url') { return { ok: false, text: '', finalUrl: url, status: 0 }; }
         if (error?.code === 'closed') return { ok: false, text: '', finalUrl: url, status: 404 };
         continue;
       }

@@ -24,7 +24,7 @@
 // already-reversed array into any function below — it would silently start
 // shedding the newest evidence instead of the oldest.
 
-export function buildFencedTextBlock(lines, emptyFallback) {
+function buildFencedTextBlock(lines, emptyFallback) {
   if (!Array.isArray(lines) || lines.length === 0) return `${emptyFallback}\n`;
   return `\`\`\`text\n${lines.join('\n')}\n\`\`\`\n`;
 }
@@ -52,10 +52,6 @@ export function localIsoTimestampWithOffset(date) {
     + `${offsetSign}${timestampPart(Math.floor(absoluteOffset / 60))}:${timestampPart(absoluteOffset % 60)}`;
 }
 
-export function utcIsoTimestamp(date) {
-  return date.toISOString();
-}
-
 // Logger-originated entries already carry their capture timestamp. Legacy and
 // mocked payload rows do not; give only those a clearly-labelled export-time
 // stamp so every rendered log row has a time anchor without forging capture
@@ -64,7 +60,7 @@ export function timestampedLogLines(lines, { basis = 'local', now = Date.now() }
   const source = Array.isArray(lines) ? lines : [];
   const proposedDate = new Date(Number.isFinite(Number(now)) ? Number(now) : Date.now());
   const date = Number.isFinite(proposedDate.getTime()) ? proposedDate : new Date();
-  const timestamp = basis === 'utc' ? utcIsoTimestamp(date) : localIsoTimestampWithOffset(date);
+  const timestamp = basis === 'utc' ? date.toISOString() : localIsoTimestampWithOffset(date);
   return source.map((value) => {
     const line = String(value ?? '');
     return DISPLAY_TIMESTAMP.test(line)
@@ -103,7 +99,7 @@ ${newestFirstLogLines(timestampedLogLines(lines, { basis: 'utc' })).join('\n')}
 
 // Event history originates in the renderer, whose display timestamps are local
 // to the user. Keep the time-basis note adjacent to the history itself.
-export const EVENT_HISTORY_HEADING = '## Event History\n> **Order within this section:** newest first; last row is the oldest retained renderer event. **Timestamps:** full local ISO with numeric UTC offset. Legacy time-only rows retain their capture time but omit date and offset. See Runtime Identity for the report date, IANA timezone, and UTC offset.\n';
+const EVENT_HISTORY_HEADING = '## Event History\n> **Order within this section:** newest first; last row is the oldest retained renderer event. **Timestamps:** full local ISO with numeric UTC offset. Legacy time-only rows retain their capture time but omit date and offset. See Runtime Identity for the report date, IANA timezone, and UTC offset.\n';
 
 export function eventHistoryHeading(metadata = null) {
   const retainedCount = Number.isSafeInteger(metadata?.retainedCount) && metadata.retainedCount >= 0
@@ -310,6 +306,28 @@ export function collapseLogRepeats(lines, {
 // Static-base truncation (finding where to cut the curated markdown)
 // ─────────────────────────────────────────────────────────────────────────
 
+// Top-level (`## `) and `### ` headings outside fenced code blocks. The base
+// embeds json/html samples, and a line inside one that happens to start with
+// `## ` is content, not a section. The fence test is the same one used below
+// to decide whether a cut left a fence open.
+function unfencedHeadings(markdown) {
+  const headings = [];
+  const subheadings = [];
+  let inFence = false;
+  let index = 0;
+  for (const line of markdown.split('\n')) {
+    if (/^ {0,3}```/.test(line)) inFence = !inFence;
+    else if (!inFence) {
+      const top = /^## (.+)\r?$/.exec(line);
+      if (top) headings.push({ text: top[1], index });
+      const sub = /^### (.+)\r?$/.exec(line);
+      if (sub) subheadings.push({ text: sub[1], index });
+    }
+    index += line.length + 1;
+  }
+  return { headings, subheadings };
+}
+
 // A hard clipboard cap may land inside ANY large static section (the job
 // pipeline's relevance/taxonomy audits can be larger than Node Diagnostics).
 // Scans the top-level (## ) headings BEFORE slicing and reports back which
@@ -324,7 +342,7 @@ function truncateBaseForClipboard(baseMarkdown, room) {
   // Collect every top-level heading (with its pre-cut position) before any
   // slicing happens, so the dropped/partial analysis below reflects the
   // original structure, not the truncated candidate.
-  const headings = [...baseMarkdown.matchAll(/^## (.+)$/gm)].map((m) => ({ text: m[1], index: m.index }));
+  const { headings, subheadings } = unfencedHeadings(baseMarkdown);
 
   const note = '\n\n> ⚠️ Report content after this point was omitted by the clipboard cap. The recent logs and event timeline continue below; use "Save to file" for every uncapped currently retained section.\n';
   // The base carries fenced blocks (the application diagnostics embed json/html
@@ -365,9 +383,9 @@ function truncateBaseForClipboard(baseMarkdown, room) {
   // merely "cut mid-section" while whole named diagnostics disappeared with no
   // trace. Report them SEPARATELY from the `##` tally: folding them into the
   // dropped-section count would misreport how many top-level sections were lost.
-  const droppedSubsections = [...baseMarkdown.matchAll(/^### (.+)$/gm)]
-    .filter((m) => m.index >= cut)
-    .map((m) => m[1].trim())
+  const droppedSubsections = subheadings
+    .filter((h) => h.index >= cut)
+    .map((h) => h.text.trim())
     .filter((name) => !droppedSections.includes(name));
 
   const retained = candidate.slice(0, cut).trimEnd();
@@ -619,17 +637,10 @@ export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProces
     const tailChars = () => logs.chars + historyHeading.length + events.chars;
     let trimmedEventCount = 0;
     let trimmedLogCount = 0;
-    while (baseMarkdown.length + tailChars() > maxChars && events.count > floor.events.length) {
-      events.dropOldest();
-      trimmedEventCount++;
-    }
-    while (baseMarkdown.length + tailChars() > maxChars && logs.count > floor.logs.length) {
-      logs.dropOldest();
-      trimmedLogCount++;
-    }
-    // Replacing the pre-cap FULL summary adds a little text. Continue trimming
-    // against that final wording so an accurate explanation never pushes the
-    // copied report over its size limit.
+    // Replacing the pre-cap FULL summary adds a little text, so trim against
+    // that final wording: an accurate explanation must never push the copied
+    // report over its size limit. The summary depends only on the event count,
+    // so it is rebuilt only when an event is dropped.
     let cappedBase = clarifyCappedFilterSummary(baseMarkdown, events.count, allEvents.length, rawEvents.length, foldDetail);
     while (cappedBase.length + tailChars() > maxChars && events.count > floor.events.length) {
       events.dropOldest();
@@ -639,7 +650,6 @@ export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProces
     while (cappedBase.length + tailChars() > maxChars && logs.count > floor.logs.length) {
       logs.dropOldest();
       trimmedLogCount++;
-      cappedBase = clarifyCappedFilterSummary(baseMarkdown, events.count, allEvents.length, rawEvents.length, foldDetail);
     }
 
     const buildNotice = (droppedSections = [], partialSection = null, droppedSubsections = []) => {

@@ -7,6 +7,7 @@ import fsDefault from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import electronPkg from 'electron';
+import { CLAUDE_LIMIT_PROBE_MS, CLAUDE_LIMIT_RESET_GRACE_MS, CLAUDE_LIMIT_TYPES } from './claudeLimitConstants.js';
 
 export const DEFAULT_CLAUDE_ACCOUNT_ID = 'default';
 export const CLAUDE_ACCOUNTS_DIR = 'claude-accounts';
@@ -16,18 +17,10 @@ const ACCOUNT_ID_RE = /^acct-[a-f0-9]{8}$/u;
 const STATUS_TTL_MS = 60_000;
 const STATUS_TIMEOUT_MS = 15_000;
 const LOGIN_TIMEOUT_MS = 10 * 60_000;
-const LIMIT_GRACE_MS = 60_000;
-const LIMIT_PROBE_MS = 10 * 60_000;
 const MAX_STATUS_BYTES = 64 * 1024;
 const MAX_EMAIL_LENGTH = 200;
 const MAX_SUBSCRIPTION_LENGTH = 40;
-const LIMIT_TYPES = new Set([
-  'five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet', 'seven_day_overage_included', 'overage',
-]);
-
-export const CLAUDE_ACCOUNT_LIMIT_TYPES = Object.freeze([...LIMIT_TYPES]);
-
-const limitTypeOf = value => (typeof value === 'string' && LIMIT_TYPES.has(value) ? value : null);
+const limitTypeOf = value => (typeof value === 'string' && CLAUDE_LIMIT_TYPES.has(value) ? value : null);
 const cleanText = (value, max) => (typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : null);
 
 function executableExists(fs, filePath) {
@@ -307,7 +300,7 @@ export function createClaudeAccounts({
   function markClaudeAccountLimited(accountId, { resetsAt = null, limitType = null } = {}) {
     const at = now();
     const target = entryFor(accountId) ? accountId : activeId();
-    const limitedUntil = Number.isFinite(resetsAt) && resetsAt > at ? resetsAt + LIMIT_GRACE_MS : at + LIMIT_PROBE_MS;
+    const limitedUntil = Number.isFinite(resetsAt) && resetsAt > at ? resetsAt + CLAUDE_LIMIT_RESET_GRACE_MS : at + CLAUDE_LIMIT_PROBE_MS;
     limits.set(target, {
       limitedUntil,
       resetsAt: Number.isFinite(resetsAt) ? resetsAt : null,

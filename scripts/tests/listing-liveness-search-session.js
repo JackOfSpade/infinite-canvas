@@ -7,7 +7,7 @@ import { createListingLivenessSearchSession as createSearchSession } from '../..
 import { createListingLivenessCalibrationStore } from '../../electron/ipc/listingLivenessCalibration.js';
 import { LISTING_LIVENESS_RULES } from '../../electron/ipc/listingLiveness.js';
 import {
-  isListingLivenessBreakerTripped, memoListingVerdict, readListingVerdictMemo, recordListingEvidence,
+  memoListingVerdict, readListingVerdictMemo, recordListingEvidence,
   readOfficialExpiryCandidates, recordOfficialExpiryCandidates,
   officialExpiryCandidatesConfirmedClosed,
 } from '../../electron/ipc/listingLivenessStore.js';
@@ -182,7 +182,6 @@ export default [
     assert.equal(calls, 2);
     assert.equal(abortedAfterAssignment, false, 'the later chunk keeps its own ten minutes');
     assert.ok(checked.every(item => item.listingLiveness.verdict === 'open'));
-    assert.equal(isListingLivenessBreakerTripped(), false);
   }) },
   { name: 'liveness search does not spend its ten-minute budget while an unassigned worker is absent', run: () => contextRun(async () => {
     const target = row('unassigned-budget'); record([target]);
@@ -200,12 +199,10 @@ export default [
     assert.equal(optionsSeen.signal.aborted, false, 'time before assignment does not start the ten-minute timer');
     assert.equal(settled, false, 'the liveness row remains pending while no worker has been assigned');
     assert.equal(session.telemetry().listingLiveness.linkedin.aiPending, 1);
-    assert.equal(isListingLivenessBreakerTripped(), false, 'an unassigned wait cannot trip the liveness breaker');
     optionsSeen.manualHandoff.onAssigned();
     resolveCall(answerFor(1));
     const checked = await running;
     assert.equal(checked[0].listingLiveness.verdict, 'open');
-    assert.equal(isListingLivenessBreakerTripped(), false);
   }) },
   { name: 'liveness search run abort rethrows its reason and returns no stamped rows or memo', run: () => contextRun(async () => {
     const rows = [row(1)]; record(rows);

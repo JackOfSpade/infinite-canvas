@@ -357,10 +357,10 @@ export const MarketplaceCardNode = React.memo(function MarketplaceCardNode({ id,
           onClick={openInBrowser}
           onPointerDown={(e) => e.stopPropagation()}
           className="nodrag w-full flex items-center justify-center gap-1 px-2 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-white/70 text-[10px] font-medium transition-colors border border-white/10"
-          title={data.listingUrl ? `Open listing on ${platform.name}` : `Open ${platform.name} to create a listing`}
+          title={url ? `Open listing on ${platform.name}` : `Open ${platform.name} to create a listing`}
         >
           <ExternalLink size={10} />
-          {data.listingUrl ? 'Open Listing' : 'Open Site'}
+          {url ? 'Open Listing' : 'Open Site'}
         </button>
 
         {/* Price-drop reminder — pulses until the user marks the price lowered */}

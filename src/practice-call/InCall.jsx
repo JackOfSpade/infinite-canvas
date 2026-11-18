@@ -171,11 +171,9 @@ export default function InCall({ state, api, leaveRequest = 0 }) {
   const padOpen = pad?.open === true;
   // While the interviewer is still setting a share up on their side, nothing shows here, as on a
   // real call: the layout changes only when the content arrives. state.sharing is not displayed.
-  const starting = false;
-  const presenting = !!screen || padOpen || starting;
-  const presenterSource = screen;
-  const presenterIndex = presenterSource ? Math.max(0, participants.findIndex(item => item.id === presenterSource.speakerId)) : -1;
-  const presenterName = presenterSource ? (presenterSource.presenterName || participants[presenterIndex]?.name || leadName) : '';
+  const presenting = !!screen || padOpen;
+  const presenterIndex = screen ? Math.max(0, participants.findIndex(item => item.id === screen.speakerId)) : -1;
+  const presenterName = screen ? (screen.presenterName || participants[presenterIndex]?.name || leadName) : '';
   // With the chat panel open and four or more interviewers the bar runs out of room (seen in the
   // built app: five named chips left one letter of "… is presenting"). The chips then show the
   // picture only, with the name on hover, so the line that says who is presenting stays readable.
@@ -217,9 +215,9 @@ export default function InCall({ state, api, leaveRequest = 0 }) {
                   people on the call sit in the same bar, and the question and the code share the
                   whole width side by side. */}
               <div className="flex h-9 shrink-0 items-center gap-2">
-                {screen || starting
+                {screen
                   ? <p data-presenting-banner="true" className="flex h-9 min-w-0 flex-1 items-center gap-2 rounded-lg bg-[#3c4043] px-3 text-sm text-[#e8eaed]">
-                    <MonitorUp size={14} className="shrink-0" aria-hidden="true" /><span className="truncate">{`${presenterName} is ${starting ? 'starting to present…' : 'presenting'}`}</span>
+                    <MonitorUp size={14} className="shrink-0" aria-hidden="true" /><span className="truncate">{`${presenterName} is presenting`}</span>
                   </p>
                   : <span className="min-w-0 flex-1" />}
                 <div data-strip="true" data-tiles={participants.length} className="flex shrink-0 items-center gap-1.5">
@@ -230,7 +228,6 @@ export default function InCall({ state, api, leaveRequest = 0 }) {
                 </p>}
               </div>
               <div data-stage="true" className={`flex min-h-0 min-w-0 flex-1 flex-col gap-3 ${sidePanelOpen ? 'xl:flex-row' : 'md:flex-row'}`}>
-                {starting && <div key="starting" data-share-placeholder="true" aria-hidden="true" className="min-h-0 min-w-0 flex-1 basis-0 animate-pulse rounded-xl bg-[#3c4043]" />}
                 {screen && <SharedScreen key="screen" title={screen.title} content={screen.content} className="min-h-0 min-w-0 flex-1 basis-0" />}
                 {padOpen && <CodingPad key="pad" lang={pad.lang || ''} initialText={pad.text || ''} disabled={interviewerLeft}
                   onChange={api?.updatePad} className="min-h-0 min-w-0 flex-1 basis-0" />}

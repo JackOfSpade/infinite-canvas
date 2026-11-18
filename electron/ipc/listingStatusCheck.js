@@ -1,5 +1,3 @@
-import { collector, templatesFor } from './validationLines.js';
-export const HUB_SCAN_CORRECTION_TEMPLATES = templatesFor('hub.');
 /**
  * Listing status check engine.
  *
@@ -29,6 +27,7 @@ export const HUB_SCAN_CORRECTION_TEMPLATES = templatesFor('hub.');
  * platform's manual AI handoff, instead of interleaving scrape → paste →
  * scrape → paste across up to 8 platforms.
  */
+import { collector, templatesFor } from './validationLines.js';
 import crypto from 'node:crypto';
 import { callLLMText } from './llm.js';
 import { marketplaceHubScanBatchFits, marketplaceHubScanMaxPagesForPlatform, marketplaceHubScanMaxPlatformsPerBatch } from './resultCaps.js';
@@ -42,6 +41,8 @@ import { wrapUntrustedText } from './promptSafety.js';
 import { withSharedProfileLock } from './sharedProfileLock.js';
 import { htmlToText } from 'html-to-text';
 
+export const HUB_SCAN_CORRECTION_TEMPLATES = templatesFor('hub.');
+
 // Structural thresholds (absolute by design — not page-baseline candidates):
 //   - MIN_CONTENT_CHARS: below this, a fetched page is treated as empty/blocked
 //     and we skip the LLM call (a real status page is always far larger).
@@ -51,19 +52,45 @@ const MIN_CONTENT_CHARS    = 200;
 // four sources that all 403 simultaneously, we only run the verifier once
 // and share its verdict — otherwise we'd race four `fetchHtmlClean` calls
 // against each other and against any in-flight Settings re-verify.
-const _inFlightVerifies = new Map(); // platformId → Promise<verdict>
-function verifyPlatformOnce(platformId, signal = null) {
-  if (_inFlightVerifies.has(platformId)) return _inFlightVerifies.get(platformId);
-  const p = withSharedProfileLock(
-    () => verifySellMonitorLogin(platformId, { signal }),
-    signal,
-    `marketplace status disambiguate:${platformId}`,
-  ).finally(() => {
-    _inFlightVerifies.delete(platformId);
-  });
-  _inFlightVerifies.set(platformId, p);
-  return p;
+// The shared run has its own signal, which aborts only when every caller that
+// joined it has been cancelled, so one cancelled scan cannot reject the verdict
+// another scan is still waiting for. Each caller races the run against its own signal.
+export function createSharedVerifierGate(run) {
+  const inFlight = new Map(); // key → { promise, controller, subscribers }
+  return function verifyOnce(key, signal = null) {
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    let entry = inFlight.get(key);
+    if (!entry) {
+      const controller = new AbortController();
+      const created = { controller, subscribers: 0, promise: null };
+      created.promise = Promise.resolve().then(() => run(key, controller.signal)).finally(() => {
+        if (inFlight.get(key) === created) inFlight.delete(key);
+      });
+      inFlight.set(key, created);
+      entry = created;
+    }
+    entry.subscribers += 1;
+    let onAbort;
+    const cancelled = new Promise((_, reject) => {
+      if (!signal) return;
+      onAbort = () => {
+        entry.subscribers -= 1;
+        if (entry.subscribers <= 0) entry.controller.abort(signal.reason);
+        reject(signal.reason);
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    return Promise.race([entry.promise, cancelled]).finally(() => {
+      if (onAbort) signal.removeEventListener('abort', onAbort);
+    });
+  };
 }
+const verifyPlatformShared = createSharedVerifierGate((platformId, signal) => withSharedProfileLock(
+  () => verifySellMonitorLogin(platformId, { signal }),
+  signal,
+  `marketplace status disambiguate:${platformId}`,
+));
+const verifyPlatformOnce = (platformId, signal = null) => verifyPlatformShared(platformId, signal);
 
 /**
  * Disambiguate a 401/403 (or login-URL redirect) into either a real auth
@@ -186,14 +213,6 @@ const VALID_ATTENTION_CATEGORIES = new Set([
 ]);
 const VALID_URGENCIES = new Set(['high', 'low']);
 
-/**
- * Strip a page down to its signal-bearing text. Removes script/style/svg/nav/
- * footer/header/aside blocks, HTML comments, and collapses whitespace.
- *
- * Returns a string of plain-ish text with HTML tags removed. Cheap regex
- * approach instead of a DOM parse — good enough since the LLM is what does
- * the actual reading. Token-density goes up ~5x vs. raw HTML.
- */
 // Read/unread state on a marketplace messages/notifications hub lives ONLY in
 // CSS class names — never in the visible text. eBay's messages inbox marks an
 // already-opened conversation with `card__content-read` on its content block
@@ -257,6 +276,12 @@ export function summarizeReadState(html) {
   };
 }
 
+/**
+ * Strip a page down to its signal-bearing text. Parses the HTML, skips the
+ * script/style/svg/noscript/nav/header/footer/aside elements with everything
+ * inside them, and collapses whitespace. Token density goes up about 5x versus
+ * raw HTML.
+ */
 export function stripHtmlForAnalysis(html) {
   if (!html) return '';
   // A parser-backed conversion handles malformed/uppercase tags and entities.
@@ -449,6 +474,12 @@ export function packPreparedHubScans(scans) {
   return batches;
 }
 
+const pageIdentity = r => ({
+  ...(r.finalUrl ? { finalUrl: r.finalUrl } : {}),
+  ...(r.title ? { title: r.title } : {}),
+});
+const terminalPage = (spec, fields) => ({ spec, terminal: { url: spec.url, urlLabel: spec.urlLabel, ...fields } });
+
 /**
  * Stage 1 of the hub scan: fetch + strip every hub URL in parallel and
  * resolve transport-level outcomes (auth wall, fetch error, empty) up front
@@ -477,58 +508,33 @@ export async function prepareHubPages({ urlSpecs, platformId, signal }) {
       r = await spec.fetcher(url, signal);
     } catch (err) {
       if (signal?.aborted || err?.name === 'AbortError') throw err;
-      return {
-        spec,
-        terminal: {
-          url,
-          urlLabel,
-          status: 'error',
-          message: `Fetch failed: ${err?.message || String(err)}`,
-        },
-      };
+      return terminalPage(spec, {
+        status: 'error',
+        message: `Fetch failed: ${err?.message || String(err)}`,
+      });
     }
     if (!r || typeof r !== 'object') {
-      return {
-        spec,
-        terminal: {
-          url,
-          urlLabel,
-          status: 'error',
-          message: 'Fetch failed: fetcher returned no response.',
-        },
-      };
+      return terminalPage(spec, {
+        status: 'error',
+        message: 'Fetch failed: fetcher returned no response.',
+      });
     }
     if (!r.ok) {
       const detail = r.error || (r.status ? `HTTP ${r.status}` : 'unknown error');
-      return {
-        spec,
-        terminal: {
-          url,
-          urlLabel,
-          status: 'error',
-          message: `Fetch failed: ${detail}`,
-          ...(r.readFailure ? { readFailure: true } : {}),
-          ...(r.finalUrl ? { finalUrl: r.finalUrl } : {}),
-          ...(r.title ? { title: r.title } : {}),
-          ...(r.appleEventsDisabled ? { appleEventsDisabled: true } : {}),
-          ...(r.loggedOut ? { loggedOut: true } : {}),
-          ...(r.challenged ? { challenged: true } : {}),
-        },
-      };
+      return terminalPage(spec, {
+        status: 'error',
+        message: `Fetch failed: ${detail}`,
+        ...(r.readFailure ? { readFailure: true } : {}),
+        ...pageIdentity(r),
+        ...(r.appleEventsDisabled ? { appleEventsDisabled: true } : {}),
+        ...(r.loggedOut ? { loggedOut: true } : {}),
+        ...(r.challenged ? { challenged: true } : {}),
+      });
     }
     const authWallSignal = getAuthWallSignal({ status: r.status, finalUrl: r.finalUrl, url, html: r.html, platformId });
     if (authWallSignal) {
       const verdict = await disambiguateAuthFailure({ platformId, status: r.status, finalUrl: r.finalUrl, url, urlLabel, signal });
-      return {
-        spec,
-        terminal: {
-          url,
-          urlLabel,
-          ...verdict,
-          ...(r.finalUrl ? { finalUrl: r.finalUrl } : {}),
-          ...(r.title ? { title: r.title } : {}),
-        },
-      };
+      return terminalPage(spec, { ...verdict, ...pageIdentity(r) });
     }
     // Anti-bot wall served as HUB CONTENT to the app's CDP/stealth browser (eBay's
     // "Please verify yourself to continue" at HTTP 200, a Cloudflare "Performing
@@ -544,50 +550,32 @@ export async function prepareHubPages({ urlSpecs, platformId, signal }) {
     // the `blk` count + the "Blocked / unreadable hub sources" section.
     const antiBot = detectAntiBotSignal({ status: r.status, finalUrl: r.finalUrl, html: r.html, title: r.title, sourceLabel: platformId });
     if (antiBot && antiBot.severity === 'block') {
-      return {
-        spec,
-        terminal: {
-          url,
-          urlLabel,
-          status: 'unknown',
-          antiBot: antiBot.code,
-          message: `Anti-bot wall served to the app browser (${antiBot.code}) — NOT an account block; your normal browser is unaffected and the ${platformId} session may still be connected. ${antiBot.suggestion}`,
-          ...(r.finalUrl ? { finalUrl: r.finalUrl } : {}),
-          ...(r.title ? { title: r.title } : {}),
-        },
-      };
+      return terminalPage(spec, {
+        status: 'unknown',
+        antiBot: antiBot.code,
+        message: `Anti-bot wall served to the app browser (${antiBot.code}) — NOT an account block; your normal browser is unaffected and the ${platformId} session may still be connected. ${antiBot.suggestion}`,
+        ...pageIdentity(r),
+      });
     }
     // Any other 4xx/5xx (auth walls were handled just above) means a broken or
     // changed watch URL, not readable hub content. Surface it as a terminal error
     // instead of stripping the error-page body and paying for a token-heavy
     // hub-scan LLM call that could only return a misleading "unknown".
     if (r.status >= 400) {
-      return {
-        spec,
-        terminal: {
-          url,
-          urlLabel,
-          status: 'error',
-          message: `Hub page returned HTTP ${r.status} — the watch URL is broken or changed.`,
-          readFailure: true,
-          ...(r.finalUrl ? { finalUrl: r.finalUrl } : {}),
-          ...(r.title ? { title: r.title } : {}),
-        },
-      };
+      return terminalPage(spec, {
+        status: 'error',
+        message: `Hub page returned HTTP ${r.status} — the watch URL is broken or changed.`,
+        readFailure: true,
+        ...pageIdentity(r),
+      });
     }
     if (!r.html || r.html.length < MIN_CONTENT_CHARS) {
-      return {
-        spec,
-        terminal: {
-          url,
-          urlLabel,
-          status: 'unknown',
-          message: `Empty or near-empty response (${r.html?.length || 0} bytes).`,
-          readFailure: true,
-          ...(r.finalUrl ? { finalUrl: r.finalUrl } : {}),
-          ...(r.title ? { title: r.title } : {}),
-        },
-      };
+      return terminalPage(spec, {
+        status: 'unknown',
+        message: `Empty or near-empty response (${r.html?.length || 0} bytes).`,
+        readFailure: true,
+        ...pageIdentity(r),
+      });
     }
     // Preserve message read/unread state (CSS-class-only) BEFORE stripping wipes
     // it, so the model can tell an already-read message from a new one.

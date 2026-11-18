@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { JOB_BOARD_PREFERENCE_BRIEF_MAX_LENGTH } from '../../utils/jobBoardPreferenceOverride';
-
-const BUTTON_CLASS = 'nodrag rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] text-white/70 hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed';
+import { BUTTON_CLASS } from './overridePanelClasses';
 
 export function JobBoardPreferenceOverridePanel({ view, busy = false, hasSavedJobs = false, onApply, onClear }) {
   const saved = view?.brief || '';

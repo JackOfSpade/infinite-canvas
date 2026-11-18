@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { build } from 'esbuild';
 import electron from 'electron';
@@ -10,10 +11,14 @@ import { applicationRendererSourceDigest } from '../electron/ipc/applicationV2Re
 // Synthetic production-render workload in a separate, disposable Electron profile.
 // Does not load electron/main.js, rebuild the app, use providers, or read a live canvas.
 const privateRoot = path.join(os.homedir(), 'Library/Application Support/infinite-canvas');
-const live = JSON.parse(await fs.readFile(path.join(privateRoot, 'non-api-ai-handoffs.json'), 'utf8'));
+const live = await fs.readFile(path.join(privateRoot, 'non-api-ai-handoffs.json'), 'utf8').then(JSON.parse, error => {
+  if (error?.code === 'ENOENT') return {};
+  throw error;
+});
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 assert(!Object.keys(live.runs || {}).some(key => key.startsWith('official-posting:')), 'Wait for the live official-posting refresh before this isolated benchmark.');
-await fs.mkdir(path.resolve('tmp'), { recursive: true });
-const root = await fs.mkdtemp(path.resolve('tmp/application-render-cache-'));
+await fs.mkdir(path.join(repoRoot, 'tmp'), { recursive: true });
+const root = await fs.mkdtemp(path.join(repoRoot, 'tmp/application-render-cache-'));
 try {
   const output = path.join(root, 'result.json');
   const entry = `

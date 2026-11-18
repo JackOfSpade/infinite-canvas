@@ -13,7 +13,7 @@ import { SOURCE_HEALTH_FAILED_CODE, describeSourceHealthFailures } from '../../s
  */
 export const SOURCE_HEALTH_WARNING_CODE = SOURCE_HEALTH_FAILED_CODE;
 /** Below this many rows a share says little: a few odd listings aren't a broken site. */
-export const SOURCE_HEALTH_MIN_ROWS = 20;
+const SOURCE_HEALTH_MIN_ROWS = 20;
 /**
  * A local-only continuation (a "Finish with saved listings" run, or a resume of
  * a finished checkpoint) deliberately skips the description walk, so its rows

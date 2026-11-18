@@ -1879,7 +1879,6 @@ async function recoverRendererWorkspaceMutation(target) {
   return true;
 }
 
-/** Read through a bound handle and verify its public entry before exposing bytes. */
 // One bound for both directions, measured on the full canvas rather than the
 // smaller pooled file, so a canvas the app can save can always be reopened. It
 // is the runtime's real limit, not a chosen size: the renderer holds the canvas
@@ -1992,6 +1991,7 @@ export async function serializeWorkspaceForSaveOffThread(data) {
   return pooled ?? plain;
 }
 
+/** Read through a bound handle and verify its public entry before exposing bytes. */
 export async function readRendererWorkspaceFile(filePath, {
   maxBytes = null,
   encoding = 'utf8',
@@ -3388,43 +3388,35 @@ function extractSidecarData(nodes) {
   const hubs = [];
   const cards = [];
 
-  const traverseAndExtract = (nodeList) => {
-    if (!Array.isArray(nodeList)) return;
-    for (const n of nodeList) {
-      if (n.type === 'jobhub' && n.data?.hubState === 'sources-ready') {
-        const d = n.data;
-        hubs.push({
-          id: n.id,
-          hubState: d.hubState,
-          scrapeWarnings: d.scrapeWarnings,
-          pendingJobs: d.pendingJobs,
-          errorMessage: d.errorMessage,
-          isRateLimit: d.isRateLimit,
-        });
-        
-        // Strip transient/paused fields from main file data
-        d.hubState = 'empty';
-        delete d.scrapeWarnings;
-        delete d.pendingJobs;
-        delete d.errorMessage;
-        delete d.isRateLimit;
-      } else if (n.type === 'jobsourcecard' && n.data?.persistedProgress) {
-        cards.push({
-          id: n.id,
-          persistedProgress: n.data.persistedProgress,
-        });
-        
-        // Strip transient/paused progress from main file data
-        delete n.data.persistedProgress;
-      }
-      
-      if (n.type === 'group' && n.data?.canvasData?.nodes) {
-        traverseAndExtract(n.data.canvasData.nodes);
-      }
-    }
-  };
+  traverseCanvasNodes(nodes, (n) => {
+    if (n.type === 'jobhub' && n.data?.hubState === 'sources-ready') {
+      const d = n.data;
+      hubs.push({
+        id: n.id,
+        hubState: d.hubState,
+        scrapeWarnings: d.scrapeWarnings,
+        pendingJobs: d.pendingJobs,
+        errorMessage: d.errorMessage,
+        isRateLimit: d.isRateLimit,
+      });
 
-  traverseAndExtract(nodes);
+      // Strip transient/paused fields from main file data
+      d.hubState = 'empty';
+      delete d.scrapeWarnings;
+      delete d.pendingJobs;
+      delete d.errorMessage;
+      delete d.isRateLimit;
+    } else if (n.type === 'jobsourcecard' && n.data?.persistedProgress) {
+      cards.push({
+        id: n.id,
+        persistedProgress: n.data.persistedProgress,
+      });
+
+      // Strip transient/paused progress from main file data
+      delete n.data.persistedProgress;
+    }
+  });
+
   return { hubs, cards };
 }
 
@@ -3436,30 +3428,21 @@ function mergeSidecarData(nodes, sidecarData) {
   const hubsMap = new Map((sidecarData.hubs || []).map(h => [h.id, h]));
   const cardsMap = new Map((sidecarData.cards || []).map(c => [c.id, c]));
 
-  const traverseAndMerge = (nodeList) => {
-    if (!Array.isArray(nodeList)) return;
-    for (const n of nodeList) {
-      if (n.type === 'jobhub' && hubsMap.has(n.id)) {
-        const sidecarHub = hubsMap.get(n.id);
-        n.data = n.data || {};
-        n.data.hubState = sidecarHub.hubState || 'sources-ready';
-        if (sidecarHub.scrapeWarnings !== undefined) n.data.scrapeWarnings = sidecarHub.scrapeWarnings;
-        if (sidecarHub.pendingJobs !== undefined) n.data.pendingJobs = sidecarHub.pendingJobs;
-        if (sidecarHub.errorMessage !== undefined) n.data.errorMessage = sidecarHub.errorMessage;
-        if (sidecarHub.isRateLimit !== undefined) n.data.isRateLimit = sidecarHub.isRateLimit;
-      } else if (n.type === 'jobsourcecard' && cardsMap.has(n.id)) {
-        const sidecarCard = cardsMap.get(n.id);
-        n.data = n.data || {};
-        if (sidecarCard.persistedProgress !== undefined) n.data.persistedProgress = sidecarCard.persistedProgress;
-      }
-
-      if (n.type === 'group' && n.data?.canvasData?.nodes) {
-        traverseAndMerge(n.data.canvasData.nodes);
-      }
+  traverseCanvasNodes(nodes, (n) => {
+    if (n.type === 'jobhub' && hubsMap.has(n.id)) {
+      const sidecarHub = hubsMap.get(n.id);
+      n.data = n.data || {};
+      n.data.hubState = sidecarHub.hubState || 'sources-ready';
+      if (sidecarHub.scrapeWarnings !== undefined) n.data.scrapeWarnings = sidecarHub.scrapeWarnings;
+      if (sidecarHub.pendingJobs !== undefined) n.data.pendingJobs = sidecarHub.pendingJobs;
+      if (sidecarHub.errorMessage !== undefined) n.data.errorMessage = sidecarHub.errorMessage;
+      if (sidecarHub.isRateLimit !== undefined) n.data.isRateLimit = sidecarHub.isRateLimit;
+    } else if (n.type === 'jobsourcecard' && cardsMap.has(n.id)) {
+      const sidecarCard = cardsMap.get(n.id);
+      n.data = n.data || {};
+      if (sidecarCard.persistedProgress !== undefined) n.data.persistedProgress = sidecarCard.persistedProgress;
     }
-  };
-
-  traverseAndMerge(nodes);
+  });
 }
 
 export function registerFilesystemHandlers() {
@@ -3589,7 +3572,9 @@ export function registerFilesystemHandlers() {
     // mutation.
     try {
       const sidecarPath = getSidecarPath(targetPath);
-      if (await removeRendererWorkspaceFileIfPresent(sidecarPath)) {
+      // The sidecar format is retired, so a plain probe skips the guarded removal on every autosave.
+      const sidecarMissing = await fs.promises.lstat(sidecarPath).then(() => false, error => error?.code === 'ENOENT');
+      if (!sidecarMissing && await removeRendererWorkspaceFileIfPresent(sidecarPath)) {
         logger.info(`[FileSystem] Cleaned up legacy separate progress sidecar: ${sidecarPath}`);
       }
     } catch { /* ignore */ }
@@ -3720,73 +3705,74 @@ export function registerFilesystemHandlers() {
     const { stat: stats, content } = workspace;
     if (stats.size === 0) throw new Error('Workspace file is empty (0 bytes)');
     if (workspace.tooLarge) throw new Error(`Workspace file is too large to open (${formatWorkspaceMegabytes(stats.size)}). Limit is ${WORKSPACE_LIMIT_LABEL}.`);
+    let data;
     try {
-      const data = parseWorkspaceText(content);
-      const loadParsedAt = Date.now();
-      await resolvePortableFilePaths(data, targetPath);
-      logger.info(`[FileSystem] Loaded workspace: ${targetPath} (${stats.size} bytes)`);
-      // A slow load has several possible causes, so a report must be able to say which step took the time.
-      if (Date.now() - loadStartedAt >= SLOW_WORKSPACE_LOAD_MS) {
-        logger.warn(`[FileSystem] Slow workspace load: guard=${loadGuardedAt - loadStartedAt}ms journal=${loadJournalAt - loadGuardedAt}ms read=${loadReadAt - loadJournalAt}ms parse=${loadParsedAt - loadReadAt}ms paths=${Date.now() - loadParsedAt}ms`);
-      }
-
-      // Clean up legacy separate progress sidecar file if it exists
-      try {
-        const sidecarPath = getSidecarPath(targetPath);
-        const sidecarTarget = await inspectRendererWorkspacePath(sidecarPath, { allowMissing: true });
-        if (sidecarTarget.exists) {
-          try {
-            const { content: sidecarContent } = await readRendererWorkspaceFile(sidecarTarget);
-            const sidecarData = JSON.parse(sidecarContent);
-            mergeSidecarData(data.nodes || [], sidecarData);
-            logger.info(`[FileSystem] Migrated and merged legacy progress sidecar data from ${sidecarPath}`);
-          } catch (err) {
-            logger.error(`[FileSystem] Failed to parse legacy sidecar data: ${sidecarPath}`, err);
-          }
-          if (await removeRendererWorkspaceFileIfPresent(sidecarPath)) {
-            logger.info(`[FileSystem] Deleted legacy progress sidecar file: ${sidecarPath}`);
-          }
-        }
-      } catch { /* ignore */ }
-
-      // Check for embedded transientProgress
-      if (data.transientProgress) {
-        const sidecarData = data.transientProgress;
-        // Merge progress back into the nodes for V8/React Flow memory
-        mergeSidecarData(data.nodes || [], sidecarData);
-        logger.info('[FileSystem] Restored embedded transient progress into React Flow memory nodes');
-        
-        // Immediately delete/strip the saved state from the file on disk
-        delete data.transientProgress;
-        
-        try {
-          const cleanData = JSON.parse(JSON.stringify(data));
-          // Strip nodes in cleanData so the disk copy is fully clean
-          extractSidecarData(cleanData.nodes || []);
-          delete cleanData.transientProgress;
-          
-          await atomicWriteRendererWorkspaceFile(targetPath, serializeWorkspaceForSave(cleanData));
-          logger.info(`[FileSystem] Immediately deleted saved transient progress from disk file: ${targetPath}`);
-        } catch (err) {
-          logger.error(`[FileSystem] Failed to write clean canvas to disk after loading: ${targetPath}`, err);
-        }
-      }
-      
-      // See the matching save-path note: workspace writes use a host-private
-      // journal, so a broad untrusted-parent temp cleanup is neither needed
-      // nor an authority we retain after loading a renderer-selected canvas.
-
-      // Fingerprint the file we just loaded so the next save can tell if it was
-      // renamed underneath us. Done last because transient-progress recovery
-      // may have completed a handle-pinned write before we expose the canvas.
-      await rememberCanvasInode(event.sender, targetPath);
-
-      return { data, filePath: targetPath };
+      data = parseWorkspaceText(content);
     } catch (jsonErr) {
       logger.error(`[FileSystem] Failed to parse workspace JSON at ${targetPath}:`, jsonErr);
       if (jsonErr?.code === WORKSPACE_FORMAT_UNSUPPORTED) throw jsonErr;
       throw new Error('Invalid workspace file format. File may be corrupted or malformed.');
     }
+    const loadParsedAt = Date.now();
+    await resolvePortableFilePaths(data, targetPath);
+    logger.info(`[FileSystem] Loaded workspace: ${targetPath} (${stats.size} bytes)`);
+    // A slow load has several possible causes, so a report must be able to say which step took the time.
+    if (Date.now() - loadStartedAt >= SLOW_WORKSPACE_LOAD_MS) {
+      logger.warn(`[FileSystem] Slow workspace load: guard=${loadGuardedAt - loadStartedAt}ms journal=${loadJournalAt - loadGuardedAt}ms read=${loadReadAt - loadJournalAt}ms parse=${loadParsedAt - loadReadAt}ms paths=${Date.now() - loadParsedAt}ms`);
+    }
+
+    // Clean up legacy separate progress sidecar file if it exists
+    try {
+      const sidecarPath = getSidecarPath(targetPath);
+      const sidecarTarget = await inspectRendererWorkspacePath(sidecarPath, { allowMissing: true });
+      if (sidecarTarget.exists) {
+        try {
+          const { content: sidecarContent } = await readRendererWorkspaceFile(sidecarTarget);
+          const sidecarData = JSON.parse(sidecarContent);
+          mergeSidecarData(data.nodes || [], sidecarData);
+          logger.info(`[FileSystem] Migrated and merged legacy progress sidecar data from ${sidecarPath}`);
+        } catch (err) {
+          logger.error(`[FileSystem] Failed to parse legacy sidecar data: ${sidecarPath}`, err);
+        }
+        if (await removeRendererWorkspaceFileIfPresent(sidecarPath)) {
+          logger.info(`[FileSystem] Deleted legacy progress sidecar file: ${sidecarPath}`);
+        }
+      }
+    } catch { /* ignore */ }
+
+    // Check for embedded transientProgress
+    if (data.transientProgress) {
+      const sidecarData = data.transientProgress;
+      // Merge progress back into the nodes for V8/React Flow memory
+      mergeSidecarData(data.nodes || [], sidecarData);
+      logger.info('[FileSystem] Restored embedded transient progress into React Flow memory nodes');
+      
+      // Immediately delete/strip the saved state from the file on disk
+      delete data.transientProgress;
+      
+      try {
+        const cleanData = JSON.parse(JSON.stringify(data));
+        // Strip nodes in cleanData so the disk copy is fully clean
+        extractSidecarData(cleanData.nodes || []);
+        delete cleanData.transientProgress;
+        
+        await atomicWriteRendererWorkspaceFile(targetPath, serializeWorkspaceForSave(cleanData));
+        logger.info(`[FileSystem] Immediately deleted saved transient progress from disk file: ${targetPath}`);
+      } catch (err) {
+        logger.error(`[FileSystem] Failed to write clean canvas to disk after loading: ${targetPath}`, err);
+      }
+    }
+    
+    // See the matching save-path note: workspace writes use a host-private
+    // journal, so a broad untrusted-parent temp cleanup is neither needed
+    // nor an authority we retain after loading a renderer-selected canvas.
+
+    // Fingerprint the file we just loaded so the next save can tell if it was
+    // renamed underneath us. Done last because transient-progress recovery
+    // may have completed a handle-pinned write before we expose the canvas.
+    await rememberCanvasInode(event.sender, targetPath);
+
+    return { data, filePath: targetPath };
   });
 
   handleSafe('start-file-watch', async (event, filePath) => {
@@ -3850,12 +3836,6 @@ export function registerFilesystemHandlers() {
   });
 }
 
-/**
- * Startup Cleanup Logic: Finds and deletes orphaned .tmp files left over from
- * previous sessions (atomic write failures or app crashes).
- *
- * @param {string} [targetDir] - Directory to scan. Defaults to process.cwd() in dev.
- */
 const cleanupNextEligibleAt = new Map();
 const OWNED_TEMP_MAX_AGE_MS = 60 * 60 * 1000;
 const OWNED_TEMP_RESCAN_MS = 15 * 60 * 1000;
@@ -3904,6 +3884,12 @@ export async function cleanupStaleOwnedTempFiles(targetDir, {
 }
 
 // Bounded per-directory wrapper invoked by canvas and opened text documents.
+/**
+ * Startup Cleanup Logic: Finds and deletes orphaned .tmp files left over from
+ * previous sessions (atomic write failures or app crashes).
+ *
+ * @param {string} [targetDir] - Directory to scan. Defaults to process.cwd() in dev.
+ */
 async function cleanupTempFiles(targetDir) {
   const dir = targetDir || process.cwd();
   const nowMs = Date.now();

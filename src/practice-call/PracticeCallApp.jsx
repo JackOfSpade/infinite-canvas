@@ -8,7 +8,7 @@ import InCall from './InCall.jsx';
 import EndedScreen from './EndedScreen.jsx';
 import Replay from './Replay.jsx';
 import ErrorScreen from './ErrorScreen.jsx';
-import { MISSING_PRELOAD, mergeEvent, mergeState } from './callModel.js';
+import { MISSING_PRELOAD, mergeEvent, mergeState, replayLoadFailed } from './callModel.js';
 
 function readApi() {
   return typeof window === 'undefined' ? null : window.practiceCallAPI || null;
@@ -57,11 +57,12 @@ export default function PracticeCallApp() {
     const api = readApi();
     if (typeof api?.getReplay !== 'function') return undefined;
     let live = true;
+    const failed = () => { if (live) setReplay(replayLoadFailed()); };
     const load = () => {
       try {
         Promise.resolve(api.getReplay()).then(value => { if (live && value && typeof value === 'object') setReplay(value); })
-          .catch(() => { if (live) setReplay({ audioUrl: null, durationMs: 0, transcript: [], chapters: [], feedback: null, analysis: { status: 'failed', error: 'The replay could not be loaded.' } }); });
-      } catch { if (live) setReplay({ audioUrl: null, durationMs: 0, transcript: [], chapters: [], feedback: null, analysis: { status: 'failed', error: 'The replay could not be loaded.' } }); }
+          .catch(failed);
+      } catch { failed(); }
     };
     load();
     const off = typeof api.onReplayUpdated === 'function' ? api.onReplayUpdated(load) : null;

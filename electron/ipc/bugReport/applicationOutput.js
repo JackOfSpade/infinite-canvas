@@ -1,9 +1,4 @@
-import {
-  redactReportLocalPathsInText,
-  redactReportLogSecrets,
-  redactReportOpaqueIds,
-  redactReportUrlsInText,
-} from './helpers.js';
+import { indentedReportCode, reportFilterCodes, sanitizeReportProse } from './helpers.js';
 
 // The current producer bounds its complete visible-text projection to the
 // accepted-result envelope (1 MiB). Leave room for Markdown framing and
@@ -11,36 +6,18 @@ import {
 // instead of silently sampling its document.
 const MAX_COMPLETE_OUTPUT_RENDER_BYTES = 1_250_000;
 
-export const APPLICATION_OUTPUT_FILTER_CODE = 'APPOUTPUT';
+const APPLICATION_OUTPUT_FILTER_CODE = 'APPOUTPUT';
 
 export function codeIncludesApplicationOutput(filterCode) {
-  const codes = String(filterCode || '')
-    .trim()
-    .toUpperCase()
-    .split(/[+\s,]+/)
-    .filter(Boolean);
+  const codes = reportFilterCodes(filterCode);
   // FULL is the user's broad, explicit report selection. New diagnostics must
   // be present there; APPOUTPUT remains useful as the narrow output-only code.
   return codes.includes(APPLICATION_OUTPUT_FILTER_CODE) || codes.includes('FULL');
 }
 
-function sanitizeOutputText(value) {
-  if (typeof value !== 'string') return '';
-  const text = redactReportOpaqueIds(redactReportLogSecrets(
-    redactReportLocalPathsInText(redactReportUrlsInText(value)),
-  ))
-    .replace(/\r\n?/g, '\n')
-    .split('').filter(char => char === '\n' || char === '\t' || (char.codePointAt(0) >= 32 && char.codePointAt(0) !== 127)).join('')
-    .replace(/[ \t]+\n/g, '\n')
-    .trim();
-  return text;
-}
+const sanitizeOutputText = value => sanitizeReportProse(value, { stripTrailingSpaces: true });
 
-function indentedCode(text) {
-  // Indented Markdown code blocks cannot be terminated by report content, so
-  // the output remains literal even when a hostile model emitted markup.
-  return text.split('\n').map(line => `    ${line}`).join('\n');
-}
+const indentedCode = text => indentedReportCode(text, 4);
 
 function nonNegativeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : null;
@@ -67,34 +44,16 @@ function appendLiteralList(lines, label, values) {
   });
 }
 
-/**
- * Render only a typed, in-memory projection created beside final Local-AI
- * telemetry.  This function never follows a file path supplied by a renderer
- * or a card, and never reads an application artifact from disk.
- */
-function renderV2Output(output, documentScope = null) {
-  const resume = output?.documents?.resume;
-  const coverLetter = output?.documents?.coverLetter;
-  if (!resume || typeof resume !== 'object' || Array.isArray(resume)
-    || !coverLetter || typeof coverLetter !== 'object' || Array.isArray(coverLetter)) return null;
-  const roles = Array.isArray(resume.roles) ? resume.roles.filter(role => role && typeof role === 'object' && !Array.isArray(role)) : [];
-  const projects = Array.isArray(resume.projects) ? resume.projects.filter(project => project && typeof project === 'object' && !Array.isArray(project)) : [];
-  const skills = Array.isArray(resume.skills) ? resume.skills.filter(group => group && typeof group === 'object' && !Array.isArray(group)) : [];
-  let lines = [
-    '',
-    '## Application Output Evidence (APPOUTPUT)',
-    '- Scope: the complete, typed visible-text projection of the final accepted résumé and cover letter, retained in this process at final-output validation. `FULL` includes this section; `APPOUTPUT` selects it directly.',
-    '- Safety: this is an in-memory projection, never a renderer-provided path or a disk reread. Final prose is rendered as literal code and report redaction runs again at this boundary.',
-    '- Completeness: no role, bullet, project, skill group/item, education/credential line, or visible cover-letter header/body field is selected as a sample.',
-  ];
-  // A one-document job has no other document. Saying "none in final résumé"
-  // for a letter-only run read as a résumé that had lost its content.
-  const resumeLines = [];
-  const letterLines = [];
-  const allLines = lines;
-  lines = resumeLines;
-  lines.push('', '### Résumé');
-  const identity = resume.identity && typeof resume.identity === 'object' && !Array.isArray(resume.identity) ? resume.identity : {};
+const isPlainObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+const plainObjects = value => (Array.isArray(value) ? value.filter(isPlainObject) : []);
+
+function renderResumeLines(resume) {
+  const lines = ['', '### Résumé'];
+  const roles = plainObjects(resume.roles);
+  const projects = plainObjects(resume.projects);
+  const skills = plainObjects(resume.skills);
+  const identity = isPlainObject(resume.identity) ? resume.identity : {};
   appendLiteral(lines, 'Name', identity.name);
   appendLiteral(lines, 'Tagline', identity.tagline);
   appendLiteral(lines, 'Subtitle role', identity.subtitleRole);
@@ -130,9 +89,11 @@ function renderV2Output(output, documentScope = null) {
     });
   } else lines.push('- Skill groups: none in final résumé.');
   appendLiteralList(lines, 'Education / credential line(s)', resume.education);
+  return lines;
+}
 
-  lines = letterLines;
-  lines.push('', '### Cover Letter');
+function renderLetterLines(coverLetter) {
+  const lines = ['', '### Cover Letter'];
   appendLiteral(lines, 'Name', coverLetter.name);
   appendLiteral(lines, 'Tagline', coverLetter.tagline);
   appendLiteral(lines, 'Subtitle role', coverLetter.subtitleRole);
@@ -144,17 +105,36 @@ function renderV2Output(output, documentScope = null) {
   appendLiteralList(lines, 'Final paragraphs', coverLetter.paragraphs);
   appendLiteral(lines, 'Closing', coverLetter.closing);
   appendLiteral(lines, 'Signature title', coverLetter.signatureTitle);
+  return lines;
+}
 
-  lines = allLines;
+/**
+ * Render only a typed, in-memory projection created beside final Local-AI
+ * telemetry.  This function never follows a file path supplied by a renderer
+ * or a card, and never reads an application artifact from disk.
+ */
+function renderV2Output(output, documentScope = null) {
+  const resume = output?.documents?.resume;
+  const coverLetter = output?.documents?.coverLetter;
+  if (!isPlainObject(resume) || !isPlainObject(coverLetter)) return null;
+  const lines = [
+    '',
+    '## Application Output Evidence (APPOUTPUT)',
+    '- Scope: the complete, typed visible-text projection of the final accepted résumé and cover letter, retained in this process at final-output validation. `FULL` includes this section; `APPOUTPUT` selects it directly.',
+    '- Safety: this is an in-memory projection, never a renderer-provided path or a disk reread. Final prose is rendered as literal code and report redaction runs again at this boundary.',
+    '- Completeness: no role, bullet, project, skill group/item, education/credential line, or visible cover-letter header/body field is selected as a sample.',
+  ];
+  // A one-document job has no other document. Saying "none in final résumé"
+  // for a letter-only run read as a résumé that had lost its content.
   if (documentScope === 'cover') lines.push('', '### Résumé', '- Not part of this job: it produced only a cover letter. The résumé in the saved folder came from an earlier job and is not shown here.');
-  else lines.push(...resumeLines);
+  else lines.push(...renderResumeLines(resume));
   if (documentScope === 'resume') lines.push('', '### Cover Letter', '- Not part of this job: it produced only a résumé.');
-  else lines.push(...letterLines);
+  else lines.push(...renderLetterLines(coverLetter));
 
-  const metadata = output.metadata && typeof output.metadata === 'object' && !Array.isArray(output.metadata) ? output.metadata : {};
-  const resumeMetadata = metadata.resume && typeof metadata.resume === 'object' && !Array.isArray(metadata.resume) ? metadata.resume : {};
-  const letterMetadata = metadata.coverLetter && typeof metadata.coverLetter === 'object' && !Array.isArray(metadata.coverLetter) ? metadata.coverLetter : {};
-  const digests = metadata.digests && typeof metadata.digests === 'object' && !Array.isArray(metadata.digests) ? metadata.digests : {};
+  const metadata = isPlainObject(output.metadata) ? output.metadata : {};
+  const resumeMetadata = isPlainObject(metadata.resume) ? metadata.resume : {};
+  const letterMetadata = isPlainObject(metadata.coverLetter) ? metadata.coverLetter : {};
+  const digests = isPlainObject(metadata.digests) ? metadata.digests : {};
   const countLines = [
     ['Retained projection bytes', nonNegativeInteger(metadata.retainedBytes)],
     ['Résumé roles', nonNegativeInteger(resumeMetadata.roleCount)],

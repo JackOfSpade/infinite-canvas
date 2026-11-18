@@ -6,10 +6,12 @@ import { walkJsonLdJobPostings } from '../extractors/jobPostingJsonLd.js';
 import { decodeHtmlEntities } from '../../src/utils/textEncoding.js';
 import { normalizeCountry } from '../../src/utils/jobLocation.js';
 import { OFFICIAL_SEARCH_PARAM, extractAtsTenant, isOfficialCareersUrl, sameOwnershipHost, strictEmployerEqual } from './officialSourceHosts.js';
+import { CLOSED_POSTING_TEXT } from './officialPostingFields.js';
 import { extractOfficialPostingVendorCandidates } from './officialPostingVendorAdapters.js';
 import { extractOfficialPostingCurrentJobData, extractOfficialPostingPageData } from './officialPostingPageData.js';
 import { scanEmbeddedOfficialJobLinks } from './officialPostingEmbeddedLinks.js';
-import { extractOfficialCareersCmsFacts, phenomSearchForm, phenomSearchJobLinks } from './officialPostingCareersCms.js';
+import { extractOfficialCareersCmsFacts } from './officialPostingCareersCms.js';
+import { phenomSearchForm, phenomSearchJobLinks } from './officialPostingPhenom.js';
 import { scanOfficialPostingPaylocityInventory } from './officialPostingPaylocityLinks.js';
 import { scanOfficialPostingSsgNavigationInventory } from './officialPostingSsgNavigation.js';
 
@@ -132,7 +134,7 @@ function posting(values, options = {}) {
   const route = extractAtsTenant(sourceUrl, { html: options.html || '' });
   const validThrough = plain(values.validThrough);
   const now = typeof options.now === 'function' ? options.now() : options.now ?? Date.now();
-  const expiry = validThrough ? Date.parse(validThrough) : Infinity;
+  const expiry = Date.parse(validThrough);
   const employer = plain(values.employer);
   return {
     title: plain(values.title), employer,
@@ -141,7 +143,7 @@ function posting(values, options = {}) {
     identifier: identifier(values.identifier), validThrough, description: values.description,
     sourceUrl, officialApplyUrl: httpsUrl(values.officialApplyUrl, sourceUrl),
     ats: options.ats || route?.ats || '', tenant: options.tenant || route?.tenant || '',
-    isListed: values.isListed !== false, live: values.isListed !== false && Number.isFinite(Number(now)) && expiry >= Number(now),
+    isListed: values.isListed !== false, live: values.isListed !== false && Number.isFinite(Number(now)) && (!Number.isFinite(expiry) || expiry >= Number(now)),
   };
 }
 
@@ -191,7 +193,7 @@ function preferCompleteCurrentJob(html, jsonLd, options) {
     const valid = httpsUrl(value, options.sourceUrl); if (!valid) return '';
     const url = new URL(valid); url.pathname = url.pathname.replace(/\/+$/u, '') || '/'; return url.href;
   };
-  const closedText = value => /\b(?:no longer accepting applications|position has been filled|job is no longer available)\b/iu.test(value || '');
+  const closedText = value => CLOSED_POSTING_TEXT.test(value || '');
   let bound = false; let explicitlyClosed = false;
   const rawRecords = [];
   walkJsonLdJobPostings(html, raw => { rawRecords.push(raw); });

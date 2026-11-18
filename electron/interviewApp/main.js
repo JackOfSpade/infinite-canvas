@@ -206,7 +206,7 @@ if (!app.requestSingleInstanceLock()) {
         callText: practiceCallText,
         registry: getInterviewPracticeRegistry(),
         serviceOptions: {
-          callText: practiceCallText, planText: practicePlanText, registry: getInterviewPracticeRegistry(),
+          planText: practicePlanText,
           logger,
           inferenceWorkerPath: asarUnpacked(path.join(__dirname, 'inferenceWorkerThread.js')),
           // The packaged helper lives in Resources; the default only knows the project folder.

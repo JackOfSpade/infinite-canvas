@@ -51,7 +51,6 @@ export function createPracticeEar({
   let worker = null;
   let pro = null;
   let base = null;
-  let bidder = null;
   let note = null;
   const toneSamples = [];
   // Every measured answer span, kept so the call record can hold the prosody per turn.
@@ -76,21 +75,29 @@ export function createPracticeEar({
     })().catch(error => { opening = null; throw error; });
     return opening;
   }
-  async function workerOf() {
-    if (worker) return worker;
-    worker = createInference ? createInference({ smartTurnPath, tonePath }) : await inference({ smartTurnPath, tonePath });
-    return worker;
+  // Each loader caches its pending promise, so callers arriving together share one load. A
+  // failed load is forgotten so the next caller tries again.
+  const pending = {};
+  function loadOnce(key, load) {
+    pending[key] ??= load().catch(error => { pending[key] = null; throw error; });
+    return pending[key];
   }
-  async function prosodyOf() { pro ??= await prosody(); return pro; }
-  async function baselineOf() {
-    base ??= await baseline({ minSpeechMs });
-    return base;
+  function workerOf() {
+    return loadOnce('worker', async () => {
+      const created = createInference ? createInference({ smartTurnPath, tonePath }) : await inference({ smartTurnPath, tonePath });
+      // A worker that finishes loading after close() would never be closed by anyone else.
+      if (closed) {
+        try { created?.close?.(); } catch { /* worker already gone */ }
+        throw new Error('Practice ear is closed.');
+      }
+      worker = created;
+      return worker;
+    });
   }
-  async function floorOf() {
-    bidder ??= await floorBid({ baseline: await baselineOf() });
-    return bidder;
-  }
-  async function noteOf() { note ??= await toneNote(); return note; }
+  function prosodyOf() { return loadOnce('prosody', async () => { pro = await prosody(); return pro; }); }
+  function baselineOf() { return loadOnce('baseline', async () => { base = await baseline({ minSpeechMs }); return base; }); }
+  function floorOf() { return loadOnce('floor', async () => { return floorBid({ baseline: await baselineOf() }); }); }
+  function noteOf() { return loadOnce('note', async () => { note = await toneNote(); return note; }); }
   // composeVoiceNote is pure and cheap, so load it with the ear: the voice-note
   // path then has it in hand instead of waiting on a model mid-call.
   const noteLoaded = noteOf().catch(() => null);
@@ -106,7 +113,11 @@ export function createPracticeEar({
     const end = Number.isFinite(atMs) ? atMs : readerNow.writtenMs();
     const samples = readerNow.readMs(Math.max(0, end - 8000), Math.max(0, end));
     if (!samples.length) return 0.5;
-    const workerNow = await workerOf();
+    let workerNow;
+    try { workerNow = await workerOf(); } catch (error) {
+      if (closed) return 0.5;
+      throw error;
+    }
     const value = await workerNow.endOfTurn(samples);
     return Number.isFinite(value) ? value : 0.5;
   }

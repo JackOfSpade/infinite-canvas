@@ -54,4 +54,3 @@ export function ClaudePauseNotice({ className = '' }) {
   );
 }
 
-export default ClaudePauseNotice;

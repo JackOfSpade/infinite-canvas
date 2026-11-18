@@ -1,7 +1,7 @@
 import { StringDecoder } from 'node:string_decoder';
 import { applicationProgressStageLabel } from '../../src/utils/applicationProgress.js';
 import { isClaudeHeld, trackClaudeCall, waitForClaudeRelease } from './claudePause.js';
-import { createClaudeTaskActivity, describeClaudeSdkMessage } from './claudeTaskActivity.js';
+import { clipText, createClaudeTaskActivity, describeClaudeSdkMessage } from './claudeTaskActivity.js';
 import { APPLICATION_ROUTE_CLAUDE_RUNNER } from './applicationRuleTally.js';
 // Main-process Claude Code application runner.
 //
@@ -32,10 +32,10 @@ import { loadEditorialPlan, saveEditorialPlan } from './applicationEditorialPlan
 // and interview Q&A generation run on one tested model split.
 export { CLAUDE_SONNET_MODEL, CLAUDE_OPUS_MODEL };
 // The default profile, for any stage the table does not name.
-export const CLAUDE_APPLICATION_MODEL = CLAUDE_SONNET_MODEL;
+const CLAUDE_APPLICATION_MODEL = CLAUDE_SONNET_MODEL;
 export const CLAUDE_APPLICATION_EFFORT = 'high';
 export const CLAUDE_STAGE_PROFILES = APPLICATION_STAGE_PROFILES;
-// Shown on a job once DeepSeek credit runs out; the job continues on Claude.
+// The routes INFINITE_CANVAS_OFFLOAD_ROUTE may name.
 const OFFLOAD_ROUTES = new Set(['deepseek-flash', 'deepseek-pro']);
 const MODEL_FAMILIES = Object.freeze({
   [CLAUDE_SONNET_MODEL]: Object.freeze({ label: 'Sonnet', id: /^claude-sonnet-/ }),
@@ -108,12 +108,12 @@ export const CLAUDE_STAGE_TIMEOUT_MS = 45 * 60_000;
 // Appended to every CLI invocation so Claude replies in the format the app's
 // validator accepts (no prose around a JSON answer).
 export const CLAUDE_HANDOFF_SYSTEM_PROMPT = 'You are answering a structured handoff from a desktop application. When the message asks for a JSON object, reply with only that JSON object, optionally inside one json code fence, with no text before or after it. When it asks for plain text, reply with only the requested text.';
-export const CLAUDE_RUNNER_CONCURRENCY = 3;
+const CLAUDE_RUNNER_CONCURRENCY = 3;
 export const CLAUDE_MAX_RUNS_PER_JOB = 120;
 // Activity-only state updates (stream liveness) reach the UI at most this often per job.
 export const CLAUDE_ACTIVITY_EMIT_INTERVAL_MS = 5000;
 
-const OUTPUT_CAP_BYTES = 16 * 1024 * 1024;
+export const OUTPUT_CAP_BYTES = 16 * 1024 * 1024;
 const KILL_GRACE_MS = 5000;
 const HUMAN_STOP_STAGE = 'write-verify-human-stop';
 
@@ -130,10 +130,10 @@ const MESSAGES = Object.freeze({
 export const CLAUDE_SAFEGUARD_MESSAGE = 'Claude\'s safeguards stopped this request. This can be a false alarm on a normal job posting, so retrying may pass. The provider message is in the private run log.';
 
 /** The one resumed turn after the editorial plan failed schema validation. */
-export function buildEditorialPlanCorrectionPrompt(reason) {
+function buildEditorialPlanCorrectionPrompt(reason) {
   return [
     'Your previous JSON was rejected by the validator.',
-    `Validator reason: ${clip(reason, 300)}`,
+    `Validator reason: ${clipText(reason, 300)}`,
     'Reply with the COMPLETE corrected JSON object only, with no other text.',
     'It must contain exactly the keys thesis, paragraphs, omissions, qualification.',
     'Every paragraph must contain exactly point, jobNeed, evidenceIds, editorialNote.',
@@ -154,11 +154,6 @@ export class ClaudeRunnerError extends Error {
   }
 }
 
-function clip(value, max = 300) {
-  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
-  return text.length > max ? text.slice(0, max) : text;
-}
-
 // Ultracode is a setting, not an effort level: `--effort ultracode` would force
 // xhigh, while this setting leaves each stage's own effort in place.
 export const CLAUDE_ULTRACODE_SETTINGS = Object.freeze({ ultracode: true });
@@ -170,7 +165,7 @@ export const CLAUDE_WORKFLOW_UNFINISHED = 'CLAUDE_WORKFLOW_UNFINISHED';
 export const CLAUDE_WORKFLOW_UNFINISHED_MESSAGE = 'Claude\'s workflow did not finish, so its answer was not used.';
 
 /** A comma list or an array of tool names, trimmed and without blanks. */
-export function splitToolList(tools) {
+function splitToolList(tools) {
   return (Array.isArray(tools) ? tools : String(tools ?? '').split(','))
     .map(name => String(name).trim()).filter(Boolean);
 }
@@ -390,7 +385,7 @@ export function buildClaudeInputMessage({ text, pageImages } = {}) {
 }
 
 /** The last result of a stream-json run, with whether a workflow left it unfinished. */
-export function readClaudeStream(stdoutText) {
+function readClaudeStream(stdoutText) {
   const tasks = createClaudeBackgroundTasks();
   let last = null;
   let provisional = false;
@@ -454,7 +449,7 @@ export function classifyClaudeFailure({ parsed, stderr, exitCode } = {}) {
   const resultText = typeof parsed?.result === 'string' ? parsed.result : '';
   const stderrText = String(stderr ?? '');
   const combined = `${resultText}\n${stderrText}`;
-  const clipped = clip(resultText.trim() ? resultText : stderrText);
+  const clipped = clipText(resultText.trim() ? resultText : stderrText);
   const detail = { exitCode: exitCode ?? null, subtype: parsed?.subtype ?? null, apiErrorStatus: parsed?.apiErrorStatus ?? null,
     models: parsed?.models ?? [], durationMs: parsed?.durationMs ?? null };
   if (parsed?.apiErrorStatus === 429 || USAGE_RE.test(combined)) {
@@ -524,7 +519,7 @@ export function runClaudeStage({
     } catch (error) {
       reject(error?.code === 'ENOENT'
         ? new ClaudeRunnerError('CLAUDE_CLI_MISSING', MESSAGES.missing)
-        : new ClaudeRunnerError('CLAUDE_ERROR', `Claude Code could not start: ${clip(error?.message || error)}`));
+        : new ClaudeRunnerError('CLAUDE_ERROR', `Claude Code could not start: ${clipText(error?.message || error)}`));
       return;
     }
 
@@ -588,7 +583,7 @@ export function runClaudeStage({
 
     child.on('error', error => {
       if (error?.code === 'ENOENT') finish(new ClaudeRunnerError('CLAUDE_CLI_MISSING', MESSAGES.missing));
-      else finish(new ClaudeRunnerError('CLAUDE_ERROR', `Claude Code could not run: ${clip(error?.message || error)}`));
+      else finish(new ClaudeRunnerError('CLAUDE_ERROR', `Claude Code could not run: ${clipText(error?.message || error)}`));
     });
 
     child.stdout?.on('data', chunk => {
@@ -666,7 +661,7 @@ export function runClaudeStage({
         child.stdin.end(buildClaudeInputMessage({ text, pageImages }));
       } catch (error) {
         killChild();
-        finish(new ClaudeRunnerError('CLAUDE_ERROR', `Claude Code input could not be written: ${clip(error?.message || error)}`));
+        finish(new ClaudeRunnerError('CLAUDE_ERROR', `Claude Code input could not be written: ${clipText(error?.message || error)}`));
       }
     }
   });
@@ -721,7 +716,7 @@ function isEnoent(error) {
 function applicationError(error) {
   return new ClaudeRunnerError(
     'APPLICATION_ERROR',
-    clip(error?.message || String(error || 'Application step failed.')) || 'Application step failed.',
+    clipText(error?.message || String(error || 'Application step failed.')) || 'Application step failed.',
     error?.code,
   );
 }
@@ -830,37 +825,42 @@ function needsFreshSession(lane, handoff, key, provider = 'claude') {
 
 function sanitizeLane(value) {
   if (!value || typeof value !== 'object' || !SESSION_ID_RE.test(String(value.sessionId || ''))) return null;
+  return laneSnapshot(value);
+}
+
+// The stored shape of a lane; the key order is part of the state file.
+function laneSnapshot(lane) {
   return {
-    sessionId: value.sessionId,
-    started: value.started === true,
-    contextKey: typeof value.contextKey === 'string' ? value.contextKey : null,
-    stage: typeof value.stage === 'string' ? value.stage : null,
-    ...(value.provider === 'offload' ? { provider: 'offload' } : {}),
-    ...(value.editorialPlanned === true ? { editorialPlanned: true } : {}),
+    sessionId: lane.sessionId,
+    started: lane.started === true,
+    contextKey: typeof lane.contextKey === 'string' ? lane.contextKey : null,
+    stage: typeof lane.stage === 'string' ? lane.stage : null,
+    ...(lane.provider === 'offload' ? { provider: 'offload' } : {}),
+    ...(lane.editorialPlanned === true ? { editorialPlanned: true } : {}),
   };
 }
 
 // Errors may contain transport objects or a raw stream. Project only the
 // small result metadata needed to diagnose a failed invocation.
 function auditFailure(error) {
-  const failure = { code: clip(error?.code || 'CLAUDE_ERROR', 80), message: clip(error?.message || 'Claude run failed.', 400) };
+  const failure = { code: clipText(error?.code || 'CLAUDE_ERROR', 80), message: clipText(error?.message || 'Claude run failed.', 400) };
   const detail = error?.detail;
   if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
     const metadata = {};
     if (Number.isInteger(detail.exitCode) || (typeof detail.exitCode === 'string' && /^SIG[A-Z0-9]+$/u.test(detail.exitCode))) metadata.exitCode = detail.exitCode;
-    if (typeof detail.subtype === 'string') metadata.subtype = clip(detail.subtype, 100);
+    if (typeof detail.subtype === 'string') metadata.subtype = clipText(detail.subtype, 100);
     if (Number.isInteger(detail.apiErrorStatus) && detail.apiErrorStatus >= 100 && detail.apiErrorStatus <= 599) metadata.apiErrorStatus = detail.apiErrorStatus;
-    if (Array.isArray(detail.models)) metadata.models = detail.models.filter(model => typeof model === 'string').slice(0, 20).map(model => clip(model, 200));
+    if (Array.isArray(detail.models)) metadata.models = detail.models.filter(model => typeof model === 'string').slice(0, 20).map(model => clipText(model, 200));
     if (Number.isFinite(detail.durationMs) && detail.durationMs >= 0) metadata.durationMs = detail.durationMs;
     if (typeof detail.refusalCategory === 'string' && /^[a-z][a-z_]{0,79}$/u.test(detail.refusalCategory)) metadata.refusalCategory = detail.refusalCategory;
     if (typeof detail.requestId === 'string' && /^req_[A-Za-z0-9]{8,120}$/u.test(detail.requestId)) metadata.requestId = detail.requestId;
     if (typeof detail.messageId === 'string' && /^msg_[A-Za-z0-9]{8,120}$/u.test(detail.messageId)) metadata.messageId = detail.messageId;
-    if (typeof detail.reason === 'string') metadata.reason = clip(detail.reason, 300);
-    if (Array.isArray(detail.errors)) metadata.errors = detail.errors.filter(value => typeof value === 'string').slice(0, 20).map(value => clip(value, 2000));
-    if (typeof detail.refusalEvent === 'string') metadata.refusalEvent = clip(detail.refusalEvent, 100);
-    if (typeof detail.stopReason === 'string') metadata.stopReason = clip(detail.stopReason, 100);
+    if (typeof detail.reason === 'string') metadata.reason = clipText(detail.reason, 300);
+    if (Array.isArray(detail.errors)) metadata.errors = detail.errors.filter(value => typeof value === 'string').slice(0, 20).map(value => clipText(value, 2000));
+    if (typeof detail.refusalEvent === 'string') metadata.refusalEvent = clipText(detail.refusalEvent, 100);
+    if (typeof detail.stopReason === 'string') metadata.stopReason = clipText(detail.stopReason, 100);
     for (const key of ['assistantStopReasons', 'assistantErrors']) {
-      if (Array.isArray(detail[key])) metadata[key] = detail[key].filter(value => typeof value === 'string').slice(0, 20).map(value => clip(value, 100));
+      if (Array.isArray(detail[key])) metadata[key] = detail[key].filter(value => typeof value === 'string').slice(0, 20).map(value => clipText(value, 100));
     }
     if (Object.keys(metadata).length) failure.detail = metadata;
   }
@@ -930,7 +930,6 @@ export function createClaudeApplicationRunner({
     return typeof level === 'string' && level ? level : 'high';
   };
 
-
   // Deletes the stored turns of offload sessions that will never be resumed.
   function removeOffloadFiles(ids) {
     if (!offloadStage || !offloadDir) return Promise.resolve();
@@ -991,7 +990,7 @@ export function createClaudeApplicationRunner({
   function logRun(jobId, canvasFilePath, record) {
     if (typeof runLogPath !== 'function') return Promise.resolve();
     const logError = error => {
-      logger?.warn?.(`[ClaudeRunner] could not write the Claude run log: ${clip(error?.code || 'LOG_WRITE_FAILED', 80)}`);
+      logger?.warn?.(`[ClaudeRunner] could not write the Claude run log: ${clipText(error?.code || 'LOG_WRITE_FAILED', 80)}`);
       return new ClaudeRunnerError('CLAUDE_LOG_ERROR', 'The private Claude audit log could not be written. Check the log folder permissions and available disk space, then retry.');
     };
     let file;
@@ -1046,7 +1045,7 @@ export function createClaudeApplicationRunner({
     try {
       dirs = await fsImpl.readdir(root, { withFileTypes: true });
     } catch (error) {
-      if (error?.code !== 'ENOENT') logger?.warn?.(`[ClaudeRunner] could not list Claude projects: ${clip(error?.code || error?.message, 80)}`);
+      if (error?.code !== 'ENOENT') logger?.warn?.(`[ClaudeRunner] could not list Claude projects: ${clipText(error?.code || error?.message, 80)}`);
       return;
     }
     for (const dirent of dirs) {
@@ -1057,7 +1056,7 @@ export function createClaudeApplicationRunner({
           await fsImpl.rm(path.join(dir, `${id}.jsonl`), { force: true });
           await fsImpl.rm(path.join(dir, id), { force: true, recursive: true });
         } catch (error) {
-          logger?.warn?.(`[ClaudeRunner] could not remove a Claude session transcript: ${clip(error?.code || error?.message, 80)}`);
+          logger?.warn?.(`[ClaudeRunner] could not remove a Claude session transcript: ${clipText(error?.code || error?.message, 80)}`);
         }
       }
     }
@@ -1075,7 +1074,7 @@ export function createClaudeApplicationRunner({
     try {
       await removeTranscripts(ids);
     } catch (error) {
-      logger?.warn?.(`[ClaudeRunner] could not remove Claude session transcripts: ${clip(error?.code || error?.message, 80)}`);
+      logger?.warn?.(`[ClaudeRunner] could not remove Claude session transcripts: ${clipText(error?.code || error?.message, 80)}`);
     }
   }
   let persistChain = Promise.resolve();
@@ -1163,9 +1162,7 @@ export function createClaudeApplicationRunner({
       const out = {};
       for (const [laneKey, lane] of lanes) {
         if (!lane.sessionId) continue;
-        out[laneKey] = { sessionId: lane.sessionId, started: lane.started === true, contextKey: lane.contextKey ?? null, stage: lane.stage ?? null,
-          ...(lane.provider === 'offload' ? { provider: 'offload' } : {}),
-          ...(lane.editorialPlanned === true ? { editorialPlanned: true } : {}) };
+        out[laneKey] = laneSnapshot(lane);
       }
       if (Object.keys(out).length) sessionSnapshot[jobId] = out;
     }
@@ -1177,11 +1174,16 @@ export function createClaudeApplicationRunner({
       await fsImpl.mkdir(path.dirname(stateFile), { recursive: true });
       tempCounter += 1;
       const temp = `${stateFile}.${process.pid}.${tempCounter}.tmp`;
-      await fsImpl.writeFile(temp, body, 'utf8');
-      await fsImpl.rename(temp, stateFile);
+      try {
+        await fsImpl.writeFile(temp, body, 'utf8');
+        await fsImpl.rename(temp, stateFile);
+      } catch (error) {
+        await Promise.resolve(fsImpl.rm?.(temp, { force: true })).catch(() => {});
+        throw error;
+      }
     };
     persistChain = persistChain.then(write).catch(error => {
-      logger?.warn?.(`[ClaudeRunner] could not persist failed applications: ${clip(error?.code || error?.message || error, 80)}`);
+      logger?.warn?.(`[ClaudeRunner] could not persist failed applications: ${clipText(error?.code || error?.message || error, 80)}`);
     });
     return persistChain;
   }
@@ -1191,7 +1193,7 @@ export function createClaudeApplicationRunner({
     try {
       raw = await fsImpl.readFile(stateFile, 'utf8');
     } catch (error) {
-      if (error?.code !== 'ENOENT') logger?.warn?.(`[ClaudeRunner] could not read failed applications: ${clip(error?.code || error?.message, 80)}`);
+      if (error?.code !== 'ENOENT') logger?.warn?.(`[ClaudeRunner] could not read failed applications: ${clipText(error?.code || error?.message, 80)}`);
       return;
     }
     let data;
@@ -1244,7 +1246,7 @@ export function createClaudeApplicationRunner({
         ...(entry.code ? { code: String(entry.code) } : {}),
         ...(entry.message ? { message: String(entry.message) } : {}),
         ...(upgradeModel ? { upgradeModel } : {}),
-          ...(typeof entry.retryModel === 'string' && typeof entry.retryEffort === 'string'
+        ...(typeof entry.retryModel === 'string' && typeof entry.retryEffort === 'string'
           ? { retryModel: entry.retryModel, retryEffort: entry.retryEffort } : retryProfile(jobId, entry.stage)),
         ...(typeof entry.failedModel === 'string' && typeof entry.failedEffort === 'string'
           ? { failedModel: entry.failedModel, failedEffort: entry.failedEffort } : {}),
@@ -1370,7 +1372,7 @@ export function createClaudeApplicationRunner({
           try { await summaryChain; } catch (logError) { cause = logError; }
           const failure = cause instanceof ClaudeRunnerError
             ? cause
-            : new ClaudeRunnerError('CLAUDE_ERROR', clip(cause?.message || 'Claude run failed.') || 'Claude run failed.', cause?.code);
+            : new ClaudeRunnerError('CLAUDE_ERROR', clipText(cause?.message || 'Claude run failed.') || 'Claude run failed.', cause?.code);
           // A parallel lane or planning call can differ from entry.stage.
           failure.failedStage = stage;
           await logRun(jobId, canvasFilePath, { ...record, event: 'failed', error: auditFailure(failure),
@@ -1391,7 +1393,7 @@ export function createClaudeApplicationRunner({
       const laneKey = matchTaskId || 'main';
       const key = freshContextKeyOf(handoff);
       const lane = laneFor(jobId, laneKey);
-      const provider = offloadRoute(stage) ?'offload' : 'claude';
+      const provider = offloadRoute(stage) ? 'offload' : 'claude';
       // A provider switch forces a fresh session, which has no earlier turns, so
       // the text must carry the whole task rather than only a correction prompt.
       const providerSwitch = lane.started && (lane.provider === 'offload' ? 'offload' : 'claude') !== provider;
@@ -1434,7 +1436,7 @@ export function createClaudeApplicationRunner({
                 // One schema-correction turn in the same plan session. A thrown
                 // planner call never reaches here, so it is never retried.
                 await logRun(jobId, canvasFilePath, { version: 2, jobId, stage: 'editorial-plan', ...planned.record,
-                  event: 'editorial-plan-retry', reason: clip(firstError?.message, 300) });
+                  event: 'editorial-plan-retry', reason: clipText(firstError?.message, 300) });
                 planned = await invokeLoggedStage({ stage: 'editorial-plan', text: buildEditorialPlanCorrectionPrompt(firstError?.message),
                   sessionId: planSessionId, resume: true, handoff, matchTaskId });
                 planRecord = planned.record;
@@ -1461,7 +1463,7 @@ export function createClaudeApplicationRunner({
           }
         } catch (error) {
           if (error instanceof ClaudeRunnerError) throw error;
-          const failure = new ClaudeRunnerError('CLAUDE_EDITORIAL_PLAN_ERROR', 'The private editorial outline could not be validated or saved. Review the diagnostic archive before retrying.', { reason: clip(error?.message, 300) });
+          const failure = new ClaudeRunnerError('CLAUDE_EDITORIAL_PLAN_ERROR', 'The private editorial outline could not be validated or saved. Review the diagnostic archive before retrying.', { reason: clipText(error?.message, 300) });
           failure.failedCall = 'editorial-plan';
           await logRun(jobId, canvasFilePath, { version: 2, jobId, stage: 'editorial-plan', ...planRecord,
             event: 'editorial-plan-error', error: auditFailure(failure) });
@@ -1475,7 +1477,7 @@ export function createClaudeApplicationRunner({
         lane.started = false;
         if (replacedId && replacedId !== lane.sessionId) {
           removeTranscripts([replacedId]).catch(error => {
-            logger?.warn?.(`[ClaudeRunner] could not remove a replaced Claude session transcript: ${clip(error?.code || error?.message, 80)}`);
+            logger?.warn?.(`[ClaudeRunner] could not remove a replaced Claude session transcript: ${clipText(error?.code || error?.message, 80)}`);
           });
         }
       };
@@ -1659,7 +1661,7 @@ export function createClaudeApplicationRunner({
         // The editorial-plan validator reason is fixed schema text (field
         // labels and limits, never plan prose), so bug reports can carry it.
         const planReason = error.code === 'CLAUDE_EDITORIAL_PLAN_ERROR' && typeof error.detail?.reason === 'string'
-          ? ` reason=${clip(error.detail.reason.replace(/\s+/g, ' '), 200)}` : '';
+          ? ` reason=${clipText(error.detail.reason.replace(/\s+/g, ' '), 200)}` : '';
         logger?.error?.(`[ClaudeRunner] job=${jobId.slice(0, 8)} stage=${entry.stage ?? 'none'} code=${error.code}${planReason}`);
         await persist();
       } finally {

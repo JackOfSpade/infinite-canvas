@@ -278,6 +278,16 @@ export default [
     },
   },
   {
+    name: 'interview AI benchmark: an empty or torn lock file reads as an unverifiable owner, not a raw parse error',
+    async run() {
+      await withOutput(async outDir => {
+        await fs.writeFile(path.join(outDir, '.benchmark.lock'), '');
+        await assert.rejects(runBenchmark({ cards, cases, configs: [baseConfig], outDir, createTransport: stubFactory([]) }),
+          /Cannot verify output lock owner\./);
+      });
+    },
+  },
+  {
     name: 'interview AI benchmark: a call failure stops one configuration and unavailable CLI spends nothing',
     async run() {
       await withOutput(async outDir => {

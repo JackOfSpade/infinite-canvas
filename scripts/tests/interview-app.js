@@ -336,6 +336,11 @@ const tests = [
         const rogue = createCareerFileConversionService({ dataRoot: data, checkSource: async () => {}, readWithAi: async () => '',
           convert: async ({ filePaths }) => ({ files: filePaths.map(() => ({ ok: true, method: 'ai', textPath: '/etc/passwd' })) }) });
         assert.equal((await rogue.convertFiles({ nodeId: 'n', filePaths: ['/x/a.pdf'] })).files[0].status, 'refused');
+        // A converted file whose name starts with two dots is still inside the private folder.
+        const dotted = createCareerFileConversionService({ dataRoot: data, checkSource: async () => {}, readWithAi: async () => '',
+          convert: async () => ({ files: [{ ok: true, method: 'ai', textPath: path.join(root, '..resume.txt') }, { ok: true, method: 'ai', textPath: root }] }) });
+        const dottedReply = await dotted.convertFiles({ nodeId: 'n', filePaths: ['/x/a.png', '/x/b.png'] });
+        assert.deepEqual(dottedReply.files.map(file => file.status), ['converted', 'refused'], 'the root itself is never a converted file');
         // A whole-converter failure is reported on every file, not as success.
         const broken = createCareerFileConversionService({ dataRoot: data, checkSource: async () => {}, readWithAi: async () => '',
           convert: async () => { throw new Error('boom'); } });
@@ -428,6 +433,46 @@ const tests = [
       assert.match(main, /registerCareerConvertedInputRoot/u);
       assert.doesNotMatch(main, /Career data \(text\)/u, 'the chooser no longer filters to text');
       assert.match(read('electron/ipc/ipcUtils.js'), /'convert-interview-career-files'/u, 'a long conversion pauses at quit like the other career work');
+    },
+  },
+  {
+    name: 'interview app: a burst of keystrokes in the interview name box ends in a save of the newest state',
+    async run() {
+      const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');
+      const entryDirectory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-interview-app-entry-'));
+      const entry = path.join(entryDirectory, 'entry.mjs');
+      await fs.promises.writeFile(entry, `export { default as InterviewHelperApp } from ${JSON.stringify(path.resolve('src/interview-app/InterviewHelperApp.jsx'))};\n`);
+      let bundle = null;
+      try {
+        await withDom(async window => {
+          // react-dom decides whether it can use input events when it loads, so the bundle loads inside the DOM.
+          bundle = await bundleComponent(entry, {});
+          const saved = [];
+          const first = { id: 'i1', title: '', createdAt: 1, data: emptyInterviewData() };
+          window.interviewAppAPI = {
+            loadState: async () => ({ sessions: [first], selectedId: 'i1', appliedJobsFolder: null }),
+            saveState: async next => { saved.push(next); await new Promise(resolve => setTimeout(resolve, 5)); },
+          };
+          const root = bundle.module.createRoot(window.document.getElementById('root'));
+          const { act } = bundle.module;
+          try {
+            await act(async () => { root.render(bundle.module.React.createElement(bundle.module.InterviewHelperApp)); await new Promise(resolve => setTimeout(resolve, 20)); });
+            const input = window.document.querySelector('#interview-name-i1');
+            assert.ok(input, 'the name box renders for the loaded interview');
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            await act(async () => {
+              for (const text of ['A', 'Ac', 'Acm', 'Acme']) { setter.call(input, text); input.dispatchEvent(new window.Event('input', { bubbles: true })); }
+            });
+            await act(async () => { await new Promise(resolve => setTimeout(resolve, 60)); });
+            assert.ok(saved.length >= 1, 'typing saves');
+            assert.equal(saved.at(-1).sessions[0].title, 'Acme', 'the last write carries the newest title');
+            assert.ok(saved.every(next => next.sessions[0].title === 'Acme'), 'queued writes send the newest state, not each stale step');
+          } finally { await act(async () => root.unmount()); }
+        });
+      } finally {
+        if (bundle) await bundle.dispose();
+        await fs.promises.rm(entryDirectory, { recursive: true, force: true });
+      }
     },
   },
 ];

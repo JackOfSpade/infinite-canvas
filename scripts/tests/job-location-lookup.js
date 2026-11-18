@@ -12,7 +12,6 @@ import {
   applyLookedUpLocation,
   buildJobLocationLookupPrompt,
   buildJobLocationLookupRequest,
-  classifyOfficialSourceHost,
   companiesAgree,
   evaluateLookupRow,
   jobLocationLookupId,
@@ -24,6 +23,7 @@ import {
   selectLookupRequests,
   titlesPlausiblyAgree,
 } from '../../electron/ipc/jobLocationLookup.js';
+import { classifyOfficialSourceHost } from '../../electron/ipc/officialSourceHosts.js';
 
 const residences = { usa: { country: 'United States', city: 'Austin', subdivision: 'TX' }, canada: { country: 'Canada', city: 'Toronto', subdivision: 'ON' } };
 

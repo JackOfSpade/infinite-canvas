@@ -1140,6 +1140,26 @@ export default [
     },
   },
   {
+    name: 'docUtils.readPlainTextDocument: a file that grows past the size cap after the stat is still refused',
+    run: async () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-plain-text-grow-'));
+      const file = path.join(dir, 'grown.txt');
+      const realStat = fs.promises.stat;
+      try {
+        fs.writeFileSync(file, 'a'.repeat(4 * 1024 * 1024 + 10));
+        fs.promises.stat = async (...args) => {
+          const stats = await realStat.apply(fs.promises, args);
+          return Object.assign(Object.create(Object.getPrototypeOf(stats)), stats, { size: 100 });
+        };
+        assert(await readPlainTextDocument(file) === null, 'the bytes actually read are bounded, not only the stat size');
+        return { ok: true };
+      } finally {
+        fs.promises.stat = realStat;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'docUtils.readPlainTextDocument: .docx and .pdf (and every other non-plain-text type) defer to the AI transcription path',
     run: async () => {
       const dir = fs.mkdtempSync(path.join('/tmp', 'ic-career-file-text-'));
@@ -1534,14 +1554,25 @@ export default [
     name: 'settings: mergeSettingsSection is a plain top-level shallow merge',
     run: () => {
       const current = { provider: 'claude', anthropicApiKey: 'x', nested: { a: 1, b: 2 } };
-      const merged = mergeSettingsSection('ai', current, { anthropicApiKey: 'y' });
+      const merged = mergeSettingsSection(current, { anthropicApiKey: 'y' });
       assert(merged.anthropicApiKey === 'y' && merged.provider === 'claude',
         'an unrelated sibling key survives a partial update');
-      const replaced = mergeSettingsSection('ai', current, { nested: { a: 99 } });
+      const replaced = mergeSettingsSection(current, { nested: { a: 99 } });
       assert(JSON.stringify(replaced.nested) === JSON.stringify({ a: 99 }),
         'a nested object key is replaced wholesale, not deep-merged — there is no more per-section special casing');
-      assert(JSON.stringify(mergeSettingsSection('ai', null, { x: 1 })) === JSON.stringify({ x: 1 }),
+      assert(JSON.stringify(mergeSettingsSection(null, { x: 1 })) === JSON.stringify({ x: 1 }),
         'a missing current section merges onto an empty object rather than throwing');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'settings: update-settings refuses dotted section names that would reach nested main-process fields',
+    run: async () => {
+      const { isRendererWritableSection } = await import('../../electron/ipc/settings.js');
+      assert(isRendererWritableSection('marketplaceWatchUrls') === true, 'the watch-url section is writable');
+      for (const name of ['jobs.diceApiKey', 'application.protocol', 'jobs.glassdoorLocIds', 'other', '', null, 7]) {
+        assert(isRendererWritableSection(name) === false, `${String(name)} is not a generic writable section`);
+      }
       return { ok: true };
     },
   },
@@ -2178,5 +2209,21 @@ export default [
 
       return { ok: true, inputBytes: inputBytes.length, outputBytes: outputBytes.length };
     },
-  }
+  },
+  {
+    name: 'achievementLedger: a word that only starts like a month is not read as a date',
+    run: () => {
+      const careerData = '===== FILE: a.txt =====\nDec 2023 and Mar 2024. Marketing 2010 plan.';
+      const metric = {
+        isNumeric: true, baselineValue: 10, baselineLabel: 'Mar 2019',
+        endpointValue: 5, endpointLabel: 'Dec 2023', unit: 'USD', direction: 'decrease',
+      };
+      const raw = { achievements: [{
+        id: 'd1', kind: 'delta', roleAnchor: 'CFO, Acme', strength: 50, attribution: 'led', confidence: 'high', caveats: '',
+        claim: 'Reduced spend', derivation: 'spend', metric, evidence: [],
+      }], gaps: [] };
+      const { stats } = computeLedger(raw, careerData);
+      assert(stats.dateMisses === 1, 'Marketing 2010 must not widen the corpus date span back to 2010');
+    },
+  },
 ];

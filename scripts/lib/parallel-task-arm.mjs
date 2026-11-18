@@ -137,8 +137,9 @@ export async function runParallelTask({ input, processor = 'core', key, fetch: f
         return { text, runId, processor, durationMs: now() - started, basisCount: taskBasisCount(output) };
       }
       if (report.status >= 400 && !notReady) throw taskError(PARALLEL_TASK_ERRORS.REPLY, `Parallel task result failed (HTTP ${report.status}).`);
-      const wait = Math.min(interval, 2000, budget - (now() - started));
-      if (wait <= 0) throw stoppedError();
+      const remaining = budget - (now() - started);
+      if (remaining <= 0) throw stoppedError();
+      const wait = Math.min(interval, 2000, remaining);
       // Not unref'd: while a run is pending this sleep can be the only thing keeping the process alive.
       await new Promise(resolve => { setTimeout(resolve, wait); });
       if (controller.signal.aborted) throw stoppedError();

@@ -358,6 +358,15 @@ export default [
     await assert.rejects(() => make('CLAUDE_CANCELLED').callText('C', { claudeStage: 'qa-write' }), error => error.code === 'CLAUDE_CANCELLED');
     assert.equal(runs.length, 0, 'Claude was never called');
   } },
+  { name: 'interview Q&A offload: an empty offload reply fails loudly and Claude never answers a routed stage', async run() {
+    const runs = [];
+    const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
+      runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; },
+      routeFor: () => ({ route: 'deepseek-pro', reasoning: 'high' }),
+      offloadCall: async () => null });
+    await assert.rejects(() => transport.callText('P', { claudeStage: 'qa-write' }), error => error.code === 'OFFLOAD_EMPTY_REPLY');
+    assert.equal(runs.length, 0, 'Claude was never called');
+  } },
   { name: 'interview Q&A offload: rejected offload replies are resent statelessly to DeepSeek and never escalate to Claude', async run() {
     const runs = []; const offloads = [];
     const replies = ['{"ok":false}', '{"ok":false}', '{"ok":true}'];

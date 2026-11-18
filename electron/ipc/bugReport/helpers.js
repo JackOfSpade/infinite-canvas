@@ -87,7 +87,7 @@ export function redactReportOpaqueIds(value) {
  * before the text is rendered.
  */
 export function projectReportDiagnostic(value, fallback = 'not recorded', max = 240) {
-  const normalized = redactReportOpaqueIds(redactReportLogSecrets(redactReportLocalPathsInText(redactReportUrlsInText(value))))
+  const normalized = redactReportText(value)
     .replace(/[\r\n\t]+/g, ' ')
     .replace(/\s+/g, ' ')
     .replace(/\\/g, '\\\\')
@@ -96,6 +96,34 @@ export function projectReportDiagnostic(value, fallback = 'not recorded', max = 
     .trim();
   if (!normalized) return fallback;
   return normalized.length > max ? `${normalized.slice(0, Math.max(1, max - 1))}…` : normalized;
+}
+
+/** URLs, then local paths, then credential forms, then opaque ids. */
+export function redactReportText(value) {
+  return redactReportOpaqueIds(redactReportLogSecrets(redactReportLocalPathsInText(redactReportUrlsInText(value))));
+}
+
+/** Upper-cased filter-code tokens, split on plus, whitespace and comma. */
+export function reportFilterCodes(filterCode) {
+  return String(filterCode || '').trim().toUpperCase().split(/[+\s,]+/).filter(Boolean);
+}
+
+/**
+ * Redacted, literal prose for a report: control characters are removed and
+ * line endings become LF. Trailing spaces before a newline are stripped only
+ * when asked.
+ */
+export function sanitizeReportProse(value, { stripTrailingSpaces = false } = {}) {
+  if (typeof value !== 'string') return '';
+  // eslint-disable-next-line no-control-regex
+  const text = redactReportText(value).replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0B-\x1F\x7F]/g, '');
+  return (stripTrailingSpaces ? text.replace(/[ \t]+\n/g, '\n') : text).trim();
+}
+
+/** Indented Markdown code cannot be closed by its content, so model markup stays literal. */
+export function indentedReportCode(text, indent) {
+  const pad = ' '.repeat(indent);
+  return text.split('\n').map(line => `${pad}${line}`).join('\n');
 }
 
 /** Browser/provider/page-derived text is untrusted account content; retain only presence. */
@@ -203,6 +231,15 @@ export function formatAge(ts) {
   return h ? `${h}h${mn}m ago` : `${mn}m ago`;
 }
 
+// Absolute ISO time plus whole seconds ago. A missing, zero or out-of-range
+// timestamp (a hand-edited or corrupt cache value) returns the fallback instead
+// of throwing from toISOString and aborting the report.
+function isoWithAge(ts, fallback) {
+  const date = ts ? new Date(ts) : null;
+  if (!date || !Number.isFinite(date.getTime())) return fallback;
+  return `${date.toISOString()} (${Math.round((Date.now() - ts) / 1000)}s ago)`;
+}
+
 // Depth-first walk over a canvas node tree, descending into every node's nested
 // `data.canvasData.nodes` (grouped sub-canvases) — the same type-agnostic
 // recursion the navigation/serialization layers use. Invokes `fn(node)` for each
@@ -249,23 +286,10 @@ export const modelTag = (model, fallback) => {
   return ` · model: \`${model}\`${suffix}`;
 };
 
-// Produce a short but meaningful identifier for any node ID.
-// UUID-style IDs (e.g. "3539d90c-e09d-…") are unique in their first segment,
-// so we show the first 8 chars. All other IDs (e.g. "job-1779484861758-job-0",
-// "job-1779484861758-cat-2-buc-1") embed a shared timestamp prefix that makes
-// the first 8 chars identical across every job node — we show the last 8 chars
-// instead so the unique suffix ("-job-0", "-buc-1") is visible.
-export const shortId = (id) => {
-  const s = String(id);
-  if (s.length <= 8) return s;
-  if (/^[0-9a-f]{8}-/.test(s)) return s.slice(0, 8); // UUID: first segment is unique
-  return `…${s.slice(-8)}`;                           // timestamp-prefixed: show suffix
-};
-
 // Reports need to relate rows from the same export without publishing a node,
 // job, or run token that can be joined back to local state.  Keep this here so
 // every report renderer uses the same stable, one-way label rather than
-// accidentally reintroducing a UUID prefix through `shortId`.
+// accidentally reintroducing a UUID prefix.
 export const reportCorrelationDigest = (value, fallback = 'not recorded') => {
   if (typeof value !== 'string' || !value) return fallback;
   return `#${crypto.createHash('sha256').update(value).digest('hex').slice(0, 10)}`;
@@ -355,9 +379,7 @@ export const renderSessionRows = (platforms, cache) => platforms.map(p => {
         : ambiguousShell ? '⚠️ true (AMBIGUOUS shell — no positive logged-in signal; may be a client-rendered login page)'
           : entry?.restoredFromDisk ? '✅ true (restored from prior process)' : '✅ true')
     : entry ? '❌ false' : '— (no entry)';
-  const lastConfirmed = entry?.ts
-    ? `${new Date(entry.ts).toISOString()} (${Math.round((Date.now() - entry.ts) / 1000)}s ago)`
-    : '—';
+  const lastConfirmed = isoWithAge(entry?.ts, '—');
   const reason = entry?.lastReason ? closeReportDiagnostic(entry.lastReason, 'recorded') : '—';
   return `| \`${p.id}\` | ${p.name} | ${connected} | ${lastConfirmed} | ${reason} |`;
 }).join('\n');
@@ -431,9 +453,7 @@ export const renderSessionTraceBlocks = (platforms, cache) => platforms.map(p =>
     // three-week-old preserved negative from reading as if it happened this
     // session, and keeps the two timestamp styles in this section consistent.
     const negTs = Number(negative.ts) || null;
-    const negAge = negTs
-      ? `${new Date(negTs).toISOString()} (${Math.round((Date.now() - negTs) / 1000)}s ago)`
-      : 'time not recorded';
+    const negAge = isoWithAge(negTs, 'time not recorded');
     // This is historical evidence, not a second current verdict. The current
     // row above is connected, but that state may be freshly verified, restored,
     // or defaulted from the absence of a logout signal. Describe only the cache

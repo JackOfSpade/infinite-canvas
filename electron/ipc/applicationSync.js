@@ -118,7 +118,7 @@ function stopEditWatchers() {
 
 function isInside(parent, child) {
   const relative = path.relative(parent, child);
-  return !!relative && !relative.startsWith('..') && !path.isAbsolute(relative);
+  return !!relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
 function canonicalPathKey(value) {
@@ -1504,9 +1504,6 @@ export async function __readApplicationSyncWorkspaceHtmlForTests(workspace) {
 }
 export async function __assertApplicationSyncWorkspaceSnapshotForTests(workspace, expectedHtml) {
   return assertWorkspaceHtmlUnchanged(workspace, expectedHtml);
-}
-export function __applicationPanelSha256ForTests(html, documentKind) {
-  return applicationPanelSha256(html, documentKind);
 }
 export function __withSyncedGenerationAuditSavedArtifactsForTests(data, options) {
   return withSyncedGenerationAuditSavedArtifacts(data, options);

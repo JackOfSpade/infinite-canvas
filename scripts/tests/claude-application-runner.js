@@ -1276,6 +1276,29 @@ export default [
     },
   },
   {
+    name: 'claude runner driver: a failed state write leaves no temporary file behind',
+    async run() {
+      const stateFile = tempStateFile();
+      const realFs = fs.promises;
+      const fsImpl = {
+        mkdir: (...args) => realFs.mkdir(...args),
+        writeFile: (...args) => realFs.writeFile(...args),
+        rename: async () => { const error = new Error('busy'); error.code = 'EBUSY'; throw error; },
+        readFile: (...args) => realFs.readFile(...args),
+        readdir: (...args) => realFs.readdir(...args),
+        rm: (...args) => realFs.rm(...args),
+      };
+      const script = scriptedApi([{ handoffCode: 'code-1', stage: 'draft', prompt: 'prompt one' }]);
+      const logger = quietLogger();
+      const runStage = async () => { throw new ClaudeRunnerError('CLAUDE_USAGE_LIMIT', USAGE_MESSAGE); };
+      const runner = createClaudeApplicationRunner({ api: script.api, stateFile, logger, runStage, fsImpl });
+      runner.ensure({ jobId: 'job-tmp-1', canvasFilePath: '/c.canvas' });
+      await waitFor(() => logger.warns.some(warn => warn.includes('could not persist failed applications')), 'persist warning');
+      await runner.shutdown();
+      assert.deepEqual(fs.readdirSync(path.dirname(stateFile)), [], 'the temporary file is removed');
+    },
+  },
+  {
     name: 'claude runner driver: a usage-limit failure persists, is never re-run by ensure, survives reload, and retry re-runs',
     async run() {
       const stateFile = tempStateFile();

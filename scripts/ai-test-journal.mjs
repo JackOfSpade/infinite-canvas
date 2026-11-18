@@ -125,10 +125,11 @@ function sleepSync(ms) {
 /** Several runs can share the doc, so each rewrite holds a short lock. */
 function withDocLock(docPath, work) {
   const lock = `${docPath}.lock`;
-  for (let attempt = 0; attempt < 200; attempt += 1) {
+  let held = false;
+  for (let attempt = 0; attempt < 200 && !held; attempt += 1) {
     try {
       fs.mkdirSync(lock);
-      try { return work(); } finally { fs.rmSync(lock, { recursive: true, force: true }); }
+      held = true;
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error;
       try {
@@ -137,7 +138,8 @@ function withDocLock(docPath, work) {
       sleepSync(25);
     }
   }
-  return work();
+  if (!held) throw new Error('The test-run doc is locked by another run.');
+  try { return work(); } finally { fs.rmSync(lock, { recursive: true, force: true }); }
 }
 
 function writeAtomic(file, text, mode) {

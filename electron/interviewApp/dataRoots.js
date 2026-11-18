@@ -7,8 +7,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const INTERVIEW_APP_PROFILE_DIRECTORY = 'Interview Helper';
-export const SHARED_DATA_DIRECTORY = 'infinite-canvas';
+const INTERVIEW_APP_PROFILE_DIRECTORY = 'Interview Helper';
+const SHARED_DATA_DIRECTORY = 'infinite-canvas';
 
 export function interviewAppDataRoots({ appDataPath, env = {} } = {}) {
   if (typeof appDataPath !== 'string' || !path.isAbsolute(appDataPath)) throw new TypeError('Interview Helper needs the application data path.');

@@ -11,11 +11,11 @@ import { CareerConversionList } from './CareerConversionList';
 import { isPassThroughCareerName, planCareerConversionResults } from './careerConversionText';
 import { approveCareerImportCompilation, beginCareerImportCompilation, failCareerImportCompilation } from '../utils/jobCareerCompilationReceipt';
 import { generateId } from '../utils/idGenerator';
+import { RUN_ID_RE } from './sessions';
 import { canonicalInterviewJobUrl, interviewLaunchErrorMessage, interviewPreparationInputDigest, validInterviewPreparationBrief } from '../utils/interviewHelper';
 
-const SNAPSHOT_ID_RE = /^[a-f0-9]{64}$/u;
-const DIGEST_RE = /^[a-f0-9]{64}$/u;
-const snapshotId = value => typeof value === 'string' && SNAPSHOT_ID_RE.test(value) ? value : null;
+const SHA_256_HEX_RE = /^[a-f0-9]{64}$/u;
+const snapshotId = value => typeof value === 'string' && SHA_256_HEX_RE.test(value) ? value : null;
 // File names and labels are retained in the saved interview. Do not
 // silently remove invisible characters: doing so can make the displayed value
 // differ from the file/value that the user selected.
@@ -39,11 +39,10 @@ function projectBundle(reply) {
   const artifactId = boundedText(value?.artifactId, 256);
   const label = safeFilename(value?.label || value?.displayName || value?.filename || value?.name);
   const candidateDigest = value?.digest || value?.applicationArtifactDigest;
-  const digest = typeof candidateDigest === 'string' && DIGEST_RE.test(candidateDigest) ? candidateDigest : null;
+  const digest = typeof candidateDigest === 'string' && SHA_256_HEX_RE.test(candidateDigest) ? candidateDigest : null;
   const integritySummary = boundedText(value?.integritySummary || value?.integrity || value?.verification?.status, 500);
-  return artifactId && DIGEST_RE.test(artifactId) && label && digest ? { artifactId, label, digest, ...(integritySummary ? { integritySummary } : {}) } : null;
+  return artifactId && SHA_256_HEX_RE.test(artifactId) && label && digest ? { artifactId, label, digest, ...(integritySummary ? { integritySummary } : {}) } : null;
 }
-const RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u;
 const MAX_MANUAL_AI_RETIREMENT_RECEIPTS = 32;
 const safeReceiptError = () => 'Career compilation did not complete. Reselect the career files to resume safely.';
 const safePreparationRecoveryError = () => 'Preparation did not complete. Resume or change setup to try again.';
@@ -221,7 +220,7 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
     return () => { disposed = true; };
   }, [activeSnapshotId, id, sourceKey]);
   const candidatePrepBrief = preparationFor({ ...data, interviewHelperApplicationBundle: persistedBundle }, activeSnapshotId);
-  const candidatePreparationRecordId = typeof data.interviewHelperPreparationRecordId === 'string' && DIGEST_RE.test(data.interviewHelperPreparationRecordId)
+  const candidatePreparationRecordId = typeof data.interviewHelperPreparationRecordId === 'string' && SHA_256_HEX_RE.test(data.interviewHelperPreparationRecordId)
     ? data.interviewHelperPreparationRecordId : null;
   const preparationVerificationKey = candidatePrepBrief && candidatePreparationRecordId && persistedBundle?.digest
     ? `${id}:${candidatePreparationRecordId}:${activeSnapshotId}:${canonicalInterviewJobUrl(data.interviewHelperJobUrl) || ''}:${persistedBundle.artifactId}:${persistedBundle.digest}` : null;
@@ -556,7 +555,7 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
         await retireTerminalManualAiRun('preparation', manualAiRunId);
         return;
       }
-      const briefRecordId = typeof reply?.briefRecordId === 'string' && DIGEST_RE.test(reply.briefRecordId) ? reply.briefRecordId : null;
+      const briefRecordId = typeof reply?.briefRecordId === 'string' && SHA_256_HEX_RE.test(reply.briefRecordId) ? reply.briefRecordId : null;
       if (!briefRecordId || !validInterviewPreparationBrief(brief, { snapshotId: activeSnapshotId, bundleArtifactId: bundle.artifactId, bundleDigest: bundle.digest })) throw new Error(reply?.error || 'Preparation response was invalid.');
       persist({ interviewHelperPreparation: brief, interviewHelperPreparationRecordId: briefRecordId, interviewHelperPreparationInputBinding: binding, interviewHelperPreparationInputDigest: boundedText(reply?.inputDigest, 256) || null, interviewHelperPreparationRunId: null });
       setPrepareNotice(boundedText(reply?.qaWarning, 300) || null);

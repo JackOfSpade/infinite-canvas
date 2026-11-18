@@ -845,7 +845,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       hubStateRef.current = 'priced';
       updateGlobal(id, { ...terminalResult, marketplaceRunResume: appliedRecovery });
     }
-  }, [canvasFilePath, data.locked, data.marketplaceRunResume, data.pricing, data.product, hubState, id, recoveryHydrated, updateGlobal, ensureBlockedCompSourceCards]);
+  }, [canvasFilePath, data.locked, data.marketplaceRunResume, hubState, id, recoveryHydrated, updateGlobal, ensureBlockedCompSourceCards]);
 
   // Auto-start analysis if images were dropped (must come after startAnalysis is declared
   // — referencing it earlier would hit the const TDZ on first render).
@@ -1699,7 +1699,6 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     }
 
   }, [
-    addToast,
     abandonRecovery,
     data.extraItems,
     data.itemPricings,
@@ -2668,7 +2667,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
           </>
         )}
 
-        {/* ── Analyzing ──────────────────────────────────────────────────── */}
+        {/* ── Queued ─────────────────────────────────────────────────────── */}
         {!pausedManualAiRecovery && hubState === 'queued' && (
           <HubBusyState
             theme="amber"

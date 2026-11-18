@@ -15,20 +15,15 @@ import {
   CLAUDE_WORKFLOW_UNFINISHED_MESSAGE,
   ClaudeRunnerError,
   createClaudeBackgroundTasks,
+  OUTPUT_CAP_BYTES,
   withWorkflowTool,
 } from './claudeApplicationRunner.js';
 import { noteResolvedClaudeModel } from './aiModelCalibration.js';
 import { applyClaudeAccountEnv } from './claudeAccounts.js';
-import { claudeResetTimeMs, describeClaudeSdkMessage } from './claudeTaskActivity.js';
+import { claudeResetTimeMs, clipText, describeClaudeSdkMessage } from './claudeTaskActivity.js';
 import { CLAUDE_PROMPT_TOKEN_BUDGET, CLAUDE_PROMPT_TOO_LONG, claudePromptTooLongMessage, estimateClaudePromptTokens } from './claudePromptLimit.js';
 
 export { describeClaudeSdkMessage };
-
-const OUTPUT_CAP_BYTES = 16 * 1024 * 1024;
-
-function clipped(value, max = 300) {
-  return String(value ?? '').replace(/\s+/gu, ' ').trim().slice(0, max);
-}
 
 function stagePrompt(text, pageImages, sessionId) {
   if (!Array.isArray(pageImages) || pageImages.length === 0) return String(text ?? '');
@@ -226,7 +221,7 @@ export async function runClaudeSdkStage({
       if (message.type === 'rate_limit_event' && message.rate_limit_info?.status === 'rejected') {
         usageResetsAt = claudeResetTimeMs(message.rate_limit_info.resetsAt);
         // Which window ran out decides whether another account is worth trying.
-        if (typeof message.rate_limit_info.rateLimitType === 'string') accountLimitType = clipped(message.rate_limit_info.rateLimitType, 40);
+        if (typeof message.rate_limit_info.rateLimitType === 'string') accountLimitType = clipText(message.rate_limit_info.rateLimitType, 40);
       }
       // Never awaited: activity reporting must not fail or slow a stage.
       try { if (typeof onActivity === 'function') onActivity(describeClaudeSdkMessage(message)); } catch { /* liveness only */ }
@@ -236,10 +231,10 @@ export async function runClaudeSdkStage({
         // SDK modelUsage also includes auxiliary calls. Only main assistant
         // frames can prove which model actually produced this stage's answer.
         const assistantModel = typeof message.message?.model === 'string' ? message.message.model : null;
-        const assistantError = typeof message.error === 'string' ? clipped(message.error, 100) : null;
+        const assistantError = typeof message.error === 'string' ? clipText(message.error, 100) : null;
         if (assistantError) assistantErrors.add(assistantError);
         if (assistantModel && assistantModel !== '<synthetic>') mainModels.add(assistantModel);
-        if (typeof message.message?.stop_reason === 'string') stopReasons.add(clipped(message.message.stop_reason, 100));
+        if (typeof message.message?.stop_reason === 'string') stopReasons.add(clipText(message.message.stop_reason, 100));
         if (message.aborted === true) assistantErrors.add('aborted');
         const content = Array.isArray(message.message?.content) ? message.message.content : [];
         for (const block of content) {
@@ -257,7 +252,7 @@ export async function runClaudeSdkStage({
             await onThinkingSummary({ text: block.thinking, model: assistantModel, index: summaryCount + 1, thinkingDisplay: 'summarized' });
           } catch (error) {
             throw new ClaudeRunnerError('CLAUDE_LOG_ERROR', 'Claude diagnostic summary could not be saved.', {
-              ...detail(), cause: clipped(error?.message || error),
+              ...detail(), cause: clipText(error?.message || error),
             });
           }
           checkInterrupted();
@@ -276,7 +271,7 @@ export async function runClaudeSdkStage({
             ? block.content.map(part => (typeof part?.text === 'string' ? part.text : '')).join('')
             : String(block.content ?? '');
           try {
-            await onToolResult({ toolName: toolUseNames.get(block.tool_use_id) || '', isError: block.is_error === true, text: clipped(text, 2000) });
+            await onToolResult({ toolName: toolUseNames.get(block.tool_use_id) || '', isError: block.is_error === true, text: clipText(text, 2000) });
           } catch (error) {
             interrupt(error);
             checkInterrupted();
@@ -295,7 +290,7 @@ export async function runClaudeSdkStage({
           apiErrorStatus: message.api_error_status ?? null,
           models: Object.keys(message.modelUsage || {}),
           durationMs: message.duration_ms ?? null,
-          stopReason: typeof message.stop_reason === 'string' ? clipped(message.stop_reason, 100) : null,
+          stopReason: typeof message.stop_reason === 'string' ? clipText(message.stop_reason, 100) : null,
           errors,
           usage: message.usage ?? null,
           costUsd: typeof message.total_cost_usd === 'number' ? message.total_cost_usd : null,
@@ -303,8 +298,8 @@ export async function runClaudeSdkStage({
       } else if (message.type === 'system' &&
         (message.subtype === 'model_refusal_no_fallback' || (message.subtype === 'model_refusal_fallback' && message.scope !== 'local'))) {
         refuse = {
-          ...(typeof message.api_refusal_category === 'string' ? { refusalCategory: clipped(message.api_refusal_category, 100) } : {}),
-          ...(typeof message.request_id === 'string' ? { requestId: clipped(message.request_id, 150) } : {}),
+          ...(typeof message.api_refusal_category === 'string' ? { refusalCategory: clipText(message.api_refusal_category, 100) } : {}),
+          ...(typeof message.request_id === 'string' ? { requestId: clipText(message.request_id, 150) } : {}),
           refusalEvent: message.subtype,
         };
         // No fallback is configured. If an installed CLI nevertheless starts

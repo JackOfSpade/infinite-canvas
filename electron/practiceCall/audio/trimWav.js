@@ -6,7 +6,7 @@
 // before either is rewritten, so a bad track never leaves the pair cut unevenly.
 import nodeFs from 'node:fs';
 
-const HEADER_BYTES = 44;
+import { HEADER_BYTES } from './wavFormat.js';
 
 function plan(path, startMs, fs) {
   const data = fs.readFileSync(path);

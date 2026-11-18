@@ -8,11 +8,11 @@ import { reportScrapeHealth, scrapeShareBroken } from './scrapeAlarms.js';
  * Limits are PROVISIONAL: no real saved marketplace rows exist on disk. Healthy yield comes from the April fixtures and
  * one set of live runs on 2026-11-05 (eBay active 60 seen, 0 bad; Poshmark 144 seen, 0 no price; Mercari 9 seen, 0 bad).
  */
-export const MARKETPLACE_FIELD_LIMITS = { minAttempts: 8, minBad: 5, maxShare: 0.5 };
+const MARKETPLACE_FIELD_LIMITS = { minAttempts: 8, minBad: 5, maxShare: 0.5 };
 // Poshmark's selector also matches nested non-tile elements: the healthy April fixture reads seen 144 / noFields 77 / noPrice 0,
 // so noFields cannot be judged by share there. Only noPrice is clean on healthy data; a price-stripped copy reads 42 of 144.
-export const POSHMARK_FIELD_LIMITS = { minAttempts: 8, minBad: 5, maxShare: 0.2 };
-export const HUB_SCAN_LIMITS = { minAttempts: 5, minBad: 3, maxShare: 0.5 };
+const POSHMARK_FIELD_LIMITS = { minAttempts: 8, minBad: 5, maxShare: 0.2 };
+const HUB_SCAN_LIMITS = { minAttempts: 5, minBad: 3, maxShare: 0.5 };
 const HUB_RECENT_READS = 10;
 const recentHubReads = new Map();
 
@@ -35,10 +35,9 @@ const VOLUME_GUESS_WARNINGS = new Set(['zero-extracted', 'suspicious-empty']);
  * Poshmark and Mercari throw SITE_CHANGED on any zero, so one rare item that truly has no listings looks the same as a
  * redesign. Items in a row with no cards, for one source, are what a redesign looks like. Provisional.
  */
-export const STALE_ZERO_ITEMS_IN_A_ROW = 3;
+const STALE_ZERO_ITEMS_IN_A_ROW = 3;
 const staleZeroStreaks = new Map();
 export function resetMarketplaceScrapeHealthForTests() { staleZeroStreaks.clear(); recentHubReads.clear(); }
-
 
 /** Reverb: an honest zero carries `listings: []`. Anything else (HTML, an error envelope, no key) is not the API we read. */
 export function reverbShapeMissing(json) {

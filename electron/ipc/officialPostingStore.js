@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { googleJobsDocumentId } from '../../src/utils/jobListingUrl.js';
 import { atomicWriteJson, ensureDirectoryWithinRoot } from '../utils/pathSafety.js';
-import { normalizeOfficialPosting } from './officialPostingFields.js';
+import { OFFICIAL_LEVELS, TEXT_LEVELS, normalizeOfficialPosting } from './officialPostingFields.js';
 import { coreTitle, locationsCompatible } from './officialPostingMatch.js';
 import { officialPostingConsolidatedMemberShapes, officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
 import { strictEmployerEqual } from './officialSourceHosts.js';
@@ -13,8 +13,6 @@ const TEXT_BYTE_LIMIT = 3 * 1024 * 1024;
 const RECORD_BYTE_LIMIT = 2 * 1024 * 1024;
 const MISS_TTL_MS = 24 * 60 * 60 * 1000;
 const CONTENT_HASH_RE = /^[a-f0-9]{64}$/u;
-const OFFICIAL_TEXT_LEVELS = new Set(['L1', 'L2', 'L3']);
-const DURABLE_LEVELS = new Set(['L1', 'L2', 'L3', 'L4']);
 const DURABLE_OUTCOMES = new Set(['found', 'link-only', 'unreadable']);
 const missingTextAttempts = new WeakMap();
 
@@ -94,7 +92,7 @@ export function officialPostingRecordMatchesScrapedIdentity(job, record) {
 }
 
 function sameVerifiedOfficialPosting(left, right) {
-  if (!OFFICIAL_TEXT_LEVELS.has(left?.level) || !OFFICIAL_TEXT_LEVELS.has(right?.level)
+  if (!TEXT_LEVELS.has(left?.level) || !TEXT_LEVELS.has(right?.level)
     || !left.sourceUrl || left.sourceUrl !== right.sourceUrl
     || !strictEmployerEqual(left.employer, right.employer)) return false;
   const title = coreTitle(left.title, { company: left.employer, location: left.location });
@@ -104,7 +102,7 @@ function sameVerifiedOfficialPosting(left, right) {
 
 function durableRecord(record) {
   const posting = record.officialPosting;
-  return DURABLE_LEVELS.has(posting?.level) && (DURABLE_OUTCOMES.has(posting?.outcome)
+  return OFFICIAL_LEVELS.has(posting?.level) && (DURABLE_OUTCOMES.has(posting?.outcome)
     || posting?.outcome === 'closed' && posting.sourceUrl && posting.trail?.includes('semantic-match-v1')
       && posting.trail?.includes('closed') && CONTENT_HASH_RE.test(posting.semanticMatch?.sourceHash || ''));
 }
@@ -128,8 +126,9 @@ async function boundedRead(file, limit) {
   let handle;
   try {
     handle = await fs.promises.open(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-    if (!(await handle.stat()).isFile()) throw storeError('Official posting storage requires a regular file.', 'OFFICIAL_POSTING_UNSAFE_PATH');
-    const buffer = Buffer.alloc(limit + 1);
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw storeError('Official posting storage requires a regular file.', 'OFFICIAL_POSTING_UNSAFE_PATH');
+    const buffer = Buffer.allocUnsafe(Math.min(limit + 1, stat.size + 1));
     let size = 0;
     while (size < buffer.length) {
       const { bytesRead } = await handle.read(buffer, size, buffer.length - size, size);
@@ -249,7 +248,7 @@ export function createOfficialPostingStore(rootDir, { now = Date.now } = {}) {
       if (posting.contentHash && posting.contentHash !== contentHash) throw storeError('Official posting metadata and text have different content hashes.');
       posting.contentHash = contentHash;
       await writeText(contentHash, description);
-    } else if (OFFICIAL_TEXT_LEVELS.has(posting.level) && posting.outcome !== 'closed'
+    } else if (TEXT_LEVELS.has(posting.level) && posting.outcome !== 'closed'
       && (!posting.contentHash || !compatiblePrevious.some(record => record.officialPosting.contentHash === posting.contentHash))) {
       throw storeError('An official-text resolution needs its content-hashed description.');
     }
@@ -284,16 +283,23 @@ async function restoreMissingText(record, store, refetch) {
   let attempts = missingTextAttempts.get(store);
   if (!attempts) { attempts = new Map(); missingTextAttempts.set(store, attempts); }
   const hash = record.officialPosting.contentHash;
-  if (!attempts.has(hash)) attempts.set(hash, (async () => {
-    try {
-      const fetched = await refetch(record.officialPosting.sourceUrl, { contentHash: hash });
-      const description = typeof fetched === 'string' ? fetched : fetched?.description;
-      checkDescription(description);
-      if (sha256(description) !== hash) return null;
-      await store.restoreText(hash, description);
-      return description;
-    } catch { return null; }
-  })());
+  if (!attempts.has(hash)) {
+    let transient = false;
+    const attempt = (async () => {
+      let fetched;
+      try { fetched = await refetch(record.officialPosting.sourceUrl, { contentHash: hash }); } catch { transient = true; return null; }
+      try {
+        const description = typeof fetched === 'string' ? fetched : fetched?.description;
+        checkDescription(description);
+        if (sha256(description) !== hash) return null;
+        await store.restoreText(hash, description);
+        return description;
+      } catch { return null; }
+    })();
+    attempts.set(hash, attempt);
+    // A page that answered with other text stays remembered. A fetch that failed is tried again on the next view.
+    attempt.then(() => { if (transient && attempts.get(hash) === attempt) attempts.delete(hash); });
+  }
   return attempts.get(hash);
 }
 
@@ -351,7 +357,7 @@ export async function officialPostingView(job, { store, refetch, requireSemantic
   if (requireSemantic && !officialPostingSemanticProofMatches(job, posting)) return scrapedView(job);
   const fallback = scrapedView(job, posting);
   if (posting.outcome === 'closed') return fallback;
-  if (!OFFICIAL_TEXT_LEVELS.has(posting.level) || !posting.contentHash || job?.officialPosting?.contentHash !== posting.contentHash) return fallback;
+  if (!TEXT_LEVELS.has(posting.level) || !posting.contentHash || job?.officialPosting?.contentHash !== posting.contentHash) return fallback;
   let description;
   let missing = false;
   try { description = await store.readText(posting.contentHash); missing = description === null; } catch { description = null; }

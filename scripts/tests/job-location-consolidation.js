@@ -590,4 +590,15 @@ export default [
         `the survivor holds every absorbed card's marks, got ${JSON.stringify(cards[0].data.deadSourceUrls)}`);
     },
   },
+  {
+    name: 'consolidation: a title or company containing the key delimiter never merges a different title and company split',
+    run: () => {
+      const jobs = [
+        makeJob({ title: 'Engineer | Remote', company: 'Acme', location: 'Toronto, ON', url: 'https://jobs.example.com/pipe/a' }),
+        makeJob({ title: 'Engineer', company: 'Remote | Acme', location: 'Calgary, AB', url: 'https://jobs.example.com/pipe/b' }),
+      ];
+      const { jobs: out } = consolidateJobLocations(jobs);
+      assert(out.length === 2, `different title/company splits stay separate, got ${out.length}`);
+    },
+  },
 ];

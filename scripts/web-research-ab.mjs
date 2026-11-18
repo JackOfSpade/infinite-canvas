@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-// Side-by-side measurement of three web-research arms on the app's two web-research
-// tasks: Claude's built-in web search (native), the Tavily MCP server (tavily), and a
-// merged answer that reuses both replies without any extra research call. Prompts,
-// profiles and validators are the app's own; only the tools differ. The Tavily key is
-// read from the Keychain and never printed or written.
+// Side-by-side measurement of three web-research arms on the app's four web-research
+// tasks (preference, compensation, role-family, location): Claude's built-in web search
+// (native), a second toolset under the arm name `tavily` (the Tavily MCP server, the app's
+// Parallel Search, or a Parallel Task API run, see --second), and a merged answer that
+// reuses both replies without any extra research call. Prompts, profiles and validators are
+// the app's own; only the tools differ. The Tavily key is read from the Keychain and never
+// printed or written.
 //
 //   node --import ./scripts/test-stubs/register.mjs scripts/web-research-ab.mjs \
 //     --task preference|compensation|role-family|location --canvas "<canvas.json>" --out <private dir> \
@@ -27,6 +29,7 @@ import { parseArgs as parseNodeArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { assertDurableOutDir, createRunJournal, takeEphemeralFlag, tallyRows } from './ai-test-journal.mjs';
 import { PARALLEL_TASK_PROCESSORS, runParallelTask } from './lib/parallel-task-arm.mjs';
+import { mulberry32, sample } from './lib/seeded-random.mjs';
 
 const PREFERENCE_TASK = 'job-preference-research-batch';
 const PREFERENCE_ASSESSMENT_TASK = 'job-preference-research-batch-assessment';
@@ -100,22 +103,6 @@ export function effectiveProfile(production, override) {
 }
 
 const redactWith = key => text => (key && key !== 'dry-run-no-key' ? String(text ?? '').split(key).join('<tavily-key>') : String(text ?? ''));
-
-function mulberry32(seed) {
-  let state = seed >>> 0;
-  return () => {
-    state = (state + 0x6d2b79f5) >>> 0;
-    let t = state;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-function sample(list, count, random) {
-  const copy = [...list];
-  for (let i = copy.length - 1; i > 0; i -= 1) { const j = Math.floor(random() * (i + 1)); [copy[i], copy[j]] = [copy[j], copy[i]]; }
-  return copy.slice(0, Math.max(0, count));
-}
 
 // ---- Pure helpers (unit-tested) --------------------------------------------
 
@@ -193,14 +180,14 @@ function blocksOf(text) {
   return blocks;
 }
 
+/** Text with every URL and markdown link target blanked out. */
+export const withoutLinks = text => String(text ?? '').replace(/\]\([^)\s]*\)/gu, '] ').replace(/https?:\/\/[^\s)\]>"']+/gu, ' ');
+
 /**
  * Money figures written in the same paragraph or bullet block as a URL, each
  * normalized to an integer. 1900-2100 written without separators or currency is
  * a year, not a figure.
  */
-/** Text with every URL and markdown link target blanked out. */
-export const withoutLinks = text => String(text ?? '').replace(/\]\([^)\s]*\)/gu, '] ').replace(/https?:\/\/[^\s)\]>"']+/gu, ' ');
-
 export function moneyFiguresNear(body, url) {
   const figures = [];
   if (!url) return figures;
@@ -335,11 +322,10 @@ const toolCallsOf = (toolCalls, webTools) => (webTools && typeof webTools === 'o
 
 /**
  * One research call per (arm, prompt). The merged arm never researches: it waits
- * for the cached native and Tavily replies and merges their sections.
+ * for the cached native and Tavily replies and merges their sections. `parallelKey` is the
+ * Parallel API key read from the Keychain; '' runs the arm anonymously like the app does without a key.
  */
-// The Parallel API key (Keychain), read once in main(); '' runs the arm anonymously like the app does without a key.
-let parallelKey = '';
-function createResearcher({ app, profile, stage, tavily, parallel = null, second = 'tavily', taskProcessor = 'core', taskRun = runParallelTask, tavilyKey, task, begin, end, parse, limit, calls, cacheDir = '' }) {
+function createResearcher({ app, profile, stage, tavily, parallel = null, second = 'tavily', taskProcessor = 'core', taskRun = runParallelTask, parallelKey = '', tavilyKey, task, begin, end, parse, limit, calls, cacheDir = '' }) {
   const cache = new Map();
   // Valid replies are also kept on disk, so a rerun after a later failure never pays for the same research twice.
   const diskPath = (arm, prompt) => (cacheDir ? path.join(cacheDir, `${crypto.createHash('sha256').update(`${arm}\u0000${prompt}`, 'utf8').digest('hex').slice(0, 32)}.txt`) : '');
@@ -1025,8 +1011,6 @@ function dryLocation({ opts, rows, location }) {
   return 0;
 }
 
-let redactOutput = text => String(text ?? '');
-
 /** Journal rows: research calls per arm (validity, cost) so far. */
 export function researchJournalRows(calls = []) {
   return tallyRows(calls, call => `research ${call.arm}${call.provider ? ` (${call.provider}${call.processor ? ` ${call.processor}` : ''})` : ''}`, { validOf: call => call.valid === true, failedOf: call => call.valid === false })
@@ -1051,17 +1035,19 @@ async function main(argv, deps = {}) {
     // The journal states the second toolset so a Task API arm is never read as a Claude arm.
     facts: { Count: opts.count, Seed: opts.seed, Second: opts.second, ...(opts.second === 'task' ? { 'Task processor': opts.taskProcessor } : {}) },
   }) : null;
+  let redact = text => String(text ?? '');
   try {
-    const code = await abMain(opts, journal);
+    const code = await abMain(opts, journal, { setRedactor: fn => { redact = fn; } });
     journal?.finish('finished');
     return code;
   } catch (error) {
-    journal?.finish(`failed: ${redactOutput(error?.message || error).slice(0, 200)}`);
+    journal?.finish(`failed: ${redact(error?.message || error).slice(0, 200)}`);
+    if (error instanceof Error) error.message = redact(error.message);
     throw error;
   }
 }
 
-async function abMain(opts, journal) {
+async function abMain(opts, journal, { setRedactor = () => {} } = {}) {
   const [{ parseWorkspaceText, restoreWorkspaceContent }, tavily, nonApi, worker, profiles, sdk, runner, replay, parallelSearch] = await Promise.all([
     ipc('workspaceContentPool.js'), import(new URL('./lib/tavily-arm.mjs', import.meta.url).href), ipc('nonApiAi.js'), ipc('claudeTaskWorker.js'),
     ipc('claudeTaskProfiles.js'), ipc('claudeApplicationSdkStage.js'), ipc('claudeApplicationRunner.js'),
@@ -1083,12 +1069,12 @@ async function abMain(opts, journal) {
   }
 
   // The Task API arm needs the Parallel key, which is read only for a real run (a dry run reads no Keychain).
-  if (opts.second === 'parallel' || opts.second === 'task') parallelKey = await parallelSearch.readParallelKey();
+  const parallelKey = opts.second === 'parallel' || opts.second === 'task' ? await parallelSearch.readParallelKey() : '';
   if (opts.second === 'task' && !parallelKey) throw new Error(`--second task needs a Parallel API key in the Keychain. Run: security add-generic-password -s ${parallelSearch.PARALLEL_KEYCHAIN_SERVICE} -a parallel -w`);
   const key = await tavily.readTavilyKey();
   if (!key) throw new Error(`No Tavily key in the Keychain. Run: security add-generic-password -s ${tavily.TAVILY_KEYCHAIN_SERVICE} -a tavily -w`);
   const redact = redactWith(key);
-  redactOutput = redact;
+  setRedactor(redact);
   const output = writers(opts.out, redact);
   // The summary names the second toolset (and, for --second task, the processor), so a Task API
   // result is never mistaken for a Claude arm. The journal receives the same facts.
@@ -1113,32 +1099,28 @@ async function abMain(opts, journal) {
   const heartbeat = journal ? setInterval(() => journal.update({ rows: researchJournalRows(calls) }, { force: true }), 60_000) : null;
   heartbeat?.unref?.();
 
+  // One researcher per run: each task supplies its own prompt task, section markers and parser.
+  const makeResearcher = (task, begin, end, parse) => {
+    const profile = effectiveProfile(profiles.claudeTaskProfile(task), opts.profile);
+    if (!profile) throw new Error(`No Claude task profile for ${task}.`);
+    return createResearcher({ app, profile, stage, tavily, parallel: parallelSearch, second: opts.second, taskProcessor: opts.taskProcessor, parallelKey, tavilyKey: key,
+      task, begin, end, parse, limit, calls, cacheDir: path.join(opts.out, 'research-cache') });
+  };
+  const parseCompensation = (raw, ids) => jobsModule.parseCompensationResearchSections(raw, ids);
   try {
-  if (opts.task === 'preference') {
-    const profile = effectiveProfile(profiles.claudeTaskProfile(PREFERENCE_TASK), opts.profile);
-    if (!profile) throw new Error(`No Claude task profile for ${PREFERENCE_TASK}.`);
-    const researcher = createResearcher({ app, profile, stage, tavily, parallel: parallelSearch, second: opts.second, taskProcessor: opts.taskProcessor, tavilyKey: key, task: PREFERENCE_TASK,
-      begin: preferenceBegin, end: preferenceEnd, parse: (raw, ids) => prefs.parseJobPreferenceResearchSections(raw, ids), limit, calls, cacheDir: path.join(opts.out, 'research-cache') });
-    await runPreference({ opts, rows, replay, app, researcher, output, log });
-  } else if (opts.task === 'role-family') {
-    const profile = effectiveProfile(profiles.claudeTaskProfile(COMPENSATION_TASK), opts.profile);
-    if (!profile) throw new Error(`No Claude task profile for ${COMPENSATION_TASK}.`);
-    const researcher = createResearcher({ app, profile, stage, tavily, parallel: parallelSearch, second: opts.second, taskProcessor: opts.taskProcessor, tavilyKey: key, task: COMPENSATION_TASK,
-      begin: compensationBegin, end: compensationEnd, parse: (raw, ids) => jobsModule.parseCompensationResearchSections(raw, ids), limit, calls, cacheDir: path.join(opts.out, 'research-cache') });
-    await runRoleFamily({ opts, rows, researcher, output, log, extract: tavilyExtractor({ key, log }), buildPrompt: jobsModule.buildRoleFamilyBatchResearchPrompt });
-  } else if (opts.task === 'location') {
-    const profile = effectiveProfile(profiles.claudeTaskProfile(COMPENSATION_TASK), opts.profile);
-    if (!profile) throw new Error(`No Claude task profile for ${COMPENSATION_TASK}.`);
-    const researcher = createResearcher({ app, profile, stage, tavily, parallel: parallelSearch, second: opts.second, taskProcessor: opts.taskProcessor, tavilyKey: key, task: COMPENSATION_TASK,
-      begin: locationBegin, end: locationEnd, parse: (raw, ids) => location.parseJobLocationLookupSections(raw, ids), limit, calls, cacheDir: path.join(opts.out, 'research-cache') });
-    await runLocation({ opts, rows, researcher, output, log, location });
-  } else {
-    const profile = effectiveProfile(profiles.claudeTaskProfile(COMPENSATION_TASK), opts.profile);
-    if (!profile) throw new Error(`No Claude task profile for ${COMPENSATION_TASK}.`);
-    const researcher = createResearcher({ app, profile, stage, tavily, parallel: parallelSearch, second: opts.second, taskProcessor: opts.taskProcessor, tavilyKey: key, task: COMPENSATION_TASK,
-      begin: compensationBegin, end: compensationEnd, parse: (raw, ids) => jobsModule.parseCompensationResearchSections(raw, ids), limit, calls, cacheDir: path.join(opts.out, 'research-cache') });
-    await runCompensation({ opts, rows, researcher, output, log, extract: tavilyExtractor({ key, log }), buildPrompt: jobsModule.buildCompensationResearchPrompt });
-  }
+    if (opts.task === 'preference') {
+      const researcher = makeResearcher(PREFERENCE_TASK, preferenceBegin, preferenceEnd, (raw, ids) => prefs.parseJobPreferenceResearchSections(raw, ids));
+      await runPreference({ opts, rows, replay, app, researcher, output, log });
+    } else if (opts.task === 'role-family') {
+      const researcher = makeResearcher(COMPENSATION_TASK, compensationBegin, compensationEnd, parseCompensation);
+      await runRoleFamily({ opts, rows, researcher, output, log, extract: tavilyExtractor({ key, log }), buildPrompt: jobsModule.buildRoleFamilyBatchResearchPrompt });
+    } else if (opts.task === 'location') {
+      const researcher = makeResearcher(COMPENSATION_TASK, locationBegin, locationEnd, (raw, ids) => location.parseJobLocationLookupSections(raw, ids));
+      await runLocation({ opts, rows, researcher, output, log, location });
+    } else {
+      const researcher = makeResearcher(COMPENSATION_TASK, compensationBegin, compensationEnd, parseCompensation);
+      await runCompensation({ opts, rows, researcher, output, log, extract: tavilyExtractor({ key, log }), buildPrompt: jobsModule.buildCompensationResearchPrompt });
+    }
   } finally {
     if (heartbeat) clearInterval(heartbeat);
   }
@@ -1148,5 +1130,5 @@ async function abMain(opts, journal) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [cliArgs, allowEphemeral] = takeEphemeralFlag(process.argv.slice(2));
   main(cliArgs, { requireDurable: true, allowEphemeral, journalFactory: allowEphemeral ? null : createRunJournal,
-    command: `node scripts/web-research-ab.mjs ${cliArgs.join(' ')}` }).then(code => { process.exitCode = code; }, error => { console.error(redactOutput(error?.message || error)); process.exitCode = 1; });
+    command: `node scripts/web-research-ab.mjs ${cliArgs.join(' ')}` }).then(code => { process.exitCode = code; }, error => { console.error(String(error?.message || error)); process.exitCode = 1; });
 }

@@ -19,6 +19,7 @@ import { BATCH_OUTPUT_TOKEN_BUDGET, CAREER_CLEAN_RESPONSE_TOKEN_LIMIT } from './
 import { describeSchemaErrors, validateResponseSchema } from './schemaValidation.js';
 import { validationFailure } from './validationFailure.js';
 import {
+  DECISION_ORIGINS,
   applyProfileEdits,
   applyProfileEditsWithRules,
   checkFindingAgainstLedger,
@@ -37,7 +38,7 @@ import {
   verifySourceQuote,
 } from './careerProfileEdits.js';
 import { calculateDatedTenure } from './jobFitAssessment.js';
-import { HANDOFF_CONCURRENCY, mapManualHandoffWaves, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
+import { HANDOFF_CONCURRENCY, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
 import { MAX_SOURCE_GROUNDING_QUOTE_CHARS } from './applicationSourceLimits.js';
 
 export {
@@ -89,11 +90,11 @@ export const CAREER_SNAPSHOT_SEGMENT_POLICY = Object.freeze({
   maxChars: 4_000,
 });
 export const CAREER_SNAPSHOT_SEGMENT_CHARS = CAREER_SNAPSHOT_SEGMENT_POLICY.maxChars;
-export const CAREER_SNAPSHOT_MAX_PROMPT_CHARS = 700_000;
+const CAREER_SNAPSHOT_MAX_PROMPT_CHARS = 700_000;
 // Page limits bound a single manual/automatic handoff, never the total career
 // corpus. `maxSegments` is intentionally much smaller than the source cap so
 // every compile/audit/repair call has an independently auditable scope.
-export const CAREER_SNAPSHOT_PAGE_POLICY = Object.freeze({
+const CAREER_SNAPSHOT_PAGE_POLICY = Object.freeze({
   revision: 1,
   maxSegments: 32,
   maxSourceChars: 48_000,
@@ -104,7 +105,7 @@ export const CAREER_SNAPSHOT_PAGE_POLICY = Object.freeze({
 // unusable.  It is still bounded by the largest source the production intake
 // accepts, rather than trusting an arbitrary historical record to allocate an
 // unbounded segment.
-export const CAREER_SNAPSHOT_HISTORICAL_SEGMENT_MAX_CHARS = 50 * 1024 * 1024;
+const CAREER_SNAPSHOT_HISTORICAL_SEGMENT_MAX_CHARS = 50 * 1024 * 1024;
 // Historical v2/v3 pins retain their count ceiling even though current v5
 // compilation has no corpus-wide segment count gate. This prevents an old pin
 // from expanding reader allocation merely because the current compiler can
@@ -3661,15 +3662,11 @@ function crossPageConflicts(profile) {
   return conflicts;
 }
 
-function crossPageReconciliationErrors(profile, conflicts = crossPageConflicts(profile)) {
-  return conflicts.map(conflict => conflict.message);
-}
-
 function deterministicState(pageProfiles, corpus) {
   const merged = mergeCareerProfilePageResult(pageProfiles), profile = merged.profile;
   const checked = validateCareerProfile(profile, corpus), conflicts = crossPageConflicts(profile);
   return { merged, profile, reconciliation: merged.reconciliation, conflicts, profileErrors: checked.errors,
-    errors: [...checked.errors, ...crossPageReconciliationErrors(profile, conflicts)] };
+    errors: [...checked.errors, ...conflicts.map(conflict => conflict.message)] };
 }
 
 export function buildCareerProfileCrossPageRulingPrompt(corpus, { conflict, entities, currentDecisions, segments, proposals, maxPromptChars = CAREER_SNAPSHOT_MAX_PROMPT_CHARS }) {
@@ -4753,14 +4750,12 @@ export async function compileAuditedCareerSnapshot({
   pageMaxSegments = CAREER_SNAPSHOT_PAGE_POLICY.maxSegments,
   pageMaxSourceChars = CAREER_SNAPSHOT_PAGE_POLICY.maxSourceChars,
   workerCount = HANDOFF_CONCURRENCY,
-  scheduler = mapManualHandoffWaves,
   now = () => new Date().toISOString(),
   onProgress = () => {},
 } = {}) {
   // Progress is observational: a closed renderer must never fail compilation.
   const reportProgress = (progress) => { try { onProgress(progress); } catch { /* observer only */ } };
   if (typeof callText !== 'function') throw new TypeError('compileAuditedCareerSnapshot requires callText.');
-  if (typeof scheduler !== 'function') throw new TypeError('compileAuditedCareerSnapshot requires a handoff scheduler.');
   const corpus = buildCareerSourceCorpus(sourceFiles);
   if (!corpus.sources.every(source => validateCareerTranscriptionAuditReceipt(source.transcriptionAudit))) {
     throw hardError('Every source must carry a valid transcription-audit receipt before career-profile compilation.', 'CAREER_SNAPSHOT_TRANSCRIPTION_AUDIT_INVALID');
@@ -4909,11 +4904,8 @@ export async function compileAuditedCareerSnapshot({
     const state = deterministicState(pageProfiles, corpus);
     const { profile, reconciliation } = state;
     const deterministic = { valid: state.errors.length === 0, errors: state.errors };
-    // The old injected scheduler is retained in the public argument shape for
-    // callers compiled against v3, but this contract intentionally uses the
-    // lazy fixed worker roster below.  Building every descriptor/result array
-    // first would make a very long corpus a hidden memory limit.
-    void scheduler;
+    // The fixed worker roster below is lazy: building every descriptor and
+    // result array first would make a very long corpus a hidden memory limit.
     const stats = emptyRoundStats();
     let auditReceipts = [];
     if (deterministic.valid) {
@@ -5316,7 +5308,7 @@ function decisionLogErrors(decisionLog) {
       || !Number.isInteger(target.pageIndex) || target.pageIndex < 0 || typeof target.targetKey !== 'string'
       || !(current === null || (isObject(current) && typeof current.id === 'string' && current.pageIndex === target.pageIndex
         && current.targetKey === target.targetKey && typeof current.valueJson === 'string' && isStringArray(current.evidenceSegmentIds)
-        && ['audit', 'repair', 'adjudication'].includes(current.origin) && Number.isInteger(current.round)
+        && DECISION_ORIGINS.has(current.origin) && Number.isInteger(current.round)
         && (current.groupId === undefined || (typeof current.groupId === 'string' && current.groupId !== ''))))
       || !isStringArray(target.supersededDecisionIds) || !isStringArray(target.consideredEvidenceSegmentIds)) {
       errors.push(`auditHistory decisionLog target ${index} is invalid.`);
@@ -5565,7 +5557,9 @@ async function readTrustedSnapshotFile(directory, snapshotId) {
       || afterRead.size !== current.size || afterRead.mtimeMs !== current.mtimeMs || afterRead.ctimeMs !== current.ctimeMs
       || !afterPath.isFile() || afterPath.isSymbolicLink() || afterPath.dev !== initial.dev
       || afterPath.ino !== initial.ino || afterPath.size !== initial.size || afterPath.mtimeMs !== initial.mtimeMs || afterPath.ctimeMs !== initial.ctimeMs) {
-      throw unsafeStorageError('Career snapshot file changed while it was being read.');
+      const raced = unsafeStorageError('Career snapshot file changed while it was being read.');
+      raced.readRace = true;
+      throw raced;
     }
     return text;
   } finally {
@@ -5583,8 +5577,7 @@ async function readPublishedSnapshotFile(directory, snapshotId) {
   for (let attempt = 0; ; attempt += 1) {
     try { return await readTrustedSnapshotFile(directory, snapshotId); }
     catch (error) {
-      if (attempt >= 7 || error?.code !== 'CAREER_SNAPSHOT_STORAGE_UNSAFE'
-        || error.message !== 'Career snapshot file changed while it was being read.') throw error;
+      if (attempt >= 7 || error?.code !== 'CAREER_SNAPSHOT_STORAGE_UNSAFE' || error.readRace !== true) throw error;
       await new Promise(resolve => setTimeout(resolve, 1));
     }
   }

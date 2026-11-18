@@ -313,9 +313,6 @@ export function createPracticeCallEngine({
     setPhase('listening');
     armSilence();
   }
-  const discardListen = reply => discardSilent(reply, 'listen');
-
-  function fail(reason) { end(reason); }
 
   async function restart(kind, pending = []) {
     emit({ type: 'session-restart', kind });
@@ -925,7 +922,7 @@ export function createPracticeCallEngine({
         const head = parser.push(String(result?.text ?? ''));
         const tail = parser.end();
         const control = controlFor(reply, tail.control ?? result?.control);
-        if (control === 'listen') return discardListen(reply);
+        if (control === 'listen') return discardSilent(reply, 'listen');
         // A pass from the acknowledgement session only means it makes no sound. Whether the line gets a reply is the
         // main session's decision alone: found live on 2026-11-18, where this session's pass cancelled a real reply.
         reply.openerSettled = true;
@@ -1047,10 +1044,10 @@ export function createPracticeCallEngine({
       } catch (error) {
         if (current !== reply || (isCancel(error) && !guard?.state.timedOut)) return;
         if (reply.mainForwarded > 0 || reply.chats.length > 0 || reply.controls.length > 0) return cutOffMain(reply);
-        if (tries >= 1) return fail('session-error');
+        if (tries >= 1) { end('session-error'); return; }
         const restarted = await restart('main');
         if (current !== reply) return;
-        if (!restarted) return fail('session-error');
+        if (!restarted) { end('session-error'); return; }
       }
     }
   }
@@ -1591,10 +1588,6 @@ export function createPracticeCallEngine({
     return tokens(overlapText(record)).length > th.interruptWords || endMs - record.startMs > th.interruptMs;
   }
 
-  function boundaryPosition(reply) {
-    return livePosition(reply);
-  }
-
   function pauseAtBoundary(record, reply) {
     if (record.paused || !record.active) return;
     const pause = () => {
@@ -1602,7 +1595,7 @@ export function createPracticeCallEngine({
       if (!record.active || current !== reply) return;
       record.paused = true;
       record.pausedAt = now();
-      reply.positionMs = boundaryPosition(reply);
+      reply.positionMs = livePosition(reply);
       reply.positionAt = now();
       unschedule(reply.finishTimer); // a paused utterance is not stalled
       reply.finishTimer = null;

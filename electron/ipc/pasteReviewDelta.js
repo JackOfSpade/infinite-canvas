@@ -176,9 +176,8 @@ import { STRUCTURED_RESUME_ID_PATTERN } from './structuredResume.js';
 // from drifting out of step with the one downstream actually applies.
 const STABLE_ID_RE = new RegExp(STRUCTURED_RESUME_ID_PATTERN);
 
-// Exported so the review-stage prompt interpolates the engine's own op
-// vocabulary instead of hand-typing a second list that could name an op this
-// module does not implement.
+// The engine's own op vocabulary. Exported so a test can pin it against the
+// review-stage prompt's hand-typed patch shape.
 export const VALID_OPS = Object.freeze(['replace', 'insert-after', 'remove']);
 const VALID_OPS_SET = new Set(VALID_OPS);
 // roleThesis and a coverLetterArgument field are single scalar values, not
@@ -237,8 +236,7 @@ function parseTarget(target) {
   return null;
 }
 
-// Exported for the same reason as VALID_OPS above: the review-stage prompt
-// states this exact rule rather than a hand-kept paraphrase of it.
+// The engine's own target grammar, exported for the same reason as VALID_OPS above.
 export const TARGET_FORMS_RULE = 'resume:bullet:<id>, resume:role:<id>, resume:project:<id>, resume:skill:<id>, '
   + 'coverLetter:paragraph:<id>, coverLetter:roleThesis, or coverLetter:argument:<field under coverLetterArgument>';
 

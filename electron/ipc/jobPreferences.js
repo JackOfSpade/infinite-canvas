@@ -1,15 +1,11 @@
-export const PREFERENCE_PLAN_UNIQUENESS_SUFFIX = "--- UNIQUENESS CHECK ---\nNo two preferences, soft and strict combined, may have the same criterion text, ignoring case; every preference id must be unique across softPreferences and strictRequirements.";
 import { validationFailure } from './validationFailure.js';
 import { collector, diagnoseMarkedSections, templatesFor } from './validationLines.js';
-export const PREFERENCE_LISTING_CORRECTION_TEMPLATES = templatesFor('listing.');
-export const PREFERENCE_RESEARCH_CORRECTION_TEMPLATES = templatesFor('research.');
-export const PREFERENCE_PLAN_CORRECTION_TEMPLATES = templatesFor('plan.');
 import crypto from 'node:crypto';
 import { JOB_PREFERENCE_CRITERION_MAX_LENGTH, JOB_PREFERENCE_TITLE_MAX_LENGTH, JOB_PREFERENCE_PLAN_SCHEMA, JOB_PREFERENCE_LISTING_EVALUATION_SCHEMA, JOB_PREFERENCE_RESEARCH_BATCH_ASSESSMENT_SCHEMA, JOB_ROLE_AUDIT_RATIONALE_MAX_LENGTH, JOB_ROLE_AUDIT_SCHEMA, JOB_ROLE_SCREEN_SCHEMA, JOB_ROLE_SNIPPET_SCREEN_SCHEMA } from './aiSchemas.js';
 import { normalizeRoleScreenTitle, roleScreenTargetsKey } from './jobRoleScreenVerdicts.js';
 import { wrapUntrustedText } from './promptSafety.js';
 import { COMPANY_RESEARCH_VERSION } from './companyResearchVersion.js';
-import { sourcesPresentInGroundedResearch } from './jobCompensation.js';
+import { canonicalHttpUrl, sourcesPresentInGroundedResearch } from './jobCompensation.js';
 import {
   JOB_PREFERENCE_RESEARCH_ASSESSMENT_MAX_ITEMS,
   JOB_PREFERENCE_RESEARCH_MAX_ITEMS,
@@ -23,8 +19,14 @@ import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { createDependencyReadyQueue, HANDOFF_CONCURRENCY, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
 import { checkPromptFits } from './llm.js';
 
+const PREFERENCE_PLAN_UNIQUENESS_SUFFIX = "--- UNIQUENESS CHECK ---\nNo two preferences, soft and strict combined, may have the same criterion text, ignoring case; every preference id must be unique across softPreferences and strictRequirements.";
+const PREFERENCE_LISTING_CORRECTION_TEMPLATES = templatesFor('listing.');
+const PREFERENCE_RESEARCH_CORRECTION_TEMPLATES = templatesFor('research.');
+const PREFERENCE_PLAN_CORRECTION_TEMPLATES = templatesFor('plan.');
+
 // Legacy exports remain for third-party/test compatibility. New production
 // code imports the explicit scheduler policy from handoffScheduler.js.
+export { COMPANY_RESEARCH_VERSION };
 export {
   HANDOFF_CONCURRENCY,
   HANDOFF_CONCURRENCY as MANUAL_HANDOFF_CONCURRENCY,
@@ -46,6 +48,8 @@ const MAX_LISTING_EVIDENCE_CHARS = 20_000;
 // this cap (user-authored titles first) so truncation can only ever evict a
 // model addition; a bare literal in four places made that coupling invisible.
 const MAX_TITLES = 20;
+// Mirrors the softPreferences / strictRequirements maxItems in JOB_PREFERENCE_PLAN_SCHEMA.
+const MAX_PLAN_ITEMS = 24;
 // Listings per preference-evaluation handoff is derived, not fixed: see
 // listingEvaluationBatchSize. Every batch is one human copy/paste round trip,
 // so this number IS the user's interruption count.
@@ -65,7 +69,6 @@ const ROLE_SCREEN_BATCH_SIZE = ROLE_SCREEN_MAX_ROWS;
 // through a separate chat window — beyond the shared capacity that stops being
 // parallelism and starts being a backlog.
 const LISTING_EVAL_CONCURRENCY = HANDOFF_CONCURRENCY;
-export { COMPANY_RESEARCH_VERSION };
 const RESEARCH_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const RESEARCH_CACHE_MAX_ENTRIES = 240;
 const preferenceResearchCache = new Map();
@@ -142,12 +145,6 @@ function briefNamesTitle(briefText, title) {
   return ` ${briefText} `.includes(` ${key} `);
 }
 
-function safeHttpUrl(value) {
-  try {
-    const url = new URL(String(value || '').trim());
-    return /^https?:$/.test(url.protocol) && url.hostname && !url.username && !url.password ? url.href : '';
-  } catch { return ''; }
-}
 function normalizedEvidenceText(value, max = MAX_LISTING_EVIDENCE_CHARS) { return cleanText(value, max).toLowerCase(); }
 function normalizedGroundedResearchText(value) { return cleanText(value, MAX_GROUNDED_RESEARCH_CHARS).toLowerCase(); }
 function isGroundedEvidenceQuote(value, groundedResearch) {
@@ -222,8 +219,8 @@ function listingIdentityForAudit(job) {
   return {
     source: cleanText(job?.source, 80),
     location: cleanText(job?.location, 220),
-    url: safeHttpUrl(job?.url),
-    googleCardUrl: safeHttpUrl(job?.googleCardUrl),
+    url: canonicalHttpUrl(job?.url),
+    googleCardUrl: canonicalHttpUrl(job?.googleCardUrl),
     jobkey: cleanText(job?.jobkey || job?.jobKey || job?.jobId || job?.id, 220),
   };
 }
@@ -232,7 +229,7 @@ function normalizeItems(value, prefix) {
   // Cap raised 12 -> 24 alongside softPreferences/strictRequirements maxItems
   // in JOB_PREFERENCE_PLAN_SCHEMA; this literal would otherwise silently
   // truncate a valid 24-item response back down to 12.
-  return (Array.isArray(value) ? value.slice(0, 24) : []).flatMap((item, index) => {
+  return (Array.isArray(value) ? value.slice(0, MAX_PLAN_ITEMS) : []).flatMap((item, index) => {
     const criterion = cleanText(item?.criterion, JOB_PREFERENCE_CRITERION_MAX_LENGTH);
     if (!criterion) return [];
     let id = cleanText(item?.id, 60).replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-');
@@ -330,8 +327,8 @@ function hasValidRawPlanShape(value) {
     || !Array.isArray(value.direction.roleDirections) || value.direction.roleDirections.length > 8
     || !Array.isArray(value.direction.avoidDirections) || value.direction.avoidDirections.length > 8
     || typeof value.direction.explorationEnabled !== 'boolean'
-    || !Array.isArray(value.softPreferences) || value.softPreferences.length > 24
-    || !Array.isArray(value.strictRequirements) || value.strictRequirements.length > 24
+    || !Array.isArray(value.softPreferences) || value.softPreferences.length > MAX_PLAN_ITEMS
+    || !Array.isArray(value.strictRequirements) || value.strictRequirements.length > MAX_PLAN_ITEMS
     || !Array.isArray(value.warnings) || value.warnings.length > 6
     // settingConflicts, when present at all, is checked for array-ness ONLY
     // — deliberately looser than every sibling field here. It is a purely
@@ -341,7 +338,7 @@ function hasValidRawPlanShape(value) {
     // advisory item (or an older plan that predates this field) would let
     // advice do exactly what it exists to prevent: silently break a search.
     || (Object.hasOwn(value, 'settingConflicts') && !Array.isArray(value.settingConflicts))
-    || !Array.isArray(value.titles) || value.titles.length > 20) return false;
+    || !Array.isArray(value.titles) || value.titles.length > MAX_TITLES) return false;
   if (![...value.direction.roleDirections, ...value.direction.avoidDirections]
     .every(direction => isBoundedString(direction, JOB_PREFERENCE_CRITERION_MAX_LENGTH, { allowEmpty: false }))
     || !value.warnings.every(warning => isBoundedString(warning, 300, { allowEmpty: false }))
@@ -419,7 +416,7 @@ function isExplicitPreferencePlan(value) {
     && Object.prototype.hasOwnProperty.call(value, 'softPreferences')
     && Object.prototype.hasOwnProperty.call(value, 'strictRequirements');
 }
-export function preferencePlanFingerprint(jobPreferences, preferencePlan) {
+function preferencePlanFingerprint(jobPreferences, preferencePlan) {
   return crypto.createHash('sha256').update(JSON.stringify({ raw: cleanText(jobPreferences, MAX_PREFERENCES_CHARS), plan: normalizeJobPreferencePlan(preferencePlan), version: 1 })).digest('hex');
 }
 export async function interpretJobPreferences({ jobPreferences, profile, careerData, signal, callText, meta = {} } = {}) {
@@ -473,9 +470,9 @@ function hasValidRawJobRoleAuditShape(value) {
   if (!isRecord(value)
     || !Object.hasOwn(value, 'titles') || !Object.hasOwn(value, 'added') || !Object.hasOwn(value, 'addedReason')
     || !Object.hasOwn(value, 'removed') || !Object.hasOwn(value, 'removedReason') || !Object.hasOwn(value, 'rationale')) return false;
-  if (!Array.isArray(value.titles) || value.titles.length > 20
-    || !Array.isArray(value.added) || value.added.length > 20
-    || !Array.isArray(value.removed) || value.removed.length > 20
+  if (!Array.isArray(value.titles) || value.titles.length > MAX_TITLES
+    || !Array.isArray(value.added) || value.added.length > MAX_TITLES
+    || !Array.isArray(value.removed) || value.removed.length > MAX_TITLES
     || !isBoundedString(value.addedReason, 500) || !isBoundedString(value.removedReason, 500)
     || !isBoundedString(value.rationale, JOB_ROLE_AUDIT_RATIONALE_MAX_LENGTH)) return false;
   // Every title-shaped array entry must itself be a bounded, non-empty
@@ -708,13 +705,13 @@ function verdictsFromGroupedScreen(result, rowCount, { unlisted }) {
 // Deliberately minimal: only rejects a reply that isn't shaped like the
 // schema's top level. Bad individual indexes never cost the whole batch a
 // retry; verdictsFromGroupedScreen drops them and the row is kept.
-export function validateJobRoleScreenSubmission(value) {
+function validateJobRoleScreenSubmission(value) {
   if (!isRecord(value) || !Array.isArray(value.remove) || !Array.isArray(value.unsure)) {
     throw new Error('Job Role Screen response has an invalid or incomplete structure.');
   }
   return value;
 }
-export function validateJobRoleSnippetScreenSubmission(value) {
+function validateJobRoleSnippetScreenSubmission(value) {
   if (!isRecord(value) || !Array.isArray(value.remove)) {
     throw new Error('Job Role Snippet Screen response has an invalid or incomplete structure.');
   }
@@ -1010,7 +1007,7 @@ function listingAssessmentByIndex(raw, jobs, plan) {
   const rows = new Map((Array.isArray(raw?.assessments) ? raw.assessments.slice(0, jobs.length) : []).filter(row => Number.isInteger(row?.index) && row.index >= 0 && row.index < jobs.length).map(row => [row.index, row]));
   return jobs.map((job, index) => {
     const matches = new Map((Array.isArray(rows.get(index)?.matches) ? rows.get(index).matches.slice(0, items.length) : []).filter(match => typeof match?.preferenceId === 'string').map(match => [match.preferenceId, match]));
-    const listingUrl = safeHttpUrl(job?.url || job?.link);
+    const listingUrl = canonicalHttpUrl(job?.url || job?.link);
     const evidence = listingEvidenceText(job);
     const listingText = normalizedEvidenceText(evidence, hasOfficialPostingDescription(job) ? evidence.length : MAX_LISTING_EVIDENCE_CHARS);
     return items.map((item) => {
@@ -1154,38 +1151,24 @@ function withResearchIds(requests, preferenceFingerprint) {
   });
 }
 
-function preferenceResearchBatchDiagnostic(reason, counts = {}) {
-  // This crosses the manual-handoff boundary and can be displayed to a person
-  // or copied into a correction prompt. Keep it sterile: never place research
-  // ids, employers, criteria, source text, or offsets here.
-  const diagnostic = {
-    stage: 'research-sections',
-    reason,
-  };
-  for (const key of ['expectedCount', 'receivedCount', 'sectionCount', 'missingCount', 'unknownCount', 'duplicateCount', 'emptyCount', 'markerCount']) {
+// Diagnostics cross the manual-handoff boundary and can be shown to a person
+// or copied into a correction prompt. They identify only the failed contract
+// axis: never a research id, employer, preference, quote, URL or row position.
+function preferenceResearchDiagnostic(stage, reason, counts, countKeys) {
+  const diagnostic = { stage, reason };
+  for (const key of countKeys) {
     if (Number.isFinite(counts[key])) diagnostic[key] = Math.max(0, Math.floor(counts[key]));
   }
   return Object.freeze(diagnostic);
+}
+
+function preferenceResearchBatchDiagnostic(reason, counts = {}) {
+  return preferenceResearchDiagnostic('research-sections', reason, counts,
+    ['expectedCount', 'receivedCount', 'sectionCount', 'missingCount', 'unknownCount', 'duplicateCount', 'emptyCount', 'markerCount']);
 }
 
 function preferenceResearchAssessmentDiagnostic(reason, counts = {}) {
-  // Assessment diagnostics cross the same manual-handoff boundary as raw
-  // section diagnostics. They must identify only the failed contract axis,
-  // never a researchId, employer, preference, quote, URL, or row position.
-  const diagnostic = {
-    stage: 'research-assessment',
-    reason,
-  };
-  for (const key of ['expectedCount', 'receivedCount']) {
-    if (Number.isFinite(counts[key])) diagnostic[key] = Math.max(0, Math.floor(counts[key]));
-  }
-  return Object.freeze(diagnostic);
-}
-
-function preferenceResearchBatchError(message, validationDiagnostic = null) {
-  const error = preferenceResearchResponseError(message);
-  if (validationDiagnostic) error.validationDiagnostic = validationDiagnostic;
-  return error;
+  return preferenceResearchDiagnostic('research-assessment', reason, counts, ['expectedCount', 'receivedCount']);
 }
 
 function markerLineRecords(text) {
@@ -1216,7 +1199,7 @@ function parseJobPreferenceResearchSectionsCore(rawResearch, expectedResearchIds
   const expected = Array.isArray(expectedResearchIds) ? expectedResearchIds : [];
   const expectedSet = new Set(expected);
   if (!raw || expectedSet.size !== expected.length || expectedSet.size === 0) {
-    throw preferenceResearchBatchError('Batched Job Preference research has an invalid expected-section contract.', preferenceResearchBatchDiagnostic('INVALID_EXPECTED_IDS', {
+    throw preferenceResearchResponseError('Batched Job Preference research has an invalid expected-section contract.', preferenceResearchBatchDiagnostic('INVALID_EXPECTED_IDS', {
       expectedCount: expected.length,
     }));
   }
@@ -1228,7 +1211,7 @@ function parseJobPreferenceResearchSectionsCore(rawResearch, expectedResearchIds
   const markerLines = markerLineRecords(raw);
   const malformedMarkerCount = markerLines.filter(record => record.kind === 'malformed').length;
   if (malformedMarkerCount > 0) {
-    throw preferenceResearchBatchError('Batched Job Preference research contains malformed BEGIN/END research markers.', preferenceResearchBatchDiagnostic('MALFORMED_MARKER', {
+    throw preferenceResearchResponseError('Batched Job Preference research contains malformed BEGIN/END research markers.', preferenceResearchBatchDiagnostic('MALFORMED_MARKER', {
       expectedCount: expected.length,
       markerCount: malformedMarkerCount,
     }));
@@ -1243,14 +1226,14 @@ function parseJobPreferenceResearchSectionsCore(rawResearch, expectedResearchIds
     matchedMarkerIndexes.add(match.index + match[0].lastIndexOf('\nEND RESEARCH ') + 1);
     const researchId = match[1];
     if (!expectedSet.has(researchId)) {
-      throw preferenceResearchBatchError('Batched Job Preference research returned an unknown research section.', preferenceResearchBatchDiagnostic('UNKNOWN_SECTION', {
+      throw preferenceResearchResponseError('Batched Job Preference research returned an unknown research section.', preferenceResearchBatchDiagnostic('UNKNOWN_SECTION', {
         expectedCount: expected.length,
         receivedCount: parsedMatches.length,
         unknownCount: 1,
       }));
     }
     if (sections.has(researchId)) {
-      throw preferenceResearchBatchError('Batched Job Preference research returned a duplicate research section.', preferenceResearchBatchDiagnostic('DUPLICATE_SECTION', {
+      throw preferenceResearchResponseError('Batched Job Preference research returned a duplicate research section.', preferenceResearchBatchDiagnostic('DUPLICATE_SECTION', {
         expectedCount: expected.length,
         receivedCount: parsedMatches.length,
         duplicateCount: 1,
@@ -1258,7 +1241,7 @@ function parseJobPreferenceResearchSectionsCore(rawResearch, expectedResearchIds
     }
     const sectionText = match[2].trim();
     if (!sectionText) {
-      throw preferenceResearchBatchError('Batched Job Preference research returned an empty research section.', preferenceResearchBatchDiagnostic('EMPTY_SECTION', {
+      throw preferenceResearchResponseError('Batched Job Preference research returned an empty research section.', preferenceResearchBatchDiagnostic('EMPTY_SECTION', {
         expectedCount: expected.length,
         receivedCount: parsedMatches.length,
         sectionCount: sections.size,
@@ -1273,7 +1256,7 @@ function parseJobPreferenceResearchSectionsCore(rawResearch, expectedResearchIds
   // the complete-section matcher deliberately leaves unconsumed.
   const unmatchedMarkerCount = markerLines.filter(record => record.kind !== 'malformed' && !matchedMarkerIndexes.has(record.index)).length;
   if (unmatchedMarkerCount > 0) {
-    throw preferenceResearchBatchError('Batched Job Preference research contains malformed or incomplete BEGIN/END research sections.', preferenceResearchBatchDiagnostic('MALFORMED_MARKER', {
+    throw preferenceResearchResponseError('Batched Job Preference research contains malformed or incomplete BEGIN/END research sections.', preferenceResearchBatchDiagnostic('MALFORMED_MARKER', {
       expectedCount: expected.length,
       receivedCount: parsedMatches.length,
       markerCount: unmatchedMarkerCount,
@@ -1282,7 +1265,7 @@ function parseJobPreferenceResearchSectionsCore(rawResearch, expectedResearchIds
 
   const missingCount = expected.length - sections.size;
   if (missingCount > 0) {
-    throw preferenceResearchBatchError('Batched Job Preference research is missing one or more expected research sections.', preferenceResearchBatchDiagnostic('MISSING_SECTION', {
+    throw preferenceResearchResponseError('Batched Job Preference research is missing one or more expected research sections.', preferenceResearchBatchDiagnostic('MISSING_SECTION', {
       expectedCount: expected.length,
       receivedCount: parsedMatches.length,
       sectionCount: sections.size,
@@ -1295,7 +1278,7 @@ function parseJobPreferenceResearchSectionsCore(rawResearch, expectedResearchIds
   // request order used by the downstream assessment prompt.
   const receivedResearchIds = [...sections.keys()];
   if (receivedResearchIds.some((researchId, index) => researchId !== expected[index])) {
-    throw preferenceResearchBatchError('Batched Job Preference research returned sections in an unexpected order.', preferenceResearchBatchDiagnostic('UNEXPECTED_SECTION_ORDER', {
+    throw preferenceResearchResponseError('Batched Job Preference research returned sections in an unexpected order.', preferenceResearchBatchDiagnostic('UNEXPECTED_SECTION_ORDER', {
       expectedCount: expected.length,
       receivedCount: parsedMatches.length,
       sectionCount: sections.size,
@@ -1311,7 +1294,7 @@ function validateJobPreferenceResearchBatchSubmissionLegacy(value, { requests, g
   const sections = groundedResearchById instanceof Map ? groundedResearchById : new Map();
   const assessments = Array.isArray(value?.assessments) ? value.assessments : [];
   if (expected.length < 1 || expected.length > RESEARCH_ASSESSMENT_BATCH_SIZE || assessments.length !== expected.length) {
-    throw preferenceResearchBatchError(
+    throw preferenceResearchResponseError(
       'Batched Job Preference research must return exactly one assessment for every requested research section.',
       preferenceResearchAssessmentDiagnostic('ASSESSMENT_COVERAGE_INVALID', {
         expectedCount: expected.length,
@@ -1321,7 +1304,7 @@ function validateJobPreferenceResearchBatchSubmissionLegacy(value, { requests, g
   }
   const expectedById = new Map(expected.map(request => [request.researchId, request]));
   if (expectedById.size !== expected.length || sections.size !== expected.length) {
-    throw preferenceResearchBatchError(
+    throw preferenceResearchResponseError(
       'Batched Job Preference research has an invalid section identity contract.',
       preferenceResearchAssessmentDiagnostic('ASSESSMENT_IDENTITY_INVALID', {
         expectedCount: expected.length,
@@ -1334,7 +1317,7 @@ function validateJobPreferenceResearchBatchSubmissionLegacy(value, { requests, g
     const request = expectedById.get(row?.researchId);
     const groundedResearch = request ? sections.get(request.researchId) : null;
     if (!request || seen.has(row.researchId) || row?.preferenceId !== request.match.preferenceId || !OUTCOMES.has(row?.outcome) || typeof groundedResearch !== 'string') {
-      throw preferenceResearchBatchError(
+      throw preferenceResearchResponseError(
         'Batched Job Preference research returned an unknown, duplicate, or mismatched assessment identity.',
         preferenceResearchAssessmentDiagnostic('ASSESSMENT_IDENTITY_INVALID'),
       );
@@ -1348,20 +1331,20 @@ function validateJobPreferenceResearchBatchSubmissionLegacy(value, { requests, g
       groundedResearch,
     );
     if (!quoteIsGrounded) {
-      throw preferenceResearchBatchError(
+      throw preferenceResearchResponseError(
         'Confirmed or conflicting batched Job Preference research requires a verbatim quote from its own research section.',
         preferenceResearchAssessmentDiagnostic('ASSESSMENT_QUOTE_NOT_GROUNDED'),
       );
     }
     if (sourceUrls.length === 0) {
-      throw preferenceResearchBatchError(
+      throw preferenceResearchResponseError(
         'Confirmed or conflicting batched Job Preference research requires a direct URL from its own research section.',
         preferenceResearchAssessmentDiagnostic('ASSESSMENT_URL_NOT_GROUNDED'),
       );
     }
   }
   if (seen.size !== expectedById.size) {
-    throw preferenceResearchBatchError(
+    throw preferenceResearchResponseError(
       'Batched Job Preference research must return every requested research identity exactly once.',
       preferenceResearchAssessmentDiagnostic('ASSESSMENT_COVERAGE_INVALID', {
         expectedCount: expectedById.size,
@@ -1736,10 +1719,21 @@ async function assessCompletedCompanyResearch({ completed, ordered, options, sig
 // condition about another title, or a company question research cannot settle
 // leaves the job visible, and its card says what stayed unverified.
 const failsStrictPreference = match => match.strict && match.outcome === 'conflicts';
+function preferenceAssessmentSummary(status, unsettled, failures) {
+  if (status !== 'accepted') return 'Filtered by strict Job Preferences: ' + failures.map(match => match.criterion).join('; ');
+  return unsettled.length
+    ? `No strict Job Preference conflicts; ${unsettled.length} could not be confirmed. Soft preferences are reflected in the assessment.`
+    : 'Matches your strict Job Preferences; soft preferences are reflected in the assessment.';
+}
 function attachAssessments(jobs, rows, identityJob = job => job, { deferCompanyResearch = false } = {}) {
   const acceptedJobs = []; const filteredJobs = []; const candidatePool = []; const audits = []; let strictConflicts = 0; let strictUnverified = 0; let researchDeferred = 0;
   jobs.forEach((job, index) => {
-    const matches = rows[index] || []; const awaitingResearch = deferCompanyResearch ? matches.filter(isCompanyResearchPending) : []; if (awaitingResearch.length) researchDeferred += 1; const failures = matches.filter(match => failsStrictPreference(match) && !awaitingResearch.includes(match)); const status = failures.length ? 'filtered' : 'accepted'; const unsettled = matches.filter(match => match.strict && match.outcome === 'unverified');
+    const matches = rows[index] || [];
+    const awaitingResearch = deferCompanyResearch ? matches.filter(isCompanyResearchPending) : [];
+    if (awaitingResearch.length) researchDeferred += 1;
+    const failures = matches.filter(match => failsStrictPreference(match) && !awaitingResearch.includes(match));
+    const status = failures.length ? 'filtered' : 'accepted';
+    const unsettled = matches.filter(match => match.strict && match.outcome === 'unverified');
     if (failures.some(match => match.outcome === 'conflicts')) strictConflicts += 1;
     if (unsettled.length) strictUnverified += 1;
     const confirmedSoftPreferences = matches.filter(match => !match.strict && match.outcome === 'confirmed').length;
@@ -1756,7 +1750,17 @@ function attachAssessments(jobs, rows, identityJob = job => job, { deferCompanyR
     // A web-researched company/perk verdict is only reusable while the
     // research that produced it is still the current kind of research.
     const webResearched = matches.some(match => match?.strict && ['company', 'perk'].includes(match?.category) && match?.source === 'web');
-    const preferenceAssessment = { status, matches, ...(awaitingResearch.length ? { companyResearchPending: true } : {}), ...(webResearched ? { companyResearchVersion: COMPANY_RESEARCH_VERSION } : {}), confirmedSoftPreferences, conflictingSoftPreferences, preferenceScore, summary: status === 'accepted' ? (unsettled.length ? `No strict Job Preference conflicts; ${unsettled.length} could not be confirmed. Soft preferences are reflected in the assessment.` : 'Matches your strict Job Preferences; soft preferences are reflected in the assessment.') : 'Filtered by strict Job Preferences: ' + failures.map(match => match.criterion).join('; '), evaluatedAt: new Date().toISOString() };
+    const preferenceAssessment = {
+      status,
+      matches,
+      ...(awaitingResearch.length ? { companyResearchPending: true } : {}),
+      ...(webResearched ? { companyResearchVersion: COMPANY_RESEARCH_VERSION } : {}),
+      confirmedSoftPreferences,
+      conflictingSoftPreferences,
+      preferenceScore,
+      summary: preferenceAssessmentSummary(status, unsettled, failures),
+      evaluatedAt: new Date().toISOString(),
+    };
     const enriched = { ...job, preferenceAssessment };
     candidatePool.push(enriched);
     const identity = identityJob(job);

@@ -264,4 +264,24 @@ export default [{
       assert.equal(result.layer.items.find(item => item.id === careers[2].id).clean, careers[2].clean);
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   },
+}, {
+  name: 'A stored clean layer that no longer verifies is replaced on the next production',
+  async run() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'career-clean-layer-stale-'));
+    try {
+      const catalog = careers.map(({ id, quote }) => ({ id, quote, sourceId: 'career-data' }));
+      const stale = { ...buildCareerCleanLayer(snapshotId, catalog, [{ items: careers.map(({ id, clean }) => ({ id, clean })) }]), version: -1 };
+      const file = await writeCareerCleanLayer(root, stale);
+      assert.equal(await readCareerCleanLayer(root, snapshotId, catalog), null);
+      const result = await produceCareerCleanLayer({ snapshotId, catalog, root,
+        callText: async () => ({ items: careers.map(({ id, clean }) => ({ id, clean })) }) });
+      assert.equal(result.reused, false);
+      assert.ok(await readCareerCleanLayer(root, snapshotId, catalog));
+      assert.notEqual(JSON.parse(fs.readFileSync(file, 'utf8')).version, -1);
+      // A verified file is still kept by the first publisher.
+      const other = buildCareerCleanLayer(snapshotId, catalog, [{ items: catalog.map(({ id, quote }) => ({ id, clean: quote })) }]);
+      await writeCareerCleanLayer(root, other, catalog);
+      assert.equal((await readCareerCleanLayer(root, snapshotId, catalog)).catalog[0].cleanQuote, careers[0].clean);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  },
 }];

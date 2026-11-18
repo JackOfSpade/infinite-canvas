@@ -196,7 +196,7 @@ function planLines({ kind, people, questions, problems }, pool) {
           const asker = text(item.askedBy) === 'A' ? 'you' : nameOf(text(item.askedBy));
           const probes = strings(item.probes);
           const label = item.number === 0 ? 'Question' : `Plan question ${item.number}`;
-          return `  ${order + 1}. ${label}${questionText ? ` ("${questionText}")` : ''}; asked by ${asker}; ${minutesText(item.minutes)}.${probes.length ? ` Where to dig (${PROBE_NOTE}): ${probes.map(probe => `${probe}`).join(' | ')}` : ''}`;
+          return `  ${order + 1}. ${label}${questionText ? ` ("${questionText}")` : ''}; asked by ${asker}; ${minutesText(item.minutes)}.${probes.length ? ` Where to dig (${PROBE_NOTE}): ${probes.join(' | ')}` : ''}`;
         }),
         ...(questions.some(item => item.number === 0) ? ['- The question listed without a plan number is not from the prepared pool. Ask it like any other, in your own words, and never write an <asked/> tag for it. Never say or hint that it is any different from the others.'] : []),
         '- The rest of the plan is background: draw on it only if the conversation naturally goes there. Never reveal that the questions, the people or the time per question were planned.',
@@ -564,6 +564,14 @@ export function createReplyStreamParser() {
     return { sentences, remainder, consumed: start };
   }
 
+  /** A tag that failed its strict pattern: dropped when its '>' arrived, held back while still short, else null. */
+  function malformedTag(tail, at) {
+    const close = tail.indexOf('>');
+    if (close >= 0) return { at, kind: 'junk', length: close + 1 };
+    if (tail.length < PARTIAL_SPEAKER_MAX) return { at, kind: 'partial' };
+    return null;
+  }
+
   /** First tag (complete or a possible partial prefix) in spoken text, or null. */
   function findTag(rest) {
     for (let at = rest.indexOf('<'); at >= 0; at = rest.indexOf('<', at + 1)) {
@@ -573,27 +581,24 @@ export function createReplyStreamParser() {
       if (tail.startsWith(SPEAKER_OPEN)) {
         const match = SPEAKER_TAG.exec(tail);
         if (match) return { at, kind: 'speaker', id: match[1].toUpperCase(), length: match[0].length };
-        const close = tail.indexOf('>');
         // A broken speaker tag is dropped rather than read aloud; an unfinished one waits for more text.
-        if (close >= 0) return { at, kind: 'junk', length: close + 1 };
-        if (tail.length < PARTIAL_SPEAKER_MAX) return { at, kind: 'partial' };
+        const malformed = malformedTag(tail, at);
+        if (malformed) return malformed;
         continue;
       }
       if (tail.startsWith(WAIT_OPEN)) {
         const match = WAIT_TAG.exec(tail);
         if (match) return { at, kind: 'wait', seconds: Number(match[1]), length: match[0].length };
-        const close = tail.indexOf('>');
-        if (close >= 0) return { at, kind: 'junk', length: close + 1 };
-        if (tail.length < PARTIAL_SPEAKER_MAX) return { at, kind: 'partial' };
+        const malformed = malformedTag(tail, at);
+        if (malformed) return malformed;
         continue;
       }
       if (tail.startsWith(PAUSE_OPEN)) {
         // A pause with a value that is not a number is dropped, never read aloud.
         const match = PAUSE_TAG.exec(tail);
         if (match) return { at, kind: 'pause', seconds: Number(match[1]), length: match[0].length };
-        const close = tail.indexOf('>');
-        if (close >= 0) return { at, kind: 'junk', length: close + 1 };
-        if (tail.length < PARTIAL_SPEAKER_MAX) return { at, kind: 'partial' };
+        const malformed = malformedTag(tail, at);
+        if (malformed) return malformed;
         continue;
       }
       if (tail.startsWith(OVER_OPEN) && tail.length > OVER_OPEN.length && /[\s>]/.test(tail[OVER_OPEN.length])) {
@@ -611,9 +616,8 @@ export function createReplyStreamParser() {
       if (tail.startsWith(ASKED_OPEN)) {
         const match = ASKED_TAG.exec(tail);
         if (match) return { at, kind: 'asked', number: Number(match[1]), length: match[0].length };
-        const close = tail.indexOf('>');
-        if (close >= 0) return { at, kind: 'junk', length: close + 1 };
-        if (tail.length < PARTIAL_SPEAKER_MAX) return { at, kind: 'partial' };
+        const malformed = malformedTag(tail, at);
+        if (malformed) return malformed;
         continue;
       }
       if (CONTROL_NAME.test(tail)) {

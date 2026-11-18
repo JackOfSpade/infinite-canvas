@@ -12,7 +12,7 @@ import { reportScrapeHealth, scrapeShareBroken } from './scrapeAlarms.js';
  * Limits are provisional: per-visit rates are not saved anywhere. The saved canvas (2026-11-05) holds 305 listing
  * checks, 4 of 57 Dice rows closed within about 11 seconds, and no board near the limits below.
  */
-export const LIVENESS_HEALTH_LIMITS = Object.freeze({ minAttempts: 10, minBad: 5, maxShare: 0.5 });
+const LIVENESS_HEALTH_LIMITS = Object.freeze({ minAttempts: 10, minBad: 5, maxShare: 0.5 });
 // A pass stops after three unknown pages in a row, so few different unreadable listings are ever seen. Five is more than a pass can show.
 const UNREADABLE_LIMITS = Object.freeze({ minAttempts: 5, minBad: 5, maxShare: 0.5 });
 // One recheck pass stops after three consecutive unknown pages, so reads from several passes are judged together.

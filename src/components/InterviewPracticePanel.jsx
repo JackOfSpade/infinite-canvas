@@ -7,6 +7,7 @@ const KIND_LABELS = Object.freeze({ 'small-talk': 'Small talk', curveball: 'Curv
 
 const scoreTone = score => (typeof score !== 'number' ? 'text-white/50' : score >= 8 ? 'text-emerald-200' : score >= 5 ? 'text-amber-100' : 'text-red-200');
 const Score = ({ value }) => (typeof value === 'number' ? <span className={`text-[11px] font-semibold ${scoreTone(value)}`}>{value}/10</span> : null);
+const durationLabel = ms => { const total = Math.max(0, Math.round((Number(ms) || 0) / 1000)); return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`; };
 const when = iso => { const date = new Date(iso || ''); return Number.isNaN(date.getTime()) ? '' : date.toLocaleString(); };
 
 export function FeedbackView({ feedback }) {
@@ -77,26 +78,25 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
         nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest,
         ...(focus ? { steering: focus } : {}),
       });
-      if (result && result.success === false) setPastNotice({ tone: 'error', text: result.error || 'The practice call could not start.' });
+      if (result && result.success === false) setPastNotice(result.error || 'The practice call could not start.');
       // A call that could not start comes back as an error state and opens no window,
       // so this panel is the only place the reason can be shown.
-      else if (result?.phase === 'error') setPastNotice({ tone: 'error', text: result.error?.message || 'The practice call could not start.' });
-      else if (result?.note) setPastNotice({ tone: 'error', text: result.note });
-    } catch (error) { setPastNotice({ tone: 'error', text: error?.message || 'The practice call could not start.' }); }
+      else if (result?.phase === 'error') setPastNotice(result.error?.message || 'The practice call could not start.');
+      else if (result?.note) setPastNotice(result.note);
+    } catch (error) { setPastNotice(error?.message || 'The practice call could not start.'); }
     finally { setPracticeBusy(false); }
   };
   const openReplay = async callId => {
     if (typeof api?.openPracticeReplay !== 'function' || !callId) return;
     try {
       const result = await api.openPracticeReplay({ nodeId, callId });
-      if (result && result.success === false) setPastNotice({ tone: 'error', text: result.error || 'The replay could not open.' });
-    } catch (error) { setPastNotice({ tone: 'error', text: error?.message || 'The replay could not open.' }); }
+      if (result && result.success === false) setPastNotice(result.error || 'The replay could not open.');
+    } catch (error) { setPastNotice(error?.message || 'The replay could not open.'); }
   };
 
   // The in-app call is the only practice path; without it the panel has nothing to show.
   if (typeof api?.startPracticeCall !== 'function') return null;
   const canCall = ready && !disabled && !practiceBusy;
-  const durationLabel = ms => { const total = Math.max(0, Math.round((Number(ms) || 0) / 1000)); return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`; };
   return <section className="space-y-2 border-t border-white/10 pt-3" aria-label="Practice interview">
     <p className="text-[11px] font-medium text-violet-200"><Mic size={12} className="mr-1 inline" />Practice interview</p>
     <p className="text-[11px] text-white/60">An AI interviewer calls you inside the app: small talk, your prepared questions reworded, follow-ups and curveballs. Answer out loud, or type in the call's chat — typed answers are heard as if you said them. Feedback on the whole call comes with the replay.</p>
@@ -118,7 +118,7 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
           </li>;
         })}</ul>}
       </div>
-      {pastNotice && <p role={pastNotice.tone === 'error' ? 'alert' : 'status'} className={`text-[11px] ${pastNotice.tone === 'error' ? 'text-red-200' : 'text-emerald-100'}`}>{pastNotice.text}</p>}
+      {pastNotice && <p role="alert" className="text-[11px] text-red-200">{pastNotice}</p>}
     </div>
   </section>;
 }

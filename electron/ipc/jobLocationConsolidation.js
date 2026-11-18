@@ -1,6 +1,5 @@
 import { isResearchEligible } from './researchGate.js';
 import { collector, templatesFor } from './validationLines.js';
-export const LOCATION_CONSOLIDATION_CORRECTION_TEMPLATES = templatesFor('locconf.');
 import { JOB_LOCATION_CONSOLIDATION_CONFIRMATION_SCHEMA } from './aiSchemas.js';
 import { wrapUntrustedText } from './promptSafety.js';
 import { HANDOFF_CONCURRENCY, mapAutomaticHandoffs } from '../../src/utils/handoffScheduler.js';
@@ -9,6 +8,8 @@ import {
   descriptionText,
   findSimilarLocationCandidates,
 } from '../../src/utils/jobLocationConsolidation.js';
+
+const LOCATION_CONSOLIDATION_CORRECTION_TEMPLATES = templatesFor('locconf.');
 
 // Keep a single handoff comfortably reviewable even when a source supplies a
 // verbose boilerplate-heavy job description. The beginning normally contains

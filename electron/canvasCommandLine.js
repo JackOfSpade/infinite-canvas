@@ -30,7 +30,7 @@ export function resolveSafeCanvasFilePath(candidate, {
 }
 
 /** Find the first safe canvas path supplied on an Electron command line. */
-export function canvasPathFromCommandLine(commandLine, options = {}) {
+function canvasPathFromCommandLine(commandLine, options = {}) {
   if (!Array.isArray(commandLine)) return null;
   for (const argument of commandLine) {
     const filePath = resolveSafeCanvasFilePath(argument, options);

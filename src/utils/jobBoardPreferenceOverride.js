@@ -3,7 +3,7 @@
 // cleared, and later scans are checked against it at Combine.
 import { dedupJobsAcrossSources, sourceJobKey } from './jobIdentity.js';
 
-export const JOB_BOARD_PREFERENCE_OVERRIDE_VERSION = 1;
+const JOB_BOARD_PREFERENCE_OVERRIDE_VERSION = 1;
 export const JOB_BOARD_PREFERENCE_BRIEF_MAX_LENGTH = 4000;
 
 const cleanBrief = value => (typeof value === 'string' ? value.trim().slice(0, JOB_BOARD_PREFERENCE_BRIEF_MAX_LENGTH) : '');

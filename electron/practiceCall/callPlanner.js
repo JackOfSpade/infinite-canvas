@@ -10,6 +10,8 @@
  * asked again with the specific problems found. Only harmless normalisation is done in code.
  */
 
+import { logNote } from './logNote.js';
+
 export const PLAN_ATTEMPTS = 3;
 
 const TEMPERAMENTS = Object.freeze(['warm', 'neutral', 'tough']);
@@ -221,16 +223,19 @@ export function buildPlanPrompt(inputs = {}) {
   return lines.join('\n');
 }
 
+/** The text of a rejected answer: a string as it is, anything else written out as JSON. */
+function rejectedAnswerText(answer) {
+  if (typeof answer === 'string') return answer;
+  try { return JSON.stringify(answer, null, 2) ?? ''; } catch { return ''; }
+}
+
 /**
  * The same prompt with the rejected plan and the problems found in it, so the model fixes only
  * those. `rejected` is the raw text of the failed answer (an object is written out as JSON).
  */
 export function buildPlanRetryPrompt(inputs, problems, rejected) {
   const list = (Array.isArray(problems) ? problems : []).map(problem => `- ${problem}`);
-  let rejectedText = '';
-  if (typeof rejected === 'string') rejectedText = rejected;
-  else if (rejected !== undefined && rejected !== null) { try { rejectedText = JSON.stringify(rejected, null, 2) ?? ''; } catch { rejectedText = ''; } }
-  rejectedText = rejectedText.trim();
+  const rejectedText = (rejected === undefined || rejected === null ? '' : rejectedAnswerText(rejected)).trim();
   const capped = rejectedText.length > REJECTED_CAP ? `${rejectedText.slice(0, REJECTED_CAP)}\n(cut here: the rest was too long to show)` : rejectedText;
   return [
     buildPlanPrompt(inputs),
@@ -408,9 +413,6 @@ export function validatePlan(raw, { pool, voices, targetMinutes } = {}) {
 
 const isAbort = (error, signal) => Boolean(signal?.aborted) || error?.name === 'AbortError' || error?.code === 'aborted' || error?.code === 'ABORT_ERR';
 
-function note(logger, message) {
-  try { (logger?.info ?? logger?.warn)?.call(logger, `[PracticeCall] ${message}`); } catch { /* logging is best effort */ }
-}
 
 /**
  * Makes the plan, asking again with the problems found when an attempt does not validate.
@@ -435,7 +437,7 @@ export async function planCall({ callText, brief, application, pool, voices, tar
       rejected = '';
       problems = [`the planning call itself failed: ${error?.message || error?.code || 'no detail'}`];
       attempts.push({ problems });
-      note(logger, `plan attempt ${attempt} failed: ${problems[0]}`);
+      logNote(logger, `plan attempt ${attempt} failed: ${problems[0]}`);
       continue;
     }
     let parsed = raw;
@@ -443,15 +445,15 @@ export async function planCall({ callText, brief, application, pool, voices, tar
     if (typeof raw === 'string') {
       try { parsed = JSON.parse(raw); } catch { parsed = null; parseProblem = 'the answer is not valid JSON'; }
     }
-    rejected = typeof raw === 'string' ? raw : (() => { try { return JSON.stringify(raw, null, 2) ?? ''; } catch { return ''; } })();
+    rejected = rejectedAnswerText(raw);
     const result = parseProblem ? { plan: null, problems: [parseProblem] } : validatePlan(parsed, { pool, voices, targetMinutes });
     if (!result.problems.length) {
-      note(logger, `plan ready after ${attempt} attempt${attempt === 1 ? '' : 's'}`);
+      logNote(logger, `plan ready after ${attempt} attempt${attempt === 1 ? '' : 's'}`);
       return { plan: result.plan, attempts, ms: Date.now() - started };
     }
     problems = result.problems;
     attempts.push({ problems });
-    note(logger, `plan attempt ${attempt} rejected: ${problems.join('; ')}`);
+    logNote(logger, `plan attempt ${attempt} rejected: ${problems.join('; ')}`);
   }
   const error = new Error(`The interview could not be planned after ${PLAN_ATTEMPTS} attempts: ${problems.slice(0, 3).join('; ')}`);
   error.code = 'plan-failed';

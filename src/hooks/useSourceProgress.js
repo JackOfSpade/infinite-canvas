@@ -57,6 +57,7 @@ export function useSourceProgress(subscribe, hubId, {
   useEffect(() => {
     if (!subscribe) return undefined;
     const cleanup = subscribe((payload) => {
+      if (!payload) return;
       const { nodeId, sourceId, status } = payload;
       if (nodeId && nodeId !== hubId) return; // multi-hub safety
       if (rejectUntilResetRef.current) return;

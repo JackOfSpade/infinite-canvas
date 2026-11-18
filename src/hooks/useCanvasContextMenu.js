@@ -63,9 +63,10 @@ export function useCanvasContextMenu({
     
     const targetIds = getTargetNodeIds(reactFlow, menu.node.id);
     
+    const targetSet = new Set(targetIds);
     setNodes(nds => {
       const maxZ = nds.reduce((m, n) => Math.max(m, n.zIndex || 0), 0);
-      return nds.map(n => targetIds.includes(n.id) ? { ...n, zIndex: maxZ + 1 } : n);
+      return nds.map(n => targetSet.has(n.id) ? { ...n, zIndex: maxZ + 1 } : n);
     });
     EventLogger.log(`Brought ${targetIds.length} nodes to front`);
     setMenu(null);
@@ -78,9 +79,10 @@ export function useCanvasContextMenu({
     
     const targetIds = getTargetNodeIds(reactFlow, menu.node.id);
     
+    const targetSet = new Set(targetIds);
     setNodes(nds => {
       const minZ = nds.reduce((m, n) => Math.min(m, n.zIndex || 0), 0);
-      return nds.map(n => targetIds.includes(n.id) ? { ...n, zIndex: minZ - 1 } : n);
+      return nds.map(n => targetSet.has(n.id) ? { ...n, zIndex: minZ - 1 } : n);
     });
     EventLogger.log(`Sent ${targetIds.length} nodes to back`);
     setMenu(null);
@@ -106,7 +108,8 @@ export function useCanvasContextMenu({
     
     // If the clicked node is part of the current selection, duplicate all selected nodes
     const targetIds = getTargetNodeIds(reactFlow, menu.node.id);
-    const nodesToDuplicate = reactFlow.getNodes().filter(n => targetIds.includes(n.id));
+    const targetSet = new Set(targetIds);
+    const nodesToDuplicate = reactFlow.getNodes().filter(n => targetSet.has(n.id));
 
     duplicateNodes(nodesToDuplicate);
     setMenu(null);
@@ -133,8 +136,9 @@ export function useCanvasContextMenu({
     const isLocked = !menu.node.data?.locked;
     const targetIds = getTargetNodeIds(reactFlow, menu.node.id);
 
+    const targetSet = new Set(targetIds);
     setNodes(nds => nds.map(n => {
-      if (targetIds.includes(n.id)) {
+      if (targetSet.has(n.id)) {
         return { 
           ...n, 
           draggable: !isLocked,
@@ -165,10 +169,10 @@ export function useCanvasContextMenu({
     const isCurrentlySticky = menu.node.data?.isSticky;
     const targetIds = getTargetNodeIds(reactFlow, menu.node.id);
 
+    const targetSet = new Set(targetIds);
     setNodes(nds => nds.map(n => {
-      // Don't apply to non-text/non-sticky compatible elements passively? 
-      // Actually sticky note is meant for text nodes. We will just toggle the visual state for targeted nodes.
-      if (targetIds.includes(n.id)) {
+      // The sticky style is applied to every targeted node, whatever its type.
+      if (targetSet.has(n.id)) {
         return { 
           ...n, 
           data: { 

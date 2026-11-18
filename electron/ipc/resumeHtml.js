@@ -346,8 +346,7 @@ export function neutralizeHighlightTextEmphasis(mainHtml) {
  * on screen, background transparent on print, cream restored as a view-only
  * OCG layer by resumeRender.js's applyDualPdf). Only an explicit `ink-only`
  * opts out (flat white for ATS pipelines).
- */
-/**
+ *
  * @param {string} sourceHtml  a whole document whose root may carry variants
  * @param {object} [opts]
  * @param {'compact'|null} [opts.density]  Force `data-density="compact"` on
@@ -434,7 +433,15 @@ function safeCodePoint(codePoint) {
 }
 
 function candidateResumeText(value, trustedRenderedRoleDates) {
-  const document = new JSDOM(String(value || '')).window.document;
+  const dom = new JSDOM(String(value || ''));
+  try {
+    return candidateResumeTextFromDocument(dom.window.document, trustedRenderedRoleDates);
+  } finally {
+    dom.window.close();
+  }
+}
+
+function candidateResumeTextFromDocument(document, trustedRenderedRoleDates) {
   // A class name alone is not authority. The host may provide a source-locked
   // date set only after the structured résumé's exact sourceRoles comparison;
   // then, and only then, mask the exact date portion of a documented role
@@ -460,13 +467,9 @@ function candidateResumeText(value, trustedRenderedRoleDates) {
   return candidateText(document.body.innerHTML);
 }
 
-// Collected, not thrown one at a time. Each dash problem is independent of the
-// others, and the Local AI path turns every throw into a full authoring round —
-// so a document with an em dash in the résumé and one in the letter used to
-// cost two rounds to learn about two defects already visible in one file.
-// Colons are ordinary punctuation again (user decision, 2026-10-20). Only em
-// dashes, semicolons, spaced hyphens and en dashes outside a range are rejected.
-
+// Returns one message per forbidden punctuation kind found in the text.
+// Colons are ordinary punctuation (user decision, 2026-10-20); only em
+// dashes, semicolons, spaced hyphens and en dashes outside a range are listed.
 export function dashPunctuationProblems(text, surface) {
   const messages = {
     'em-dash': `${surface} contains an em dash. Use a comma, a conjunction, parentheses, or separate sentences instead.`,
@@ -3005,7 +3008,7 @@ export function buildResumeDocument({ documentScope = null, resumeMainHtml, vari
   if (resumeHeld) main = injectInferredSkills(main, workspace.insights, showAllVerifySkills);
 
   const attrs = variantAttrs != null ? variantAttrs : extractVariantAttrs(resumeMainHtml);
-  const suppliedCover = coverLetter ? buildCoverLetterDocument({ letter: coverLetter, variantAttrs: attrs, docId: String(docId || 'application') + '-cover' }) : '';
+  const suppliedCover = coverLetter ? buildCoverLetterDocument({ letter: coverLetter, variantAttrs: attrs, docId: String(docId || 'application') + '-cover', alreadyPunctuationChecked: true }) : '';
   const suppliedCoverText = String(suppliedCover);
   // buildCoverLetterDocument places its standalone toolbar script BEFORE the
   // real <main>; that script itself contains strings such as
@@ -3277,8 +3280,8 @@ function coverLetterDateTime(value) {
  * @param {string} [args.variantAttrs]
  * @param {string} [args.docId]         stable id for this document, namespaces localStorage autosave (§5.5)
  */
-export function buildCoverLetterDocument({ letter = {}, variantAttrs = '', docId } = {}) {
-  assertCandidateDashPunctuation({ coverLetter: letter });
+export function buildCoverLetterDocument({ letter = {}, variantAttrs = '', docId, alreadyPunctuationChecked = false } = {}) {
+  if (!alreadyPunctuationChecked) assertCandidateDashPunctuation({ coverLetter: letter });
   // Every field is decodeTextEscapes()'d before escaping so a literal "\n"/"\t"
   // the model emitted renders as real whitespace, not verbatim text.
   const name     = escapeHtml(decodeTextEscapes(letter.name || ''));

@@ -501,6 +501,23 @@ async function acknowledgeMarketplaceRecoveryUnlocked(args = {}) {
   });
 }
 
+// Aborts a claim held by another window and waits up to 30 seconds for its
+// handler to release it. Resolves false when the release did not arrive in time.
+async function abortClaimAndWait(claim, cancelCause, label) {
+  try {
+    claim.abort?.(Object.assign(new Error('Node deleted'), { name: 'AbortError', cancelCause }));
+  } catch (error) {
+    logger.warn(`[MarketplaceRecovery] Could not abort ${label} claim:`, error?.message || String(error));
+  }
+  let timeoutId;
+  const settled = await Promise.race([
+    claim.released.then(() => true),
+    new Promise(resolve => { timeoutId = setTimeout(() => resolve(false), 30_000); }),
+  ]);
+  if (timeoutId) clearTimeout(timeoutId);
+  return settled;
+}
+
 /** Durable tombstone used by explicit Reset/Cancel and exact-input invalidation. */
 async function abandonMarketplaceRecoveryUnlocked(args = {}, options = {}) {
   const scope = await owner(args);
@@ -546,20 +563,7 @@ async function abandonMarketplaceRecoveryUnlocked(args = {}, options = {}) {
     if (options.ownerToken && heldClaim.ownerToken === options.ownerToken) {
       return { ...result, claimSettled: false, ownerWillRelease: true };
     }
-    try {
-      heldClaim.abort?.(Object.assign(new Error('Node deleted'), {
-        name: 'AbortError',
-        cancelCause: cleanToken(args.reason, 40) || 'marketplace-abandoned',
-      }));
-    } catch (error) {
-      logger.warn('[MarketplaceRecovery] Could not abort canonical claim:', error?.message || String(error));
-    }
-    let timeoutId;
-    const settled = await Promise.race([
-      heldClaim.released.then(() => true),
-      new Promise(resolve => { timeoutId = setTimeout(() => resolve(false), 30_000); }),
-    ]);
-    if (timeoutId) clearTimeout(timeoutId);
+    const settled = await abortClaimAndWait(heldClaim, cleanToken(args.reason, 40) || 'marketplace-abandoned', 'canonical');
     return { ...result, claimSettled: settled };
   }
   return { ...result, claimSettled: true };
@@ -653,21 +657,7 @@ async function abandonMarketplaceRecoveryBatchUnlocked(args = {}, options = {}) 
   const claimSettlements = prepared.targets.map(async target => {
     const claim = activeClaims.get(target.filePath);
     if (!claim || claim.runId !== target.runId) return true;
-    try {
-      claim.abort?.(Object.assign(new Error('Node deleted'), {
-        name: 'AbortError',
-        cancelCause: cleanToken(args.reason, 40) || 'marketplace-deleted',
-      }));
-    } catch (error) {
-      logger.warn('[MarketplaceRecovery] Could not abort fenced claim:', error?.message || String(error));
-    }
-    let timeoutId;
-    const settled = await Promise.race([
-      claim.released.then(() => true),
-      new Promise(resolve => { timeoutId = setTimeout(() => resolve(false), 30_000); }),
-    ]);
-    if (timeoutId) clearTimeout(timeoutId);
-    return settled;
+    return abortClaimAndWait(claim, cleanToken(args.reason, 40) || 'marketplace-deleted', 'fenced');
   });
   const claimResults = await Promise.all(claimSettlements);
 
@@ -796,7 +786,7 @@ async function readBoundedJsonFile(filePath) {
   return JSON.parse(await readRegularNoFollowUtf8(filePath));
 }
 
-async function fsyncDirectory(directoryPath) {
+export async function fsyncDirectory(directoryPath) {
   const handle = await fs.promises.open(directoryPath, 'r').catch(() => null);
   if (!handle) return;
   try { await handle.sync(); } finally { await handle.close(); }

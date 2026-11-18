@@ -4,6 +4,7 @@
 // application:<jobId> for bundles, interview:<runId> for interview preparation.
 import { claudeAccountLimitState, clearClaudeAccountLimits, markClaudeAccountLimited } from './claudeAccounts.js';
 import { recordClaudePauseEvent } from './claudePauseDiagnostics.js';
+import { CLAUDE_LIMIT_PROBE_MS, CLAUDE_LIMIT_RESET_GRACE_MS } from './claudeLimitConstants.js';
 
 // The real account registry, unless a test installs an isolated one.
 const accountLayer = { markClaudeAccountLimited, claudeAccountLimitState, clearClaudeAccountLimits };
@@ -92,8 +93,8 @@ export function drainClaudeCalls(key) {
 
 // A usage limit stops every Claude call at once. Accepted answers are already
 // saved, so nothing is torn down: all work waits here and continues at the reset.
-const USAGE_PROBE_MS = 10 * 60_000;
-const USAGE_RESET_GRACE_MS = 60_000;
+const USAGE_PROBE_MS = CLAUDE_LIMIT_PROBE_MS;
+const USAGE_RESET_GRACE_MS = CLAUDE_LIMIT_RESET_GRACE_MS;
 let usageLimit = null;
 let usageTimer = null;
 const usageWaiters = new Set();
@@ -155,7 +156,9 @@ export function reportClaudeUsageLimit({ resetsAt = null, task = null, accountId
     wakeUsageWaiters();
     return { paused: false };
   }
-  const resumeAt = Math.min(...state.limited.map(item => item.limitedUntil));
+  const resumeAt = state.limited.length
+    ? Math.min(...state.limited.map(item => item.limitedUntil))
+    : now + USAGE_PROBE_MS;
   // Later failures from calls already running can only extend a known reset.
   if (usageLimit && usageLimit.resumeAt >= resumeAt) return { paused: true, resumeAt: usageLimit.resumeAt };
   usageLimit = {

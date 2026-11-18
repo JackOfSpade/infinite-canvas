@@ -7,6 +7,10 @@ export const LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS = 80_000;
 // is separate and never extends this short-lived source check.
 export const OFFICIAL_POSTING_GENERATION_RECEIPT_MAX_AGE_MS = 5 * 60 * 1_000;
 export const OFFICIAL_POSTING_LEVELS = Object.freeze(['L1', 'L2', 'L3', 'L4', 'L5', 'L6']);
+// Levels whose source is the employer's own page, and the subset whose full text is stored.
+export const OFFICIAL_LEVELS = new Set(['L1', 'L2', 'L3', 'L4']);
+export const TEXT_LEVELS = new Set(['L1', 'L2', 'L3']);
+export const CLOSED_POSTING_TEXT = /\b(?:no longer accepting applications|position has been filled|job is no longer available)\b/iu;
 export const OFFICIAL_POSTING_OUTCOMES = Object.freeze(['found', 'link-only', 'not-found', 'ambiguous', 'unreadable', 'closed', 'failed']);
 export const OFFICIAL_FETCH_FAILURE_REASONS = Object.freeze(['access-denied', 'rate-limited', 'server-error', 'network-error', 'dns-error']);
 const FETCH_FAILURE_CODES = Object.freeze(['fetch-failed', 'fetch-timeout', 'unsafe-url', 'unsafe-address', 'unsupported-content-type', 'oversize', 'invalid-text']);
@@ -89,7 +93,7 @@ export function normalizeApplyOptions(value) {
   return options;
 }
 
-function exactKeys(value, keys) {
+function onlyKnownKeys(value, keys) {
   return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => keys.includes(key));
 }
 function shortString(value, max = 500) {
@@ -98,7 +102,7 @@ function shortString(value, max = 500) {
 }
 /** Diagnostic metadata only: never retain response bodies or raw error messages. */
 export function normalizeOfficialPostingFetchFailure(value) {
-  if (!exactKeys(value, ['url', 'code', 'reason', 'statusCode']) || !FETCH_FAILURE_CODES.includes(value.code)) return null;
+  if (!onlyKnownKeys(value, ['url', 'code', 'reason', 'statusCode']) || !FETCH_FAILURE_CODES.includes(value.code)) return null;
   const url = officialHttpsUrl(value.url);
   if (!url || (value.reason !== undefined && (value.code !== 'fetch-failed' || !OFFICIAL_FETCH_FAILURE_REASONS.includes(value.reason)))
     || (value.statusCode !== undefined && (!Number.isInteger(value.statusCode) || value.statusCode < 100 || value.statusCode > 599))) return null;
@@ -119,12 +123,12 @@ export function officialPostingFetchFailure(error, requestedUrl) {
 export function officialPostingEmployerText(value) {
   return shortString(value, 120) ? value.trim() : '';
 }
-export function normalizeOfficialSalary(value) {
-  if (!exactKeys(value, ['text', 'provenance']) || !shortString(value.text, 500) || !SALARY_PROVENANCES.includes(value.provenance)) return null;
+function normalizeOfficialSalary(value) {
+  if (!onlyKnownKeys(value, ['text', 'provenance']) || !shortString(value.text, 500) || !SALARY_PROVENANCES.includes(value.provenance)) return null;
   return { text: value.text, provenance: value.provenance };
 }
 export function normalizeOfficialLocation(value) {
-  if (!exactKeys(value, ['display', 'workMode', 'remote', 'remoteCountry', 'remoteRegion'])) return null;
+  if (!onlyKnownKeys(value, ['display', 'workMode', 'remote', 'remoteCountry', 'remoteRegion'])) return null;
   if (!shortString(value.display, 500) || !['', 'remote', 'hybrid', 'onsite', 'on-site'].includes(value.workMode ?? '')
     || (value.remote !== undefined && typeof value.remote !== 'boolean')
     || !shortString(value.remoteCountry ?? '', 120) || !shortString(value.remoteRegion ?? '', 160)) return null;
@@ -146,7 +150,7 @@ const SAVED_TRAIL_CODES = Object.freeze({
 export function normalizeOfficialPosting(value) {
   const keys = ['level', 'outcome', 'employer', 'title', 'location', 'salary', 'sourceUrl', 'officialApplyUrl',
     'ats', 'tenant', 'fetchedAt', 'contentHash', 'scrapedListingSha256', 'trail', 'alternatives', 'semanticMatch', 'fetchFailures'];
-  if (!exactKeys(value, keys) || !OFFICIAL_POSTING_LEVELS.includes(value.level) || !OFFICIAL_POSTING_OUTCOMES.includes(value.outcome)
+  if (!onlyKnownKeys(value, keys) || !OFFICIAL_POSTING_LEVELS.includes(value.level) || !OFFICIAL_POSTING_OUTCOMES.includes(value.outcome)
     || !shortString(value.employer, 120)) return null;
   const result = { level: value.level, outcome: value.outcome, employer: value.employer };
   for (const [key, max] of [['title', 500], ['ats', 80], ['tenant', 240]]) {
@@ -167,7 +171,7 @@ export function normalizeOfficialPosting(value) {
     if (!/^[a-f0-9]{64}$/u.test(value[key])) return null; result[key] = value[key];
   }
   if (value.semanticMatch !== undefined) {
-    if (!exactKeys(value.semanticMatch, ['version', 'inputHash', 'sourceHash']) || value.semanticMatch.version !== 1
+    if (!onlyKnownKeys(value.semanticMatch, ['version', 'inputHash', 'sourceHash']) || value.semanticMatch.version !== 1
       || !/^[a-f0-9]{64}$/u.test(value.semanticMatch.inputHash)) return null;
     if (value.semanticMatch.sourceHash !== undefined && !/^[a-f0-9]{64}$/u.test(value.semanticMatch.sourceHash)) return null;
     result.semanticMatch = { version: 1, inputHash: value.semanticMatch.inputHash,
@@ -196,7 +200,7 @@ export function normalizeOfficialPosting(value) {
     if (!Array.isArray(value.alternatives) || value.alternatives.length > 12) return null;
     result.alternatives = [];
     for (const item of value.alternatives) {
-      if (!exactKeys(item, ['url', 'title']) || !shortString(item.title, 500)) return null;
+      if (!onlyKnownKeys(item, ['url', 'title']) || !shortString(item.title, 500)) return null;
       const url = officialHttpsUrl(item.url); if (!url) return null;
       result.alternatives.push({ url, title: item.title });
     }
@@ -221,7 +225,7 @@ export const BOARD_ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/u;
 export function normalizeAlternateListings(value) {
   const links = []; const seen = new Set();
   for (const item of Array.isArray(value) ? value : []) {
-    if (!exactKeys(item, ['board', 'url']) || !['board', 'url'].every(key => Object.hasOwn(item, key))
+    if (!onlyKnownKeys(item, ['board', 'url']) || !['board', 'url'].every(key => Object.hasOwn(item, key))
       || typeof item.board !== 'string' || !BOARD_ID_RE.test(item.board)) continue;
     const url = officialHttpsUrl(item.url);
     if (!url || seen.has(url)) continue;
@@ -236,7 +240,7 @@ export function boardClosedBoardLabel(board) {
 }
 /** Exact keys, a source id, an enumerated reason and a real instant. Anything else is not a board-closed row. */
 export function normalizeBoardClosed(value) {
-  if (!exactKeys(value, ['board', 'reason', 'at']) || !['board', 'reason', 'at'].every(key => Object.hasOwn(value, key))) return null;
+  if (!onlyKnownKeys(value, ['board', 'reason', 'at']) || !['board', 'reason', 'at'].every(key => Object.hasOwn(value, key))) return null;
   if (typeof value.board !== 'string' || !BOARD_ID_RE.test(value.board) || !BOARD_CLOSED_REASONS.includes(value.reason)) return null;
   if (!shortString(value.at, 40)) return null;
   const instant = Date.parse(value.at);
@@ -248,7 +252,7 @@ const LISTING_LIVENESS_VERDICTS = Object.freeze(['open', 'closed', 'pending', 'u
 const LISTING_LIVENESS_BASES = Object.freeze(['open-marker', 'structural', 'ai', 'closed-marker', 'neither', 'both']);
 /** A bounded observation, never a copy of page text or a URL. */
 export function normalizeListingLiveness(value) {
-  if (!exactKeys(value, ['verdict', 'basis', 'board', 'at'])
+  if (!onlyKnownKeys(value, ['verdict', 'basis', 'board', 'at'])
     || !['verdict', 'basis', 'board', 'at'].every(key => Object.hasOwn(value, key))) return null;
   if (!LISTING_LIVENESS_VERDICTS.includes(value.verdict) || !LISTING_LIVENESS_BASES.includes(value.basis)
     || typeof value.board !== 'string' || !BOARD_ID_RE.test(value.board) || !shortString(value.at, 40)) return null;
@@ -284,7 +288,7 @@ export function officialResearchSettled(value) {
   if (!posting || !['not-found', 'ambiguous', 'closed'].includes(posting.outcome)) return false;
   if (officialPostingNegativeNeedsRecheck(posting)) return false;
   const trail = Array.isArray(posting.trail) ? posting.trail : [];
-  const officialClosed = ['L1', 'L2', 'L3', 'L4'].includes(posting.level) && posting.outcome === 'closed'
+  const officialClosed = OFFICIAL_LEVELS.has(posting.level) && posting.outcome === 'closed'
     && officialHttpsUrl(posting.sourceUrl) && trail.includes('closed') && trail.includes('semantic-match-v1')
     && /^[a-f0-9]{64}$/u.test(posting.semanticMatch?.inputHash || '') && /^[a-f0-9]{64}$/u.test(posting.semanticMatch?.sourceHash || '');
   if (!['L5', 'L6'].includes(posting.level) && !officialClosed) return false;
@@ -298,7 +302,7 @@ export function officialPostingLookupStatus(value) {
   const posting = normalizeOfficialPosting(value);
   const result = (state, label, detail, retryable, sourceUrl = '', applyUrl = '') => ({ state, label, detail, retryable, sourceUrl, applyUrl });
   if (!posting) return result('unchecked', 'Official posting not checked', 'Run the official posting lookup in the app.', true);
-  const official = ['L1', 'L2', 'L3', 'L4'].includes(posting.level);
+  const official = OFFICIAL_LEVELS.has(posting.level);
   const trail = new Set(posting.trail || []);
   if (official && ['found', 'link-only'].includes(posting.outcome) && (posting.sourceUrl || posting.officialApplyUrl)) {
     if (trail.has('reverify-failed')) {
@@ -362,7 +366,7 @@ function officialPostingResearchInconclusive(value) {
   const posting = normalizeOfficialPosting(value);
   if (!posting || posting.fetchFailures?.length) return false;
   const trail = posting.trail || [];
-  const official = ['L1', 'L2', 'L3', 'L4'].includes(posting.level) && ['found', 'link-only'].includes(posting.outcome);
+  const official = OFFICIAL_LEVELS.has(posting.level) && ['found', 'link-only'].includes(posting.outcome);
   if (official && !trail.includes('reverify-failed')) return false;
   // Only the no-leads path records research-miss beside worker-research; a failed search records it alone.
   // A kept verification carries worker-research from its earlier run, so it cannot show this.
@@ -394,7 +398,7 @@ export function officialPostingClosureReadFullPage(posting) {
  * and neither does a lookup below official level or one from before the current checks. */
 export function officialPostingStatesClosed(value) {
   const posting = normalizeOfficialPosting(value);
-  return Boolean(posting) && ['L1', 'L2', 'L3', 'L4'].includes(posting.level) && Boolean(posting.sourceUrl)
+  return Boolean(posting) && OFFICIAL_LEVELS.has(posting.level) && Boolean(posting.sourceUrl)
     && (posting.trail || []).includes('semantic-match-v1') && officialPostingClosureReadFullPage(posting)
     && officialPostingLookupStatus(posting).state === 'closed';
 }
@@ -406,7 +410,7 @@ export function officialPostingStatesClosed(value) {
 export function mostOfficialSource(job) {
   const posting = normalizeOfficialPosting(job?.officialPosting);
   if (officialPostingStatesClosed(posting)) return { kind: 'official', closed: true };
-  if (posting && ['L1', 'L2', 'L3', 'L4'].includes(posting.level) && ['found', 'link-only'].includes(posting.outcome)
+  if (posting && OFFICIAL_LEVELS.has(posting.level) && ['found', 'link-only'].includes(posting.outcome)
     && (posting.sourceUrl || posting.officialApplyUrl)) return { kind: 'official', closed: false };
   return { kind: 'listing', closed: normalizeListingLiveness(job?.listingLiveness)?.verdict === 'closed' };
 }

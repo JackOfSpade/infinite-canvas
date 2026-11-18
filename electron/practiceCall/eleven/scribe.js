@@ -3,7 +3,7 @@
  * Words keep fillers and false starts: `no_verbatim` stays false.
  */
 import nodeFs from 'node:fs';
-import { classifyFailure, voiceError, redact } from './dialogueVoice.js';
+import { classifyFailure, voiceError, redact } from './voiceErrors.js';
 
 export const SCRIBE_URL = 'https://api.elevenlabs.io/v1/speech-to-text';
 export const SCRIBE_MODEL = 'scribe_v2';

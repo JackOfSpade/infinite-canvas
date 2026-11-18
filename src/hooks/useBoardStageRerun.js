@@ -127,6 +127,6 @@ export function useBoardStageRerun(options) {
   }, [cancel]);
 
   const recovering = !progress && retained?.owner === 'board-refresh' && retained.stage ? retained.stage : null;
-  return { runRef, running: progress !== null || !!recovering,
+  return { running: progress !== null || !!recovering,
     progress: progress || (recovering ? { stage: recovering, recovering: true } : null), start, cancel };
 }

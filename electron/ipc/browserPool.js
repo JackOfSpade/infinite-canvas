@@ -386,11 +386,6 @@ async function executeScrape(url, extractorJS, options = {}) {
           options.signal.addEventListener('abort', abortHandler, { once: true });
         }
 
-        // If the outer operation already timed out before we got the page, abort.
-        if (isSettled) {
-          return null;
-        }
-
         // Set page-level timeout (headroom carved out of the working budget)
         page.setDefaultNavigationTimeout(Math.max(5000, budgetMs - READINESS.DEFAULT_NAV_HEADROOM_MS));
 
@@ -755,14 +750,18 @@ export function queueScrape(url, extractorJS, options = {}) {
   // when they're also sharing the same signal (e.g. all tasks in one
   // scrapeMultiple() batch, which do), not just coincidentally targeting the
   // same URL from unrelated call sites.
-  const cacheKey = [
+  const cacheKey = JSON.stringify([
     url, extractorJS,
     options.sourceLabel || '',
     options.timeoutMs || 0,
     options.referer || '',
     options.scrollFirst || false,
+    options.waitFor || null,
+    options.dismissCookies ?? true,
+    options.waitUntil || '',
+    options.expectedMinItems ?? null,
     idFor(options.signal),
-  ].join('|');
+  ]);
 
   if (activeTasks.has(cacheKey)) {
     return activeTasks.get(cacheKey);

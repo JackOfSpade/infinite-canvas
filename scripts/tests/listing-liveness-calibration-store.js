@@ -47,4 +47,26 @@ export default [{
       await fs.rm(root, { recursive: true, force: true });
     }
   },
+}, {
+  name: 'calibration store: a read failure other than a missing file never lets a write replace stored counters',
+  async run() {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'synthetic-listing-calibration-'));
+    try {
+      const file = path.join(root, 'calibration.json');
+      const store = createListingLivenessCalibrationStore(file);
+      await fs.mkdir(file);
+      await assert.rejects(store.recordAiAnswer({ ruleKey: 'linkedin', verdict: 'open' }), { code: 'EISDIR' });
+      await assert.rejects(store.demoteRule({ ruleKey: 'linkedin', ruleId: 'linkedin-enabled-apply' }), { code: 'EISDIR' });
+      assert.ok((await fs.stat(file)).isDirectory(), 'nothing was written over the unreadable path');
+      assert.equal((await store.snapshot()).boards.linkedin.aiCheckedPages, 0, 'a snapshot still shows defaults');
+      await fs.rmdir(file);
+      await store.recordAiAnswer({ ruleKey: 'linkedin', verdict: 'open' });
+      assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).boards.linkedin.aiCheckedPages, 1, 'a missing file starts from defaults');
+      await fs.writeFile(file, '{ not json');
+      await store.recordAiAnswer({ ruleKey: 'linkedin', verdict: 'open' });
+      assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).boards.linkedin.aiCheckedPages, 1, 'a corrupt file starts from defaults');
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  },
 }];

@@ -7,7 +7,7 @@
  */
 import { JSDOM } from 'jsdom';
 
-export const APPLICATION_DOCUMENT_KINDS = Object.freeze(['resume', 'cover']);
+const APPLICATION_DOCUMENT_KINDS = Object.freeze(['resume', 'cover']);
 
 export function normalizeApplicationDocumentScope(value) {
   if (value === undefined || value === null || value === '') return null;
@@ -108,12 +108,12 @@ export function savedResumeTextFromHtml(html) {
   try {
     const panel = dom.window.document.querySelector('[data-ic-document-panel="resume"] main.page');
     if (!panel) return '';
-    const selected = [];
+    let lastSelected = null;
     let text = '';
     for (const element of panel.querySelectorAll(SAVED_RESUME_BLOCK_SELECTOR)) {
-      if (selected.some(parent => parent.contains(element))) continue;
+      if (lastSelected?.contains(element)) continue;
       if (element.closest(HIDDEN_BLOCK_SELECTOR)) continue;
-      selected.push(element);
+      lastSelected = element;
       const line = collapseBlockText(element.textContent);
       if (!line) continue;
       const next = text ? `${text}\n${line}` : line;

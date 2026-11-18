@@ -1526,4 +1526,21 @@ export default [
       return { searchConsentBoundary: true, boardConsentBoundary: true, mountedProviderLeaseExact: true };
     },
   },
+  {
+    name: 'startup recovery defers one failing entry, and hook failures are contained',
+    run: async () => {
+      const hook = (file) => readFileSync(new URL(`../../src/hooks/${file}`, import.meta.url), 'utf8');
+      const recovery = hook('useWorkspaceStartupRecovery.js');
+      assert(recovery.includes('})().catch((error) => {')
+        && recovery.includes("state: 'provider-deferred', error: error?.message || String(error) };\n      })));")
+        && recovery.includes('[StartupRecovery] discovery failed'),
+      'each recovery entry is guarded and the discovery chain has a catch');
+      assert(hook('useLocalAiFallbackManager.js').includes('[LocalAI] fallback tick failed'), 'the fallback tick catches its own failures');
+      assert(/setTimeout\(\(\) => \{\n\s+hasFocusedRef\.current = true;/.test(hook('useNodeAutoEdit.js')),
+        'auto-edit marks itself focused only when the focus timeout fires');
+      assert(hook('useSourceProgress.js').includes('if (!payload) return;\n      const { nodeId, sourceId, status } = payload;'),
+        'a nullish progress payload is ignored');
+      return { contained: true };
+    },
+  },
 ];

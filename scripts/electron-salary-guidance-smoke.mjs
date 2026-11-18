@@ -132,7 +132,6 @@ try {
   await page.getByText('Desired salary copied', { exact: true }).waitFor();
   assert.deepEqual(await page.evaluate(() => window.__salarySmokeClipboardWrites), ['125000'],
     'Copy must send only the salary number to the clipboard write adapter');
-  await personalized.screenshot({ path: '/tmp/ic-salary-guidance-smoke.png' });
 
   const stale = await showFixture('stale', canvasFixture(personalRecommendation, 'b'.repeat(64)));
   const staleText = await stale.innerText();

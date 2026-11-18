@@ -223,6 +223,24 @@ function assertStructuredResponseSchema(responseSchema, caller) {
   throw new Error(`${caller} requires a responseSchema. Use callLLMRaw for prose or grounded research.`);
 }
 
+// The progress hints every call forwards to the handoff. Vision leaves out the
+// queued-work forecast and the manual-handoff controls on purpose.
+const hintFields = hints => ({
+  batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
+  itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal, planItemCount: hints.planItemCount, matchCount: hints.matchCount,
+  progressScopeId: hints.progressScopeId, progressUnitId: hints.progressUnitId, progressUnits: hints.progressUnits,
+  attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
+});
+const manualHandoffFields = manualHandoff => ({
+  canStepBack: manualHandoff.canStepBack,
+  stepBackLabel: manualHandoff.stepBackLabel,
+  initialResponse: manualHandoff.initialResponse,
+  comparisonGroup: manualHandoff.comparisonGroup,
+  comparisonRun: manualHandoff.comparisonRun,
+  onHandoffAssigned: manualHandoff.onAssigned,
+  onHandoffRoute: manualHandoff.onRoute,
+});
+
 /**
  * Structured (JSON-schema) text call.
  *
@@ -241,20 +259,11 @@ export async function callLLMText(prompt, opts = {}) {
   // shape callers already expect.
   const meta = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   const result = await requestNonApiAi({
-    prompt, cachedPrefix, task, responseSchema, grounding, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
-    itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal, planItemCount: hints.planItemCount, matchCount: hints.matchCount,
-    progressScopeId: hints.progressScopeId, progressUnitId: hints.progressUnitId, progressUnits: hints.progressUnits,
+    prompt, cachedPrefix, task, responseSchema, grounding, ...hintFields(hints),
     queuedWorkForecast: hints.queuedWorkForecast,
-    attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
     requestKind: 'structured-text', displayOnlyPromptSuffix, responseValidator,
     measureResponseUnits: opts?.measureResponseUnits, measureProgressUnits: opts?.measureProgressUnits, signal,
-    canStepBack: manualHandoff.canStepBack,
-    stepBackLabel: manualHandoff.stepBackLabel,
-    initialResponse: manualHandoff.initialResponse,
-    comparisonGroup: manualHandoff.comparisonGroup,
-    comparisonRun: manualHandoff.comparisonRun,
-    onHandoffAssigned: manualHandoff.onAssigned,
-    onHandoffRoute: manualHandoff.onRoute,
+    ...manualHandoffFields(manualHandoff),
   });
   if (meta) meta.model = 'non-api-ai';
   return result;
@@ -286,20 +295,11 @@ export async function callLLMRaw(prompt, opts = {}) {
   assertClaudePromptFits(cachedPrefix, prompt);
   const meta = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   const result = await requestNonApiAi({
-    prompt, cachedPrefix, task, grounding, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
-    itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal, planItemCount: hints.planItemCount, matchCount: hints.matchCount,
-    progressScopeId: hints.progressScopeId, progressUnitId: hints.progressUnitId, progressUnits: hints.progressUnits,
+    prompt, cachedPrefix, task, grounding, ...hintFields(hints),
     queuedWorkForecast: hints.queuedWorkForecast,
-    attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
     requestKind: 'raw-text', displayOnlyPromptSuffix, responseValidator,
     measureProgressUnits: opts?.measureProgressUnits, signal,
-    canStepBack: manualHandoff.canStepBack,
-    stepBackLabel: manualHandoff.stepBackLabel,
-    initialResponse: manualHandoff.initialResponse,
-    comparisonGroup: manualHandoff.comparisonGroup,
-    comparisonRun: manualHandoff.comparisonRun,
-    onHandoffAssigned: manualHandoff.onAssigned,
-    onHandoffRoute: manualHandoff.onRoute,
+    ...manualHandoffFields(manualHandoff),
   });
   if (meta) meta.model = 'non-api-ai';
   return result;
@@ -344,10 +344,7 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
   assertClaudePromptFits(prompt, schemaText(responseSchema));
   const meta = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   const result = await requestNonApiAi({
-    prompt, task, responseSchema, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
-    itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal, planItemCount: hints.planItemCount, matchCount: hints.matchCount,
-    progressScopeId: hints.progressScopeId, progressUnitId: hints.progressUnitId, progressUnits: hints.progressUnits,
-    attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
+    prompt, task, responseSchema, ...hintFields(hints),
     attachmentPaths: imagePaths, requestKind: 'structured-vision', responseValidator,
     attachmentReader: typeof opts?.[HOST_STAGED_VISION_READER] === 'function'
       ? opts[HOST_STAGED_VISION_READER] : readRendererAttachmentForBridge,

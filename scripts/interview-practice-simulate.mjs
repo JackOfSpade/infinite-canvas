@@ -5,6 +5,7 @@
  * (scripts/fixtures/ami-within-turn-pauses.json); everything else is SYNTHETIC: latencies are sampled from lognormals fitted to the
  * Phase 0 p50/p95 numbers and the candidate is scripted (see scripts/fixtures/interview-practice-call-scenarios.mjs).
  */
+import { pathToFileURL } from 'node:url';
 import { createPracticeCallEngine, DEFAULT_CALL_THRESHOLDS } from '../electron/interviewPracticeCallEngine.js';
 import { SCENARIOS, getScenario, AMI_PAUSES, PAUSE_SOURCE_LINE } from './fixtures/interview-practice-call-scenarios.mjs';
 
@@ -718,40 +719,36 @@ export async function runSweep({
 const earOption = useEar => (useEar ? { smartTurnAccuracy: DEFAULT_SMART_TURN_ACCURACY } : false);
 
 async function sweepRow(scenario, seedsUsed, thresholds, listenAccuracy, useEar = false) {
-  {
-    {
-      let answers = 0;
-      let cutIns = 0;
-      let talkOver = 0;
-      let wasted = 0;
-      let discarded = 0;
-      let speculations = 0;
-      const latencies = [];
-      for (const seed of seedsUsed) {
-        const result = await runScenario(scenario, { thresholds, seed, listenAccuracy, ear: earOption(useEar) });
-        answers += result.answers.length;
-        cutIns += result.cutIns;
-        talkOver += result.talkOverMsTotal;
-        wasted += result.wastedVoiceChars;
-        discarded += result.discarded;
-        speculations += result.speculations;
-        const ends = result.answers.map(answer => answer.end);
-        for (const timing of result.timings) {
-          // Only replies to a finished answer count: a reply to a mid-answer pause is a cut-in, not a latency.
-          if (Number.isFinite(timing.lastWordToFirstSoundMs) && ends.some(end => Math.abs(end - timing.lastWordAt) < 5)) latencies.push(timing.lastWordToFirstSoundMs);
-        }
-      }
-      const cutInRate = answers ? cutIns / answers : 0;
-      return {
-        ...thresholds, listenAccuracy, ear: !!useEar, answers, cutIns, discarded, speculations, samples: latencies.length,
-        cutInRate, falseCutInRate: cutInRate, // falseCutInRate: legacy name read by chooseBest
-        talkOverMsMean: cutIns ? round(talkOver / cutIns) : null,
-        discardRate: speculations ? discarded / speculations : 0,
-        wastedVoiceChars: wasted, wastedVoiceCharsPerAnswer: answers ? round(wasted / answers) : 0,
-        p50Ms: round(percentile(latencies, 0.5)), p95Ms: round(percentile(latencies, 0.95)),
-      };
+  let answers = 0;
+  let cutIns = 0;
+  let talkOver = 0;
+  let wasted = 0;
+  let discarded = 0;
+  let speculations = 0;
+  const latencies = [];
+  for (const seed of seedsUsed) {
+    const result = await runScenario(scenario, { thresholds, seed, listenAccuracy, ear: earOption(useEar) });
+    answers += result.answers.length;
+    cutIns += result.cutIns;
+    talkOver += result.talkOverMsTotal;
+    wasted += result.wastedVoiceChars;
+    discarded += result.discarded;
+    speculations += result.speculations;
+    const ends = result.answers.map(answer => answer.end);
+    for (const timing of result.timings) {
+      // Only replies to a finished answer count: a reply to a mid-answer pause is a cut-in, not a latency.
+      if (Number.isFinite(timing.lastWordToFirstSoundMs) && ends.some(end => Math.abs(end - timing.lastWordAt) < 5)) latencies.push(timing.lastWordToFirstSoundMs);
     }
   }
+  const cutInRate = answers ? cutIns / answers : 0;
+  return {
+    ...thresholds, listenAccuracy, ear: !!useEar, answers, cutIns, discarded, speculations, samples: latencies.length,
+    cutInRate, falseCutInRate: cutInRate, // falseCutInRate: legacy name read by chooseBest
+    talkOverMsMean: cutIns ? round(talkOver / cutIns) : null,
+    discardRate: speculations ? discarded / speculations : 0,
+    wastedVoiceChars: wasted, wastedVoiceCharsPerAnswer: answers ? round(wasted / answers) : 0,
+    p50Ms: round(percentile(latencies, 0.5)), p95Ms: round(percentile(latencies, 0.95)),
+  };
 }
 
 /** Per listenAccuracy: the lowest-p95 rows with cut-in rate <= 5%, and the lowest wasted-character rows. */
@@ -834,5 +831,5 @@ async function main(argv) {
   console.log(json ? JSON.stringify(out, null, 2) : out.map(row => Object.values(row).join('\t')).join('\n'));
 }
 
-const entry = process.argv[1] ? (await import('node:url')).pathToFileURL(process.argv[1]).href : null;
+const entry = process.argv[1] ? pathToFileURL(process.argv[1]).href : null;
 if (entry === import.meta.url) main(process.argv.slice(2)).catch(error => { console.error(error); process.exitCode = 1; });

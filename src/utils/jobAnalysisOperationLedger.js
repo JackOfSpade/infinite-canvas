@@ -21,38 +21,42 @@ export function createJobAnalysisOperationLedger() {
     disposition: capability.disposition || null,
   } : null;
 
+  function prepare({ canvasFilePath = null, hubId, runId = null, fingerprint = null, disposition = null } = {}) {
+    if (!hubId) return null;
+    const operationId = globalThis.crypto?.randomUUID?.();
+    // Operation ids are cross-process durable authority names. A timestamp
+    // or Math.random fallback can collide after reload/restart and is not a
+    // capability; fail closed on a platform without secure UUID support.
+    if (!operationId) throw new Error('Secure operation UUID support is required.');
+    return Object.freeze({
+      canvasFilePath: canvasFilePath || null,
+      hubId,
+      generation: null,
+      // Generation is diagnostic only: it restarts on a renderer remount.
+      // The opaque id is the persisted authority and must never collide with
+      // an old in-flight operation after reload/restart.
+      operationId,
+      runId: runId || null,
+      fingerprint: fingerprint || null,
+      disposition: disposition || null,
+    });
+  }
+  function adopt(prepared, authority = null) {
+    if (!prepared?.operationId || !prepared?.hubId) return null;
+    // The host-issued receipt is the authority for immediate IPC calls. Do
+    // not wait for React node-state propagation, which can race a Resume.
+    const capability = Object.freeze({ ...prepared, authority, generation: ++generation });
+    current = capability;
+    return capability;
+  }
+  function claim(args = {}) {
+    return adopt(prepare(args));
+  }
+
   return {
-    prepare({ canvasFilePath = null, hubId, runId = null, fingerprint = null, disposition = null } = {}) {
-      if (!hubId) return null;
-      const operationId = globalThis.crypto?.randomUUID?.();
-      // Operation ids are cross-process durable authority names. A timestamp
-      // or Math.random fallback can collide after reload/restart and is not a
-      // capability; fail closed on a platform without secure UUID support.
-      if (!operationId) throw new Error('Secure operation UUID support is required.');
-      return Object.freeze({
-        canvasFilePath: canvasFilePath || null,
-        hubId,
-        generation: null,
-        // Generation is diagnostic only: it restarts on a renderer remount.
-        // The opaque id is the persisted authority and must never collide with
-        // an old in-flight operation after reload/restart.
-        operationId,
-        runId: runId || null,
-        fingerprint: fingerprint || null,
-        disposition: disposition || null,
-      });
-    },
-    adopt(prepared, authority = null) {
-      if (!prepared?.operationId || !prepared?.hubId) return null;
-      // The host-issued receipt is the authority for immediate IPC calls. Do
-      // not wait for React node-state propagation, which can race a Resume.
-      const capability = Object.freeze({ ...prepared, authority, generation: ++generation });
-      current = capability;
-      return capability;
-    },
-    claim(args = {}) {
-      return this.adopt(this.prepare(args));
-    },
+    prepare,
+    adopt,
+    claim,
     canCommit(capability) {
       return capability != null && current === capability;
     },

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { exactInterviewAnswerMatch } from '../utils/interviewAnswerMatching.js';
 import PreparedAnswer from '../interview-window/PreparedAnswer.jsx';
 
-const inputClass = 'mt-1 w-full rounded-md border border-white/15 bg-[#0f0e14] px-2 py-1.5 text-xs text-white';
+export const inputClass = 'mt-1 w-full rounded-md border border-white/15 bg-[#0f0e14] px-2 py-1.5 text-xs text-white';
 
 const statementOf = value => typeof value === 'string' ? value : (typeof value?.text === 'string' ? value.text : '');
 const evidenceIdsOf = value => Array.isArray(value?.evidenceIds) ? value.evidenceIds : [];
@@ -72,4 +72,3 @@ export function InterviewQaMatchTester({ foundationCards = [], companyCards = []
   </section>;
 }
 
-export default InterviewCardPreview;

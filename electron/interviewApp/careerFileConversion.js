@@ -12,17 +12,20 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { buildCareerFileToTextPrompt } from '../ipc/careerFileToText.js';
+import { isWithinDirectory } from '../utils/pathSafety.js';
 
 export const CAREER_CONVERSIONS_DIR = 'interview-helper-career-conversions';
 export const CAREER_FILE_TO_TEXT_STAGE = 'career-file-to-text';
-export const CONVERT_CAREER_FILES_CHANNEL = 'convert-interview-career-files';
-export const REVEAL_CONVERTED_CAREER_FILE_CHANNEL = 'interview-app:reveal-converted-career-file';
-export const MAX_CAREER_DROP_FILES = 50;
+// The CommonJS preload cannot import this module, so it repeats these two channel names as literals.
+// This file owns the names.
+const CONVERT_CAREER_FILES_CHANNEL = 'convert-interview-career-files';
+const REVEAL_CONVERTED_CAREER_FILE_CHANNEL = 'interview-app:reveal-converted-career-file';
+const MAX_CAREER_DROP_FILES = 50;
 const MAX_PATH_CHARS = 4096;
 const MAX_NODE_ID_CHARS = 300;
 const MAX_TOKENS = 1000;
 // Claude's image input limit is 5 MB of image data; larger pictures are refused with a plain reason.
-export const MAX_AI_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_AI_IMAGE_BYTES = 5 * 1024 * 1024;
 // Image types Claude accepts as an image block. tiff and heic are not among them.
 const AI_IMAGE_TYPES = Object.freeze({
   'image/png': 'png', 'image/jpeg': 'jpeg', 'image/gif': 'gif', 'image/webp': 'webp',
@@ -45,7 +48,7 @@ export function validateConvertArgs(args) {
 }
 
 /** The private folder of converted text files under the shared data root (same checks as the other private stores). */
-export async function privateConversionsRoot(dataRoot) {
+async function privateConversionsRoot(dataRoot) {
   if (typeof dataRoot !== 'string' || !path.isAbsolute(dataRoot)) throw new Error('Career conversion folder unavailable');
   const userData = path.resolve(dataRoot);
   const stat = await fs.promises.lstat(userData);
@@ -99,9 +102,10 @@ async function loadConvert() {
   return mod.convertCareerFiles;
 }
 
+// A file below the root; the root itself does not count.
 const insideRoot = (root, target) => {
-  const relative = path.relative(root, path.resolve(String(target || '')));
-  return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
+  const resolved = path.resolve(String(target || ''));
+  return resolved !== path.resolve(root) && isWithinDirectory(root, resolved);
 };
 
 /**

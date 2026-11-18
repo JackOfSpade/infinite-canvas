@@ -12,18 +12,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { atomicWriteJson } from '../utils/pathSafety.js';
 
 export const WATCH_READY_OCCURRENCES = 3;
 // Below one correction in six reviewed bundles the pattern reads as variation.
-export const WATCH_LOW_RATE = 1 / 6;
+const WATCH_LOW_RATE = 1 / 6;
 // Reviewed this many times since the last correction, the item is dormant.
 export const WATCH_DORMANT_REVIEWS = 15;
-export const WATCH_SUMMARY_MAX_CHARS = 200;
-export const WATCH_CATEGORIES = Object.freeze(['truth error', 'evidence choice', 'wording', 'structure', 'length', 'letter structure', 'user judgment call']);
-export const WATCH_DOCUMENTS = Object.freeze(['resume', 'letter', 'both']);
-export const WATCH_STATUSES = Object.freeze(['watching', 'acting', 'resolved', 'dismissed']);
+const WATCH_SUMMARY_MAX_CHARS = 200;
+const WATCH_CATEGORIES = Object.freeze(['truth error', 'evidence choice', 'wording', 'structure', 'length', 'letter structure', 'user judgment call']);
+const WATCH_DOCUMENTS = Object.freeze(['resume', 'letter', 'both']);
+const WATCH_STATUSES = Object.freeze(['watching', 'acting', 'resolved', 'dismissed']);
 // Where the fix lives: the user's own career data, the generator's guidance or code, or not yet known.
-export const WATCH_REMEDIES = Object.freeze(['career data', 'generator', 'undecided']);
+const WATCH_REMEDIES = Object.freeze(['career data', 'generator', 'undecided']);
 
 function watchFile(root) { return path.join(root, 'application-improvement', 'watchlist.json'); }
 function blank() { return { version: 1, items: [], reviews: [] }; }
@@ -36,11 +37,16 @@ export async function readWatchlist(root) {
 async function writeWatchlist(root, list) {
   const target = watchFile(root);
   await fs.promises.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
-  const tmp = `${target}.${crypto.randomUUID()}.tmp`;
-  try {
-    await fs.promises.writeFile(tmp, JSON.stringify(list, null, 2) + '\n', { mode: 0o600 });
-    await fs.promises.rename(tmp, target);
-  } finally { await fs.promises.unlink(tmp).catch(() => {}); }
+  await atomicWriteJson(target, list, { mode: 0o600, pretty: true, ensureDir: false });
+}
+
+// Reviews read the list, change it and write it back, so overlapping calls run
+// one after another; a failed review does not block the next.
+let reviewQueue = Promise.resolve();
+function serializeReview(operation) {
+  const result = reviewQueue.then(operation);
+  reviewQueue = result.catch(() => {});
+  return result;
 }
 
 function pairIds(value, field) {
@@ -95,7 +101,11 @@ export async function watchlistStatus(root) {
  * matched by id, or created when it has none. Every listed pair must belong to the review;
  * an empty pairIds list only changes statuses.
  */
-export async function applyWatchlistReview(root, review) {
+export function applyWatchlistReview(root, review) {
+  return serializeReview(() => applyWatchlistReviewUnqueued(root, review));
+}
+
+async function applyWatchlistReviewUnqueued(root, review) {
   if (!review || typeof review !== 'object') throw new Error('Watch list review must be an object.');
   const at = typeof review.at === 'string' && !Number.isNaN(Date.parse(review.at)) ? review.at : null;
   if (!at) throw new Error('Watch list review needs an ISO "at" time.');

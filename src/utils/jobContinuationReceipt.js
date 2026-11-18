@@ -5,7 +5,7 @@ function token(value, max = 300) {
   return normalized && normalized.length <= max ? normalized : null;
 }
 
-export function normalizeJobContinuationAppliedReceipt(value) {
+function normalizeJobContinuationAppliedReceipt(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const intentId = token(value.intentId, 64);
   const parentRunId = token(value.parentRunId);

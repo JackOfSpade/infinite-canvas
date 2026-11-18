@@ -531,17 +531,7 @@ export function createTextDocumentSessionRegistry({
           return;
         }
         if (content === draft) {
-          this.acceptTargetToken(targetToken);
-          this.adoptNewlineStyle(content, { preserveEstablishedStyleForSingleLine: true });
-          this.suspended = false;
-          this.emit({
-            diskContent: content,
-            externalChange: false,
-            status: 'done',
-            durabilityUnverified: this.durabilityUnverified,
-            saveStatus: this.durabilityUnverified ? 'error' : this.snapshot.saveStatus,
-            error: this.durabilityUnverified ? this.snapshot.error : null,
-          });
+          this.settleOnMatchingDisk(content, targetToken);
           return;
         }
         if (activeAtNotification?.content === content) {
@@ -551,14 +541,7 @@ export function createTextDocumentSessionRegistry({
           this.acceptTargetToken(targetToken);
           this.suspended = false;
           this.emit({ diskContent: content, externalChange: false, status: 'done', error: null });
-          if (draft !== null && draft !== content) {
-            // notifyFileChanged invalidates revisions that predate its
-            // decision. Make the resumed shared draft unambiguously newer.
-            const revision = this.revision > this.discardedThroughRevision
-              ? this.revision
-              : ++this.revision;
-            this.schedule({ revision, content: draft }, debounceMs(draft.length));
-          }
+          this.resumeSharedDraft(draft, content);
           return;
         }
         if (content === this.snapshot.diskContent && !this.snapshot.externalChange) {
@@ -569,27 +552,11 @@ export function createTextDocumentSessionRegistry({
           this.acceptTargetToken(targetToken);
           this.suspended = false;
           this.emit({ externalChange: false, status: 'done', error: null });
-          if (draft !== null && draft !== content) {
-            const revision = this.revision > this.discardedThroughRevision
-              ? this.revision
-              : ++this.revision;
-            this.schedule({ revision, content: draft }, debounceMs(draft.length));
-          }
+          this.resumeSharedDraft(draft, content);
           return;
         }
         if (draft !== this.snapshot.diskContent || this.durabilityUnverified) {
-          // Preserve the shared draft in every view. The user explicitly
-          // chooses Reload or Keep mine; nothing resumes writes implicitly.
-          this.acceptTargetToken(targetToken);
-          this.suspended = true;
-          this.emit({
-            diskContent: content,
-            externalChange: true,
-            status: 'done',
-            durabilityUnverified: this.durabilityUnverified,
-            error: null,
-            saveStatus: 'idle',
-          });
+          this.holdDraftBehindDecision(content, targetToken);
           return;
         }
         this.acceptTargetToken(targetToken);
@@ -603,6 +570,48 @@ export function createTextDocumentSessionRegistry({
           error: error?.message || 'Failed to reread file',
         });
       }
+    }
+
+    // The re-read disk text equals the shared draft: nothing is in conflict.
+    settleOnMatchingDisk(content, targetToken) {
+      this.acceptTargetToken(targetToken);
+      this.adoptNewlineStyle(content, { preserveEstablishedStyleForSingleLine: true });
+      this.suspended = false;
+      this.emit({
+        status: 'done',
+        diskContent: content,
+        externalChange: false,
+        durabilityUnverified: this.durabilityUnverified,
+        saveStatus: this.durabilityUnverified ? 'error' : this.snapshot.saveStatus,
+        error: this.durabilityUnverified ? this.snapshot.error : null,
+      });
+    }
+
+    // The shared draft differs from the re-read disk text. Keep it in every
+    // view; the user chooses Reload or Keep mine, and nothing resumes writes
+    // implicitly.
+    holdDraftBehindDecision(content, targetToken) {
+      this.acceptTargetToken(targetToken);
+      this.suspended = true;
+      this.emit({
+        status: 'done',
+        diskContent: content,
+        externalChange: true,
+        durabilityUnverified: this.durabilityUnverified,
+        error: null,
+        saveStatus: 'idle',
+      });
+    }
+
+    // notifyFileChanged invalidates revisions that predate its decision, so a
+    // resumed shared draft needs a revision unambiguously newer than that
+    // boundary.
+    resumeSharedDraft(draft, content) {
+      if (draft === null || draft === content) return;
+      const revision = this.revision > this.discardedThroughRevision
+        ? this.revision
+        : ++this.revision;
+      this.schedule({ revision, content: draft }, debounceMs(draft.length));
     }
 
     async reconcileConflict() {
@@ -683,17 +692,7 @@ export function createTextDocumentSessionRegistry({
           this.suspended = true;
           this.emit({ status: 'done', diskContent: content, externalChange: true, error: null, saveStatus: 'idle' });
         } else if (content === draft) {
-          this.acceptTargetToken(targetToken);
-          this.adoptNewlineStyle(content, { preserveEstablishedStyleForSingleLine: true });
-          this.suspended = false;
-          this.emit({
-            status: 'done',
-            diskContent: content,
-            externalChange: false,
-            durabilityUnverified: this.durabilityUnverified,
-            saveStatus: this.durabilityUnverified ? 'error' : this.snapshot.saveStatus,
-            error: this.durabilityUnverified ? this.snapshot.error : null,
-          });
+          this.settleOnMatchingDisk(content, targetToken);
         } else if (content === priorSnapshot.diskContent && !priorSnapshot.externalChange) {
           // A failed save does not imply an external edit. If the re-read
           // confirms the original baseline, keep the draft and its save error
@@ -720,16 +719,7 @@ export function createTextDocumentSessionRegistry({
               : priorSnapshot.saveStatus,
           });
         } else if (draft !== this.snapshot.diskContent || this.durabilityUnverified) {
-          this.acceptTargetToken(targetToken);
-          this.suspended = true;
-          this.emit({
-            status: 'done',
-            diskContent: content,
-            externalChange: true,
-            durabilityUnverified: this.durabilityUnverified,
-            error: null,
-            saveStatus: 'idle',
-          });
+          this.holdDraftBehindDecision(content, targetToken);
         } else {
           this.acceptTargetToken(targetToken);
           this.adoptNewlineStyle(content);

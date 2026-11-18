@@ -564,4 +564,16 @@ export default [
       assert.ok(!scanOfficialCareersPage('<form action="/search"><input name="q"></form>', page).links.some(link => link.url.endsWith('/search')), 'a form is never a link');
     },
   },
+  {
+    name: 'A validThrough that is not a date does not make a listed posting expired',
+    run() {
+      const now = Date.parse('2030-01-01');
+      const live = validThrough => extractJsonLdPostings(page(node({ validThrough })), { sourceUrl, now })[0].live;
+      assert.equal(live('Ongoing'), true);
+      assert.equal(live('Open until filled'), true);
+      assert.equal(live(''), true);
+      assert.equal(live('2020-01-01'), false);
+      assert.equal(live('2050-12-31'), true);
+    },
+  },
 ];

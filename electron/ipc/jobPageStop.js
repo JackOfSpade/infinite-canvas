@@ -1,7 +1,7 @@
 /**
  * Per-page "should we keep paging?" decision for every browser job walker
- * (manualScraper's per-query loop, indeedBrowser, browserPool's paginated
- * scrape). One implementation so the three loops cannot drift.
+ * (the jobs.js per-query pager and indeedBrowser). One implementation so the
+ * loops cannot drift.
  *
  * Why this exists: the hub's page count is now "All" by default, so a walker no
  * longer stops because it counted to 10 — it stops because the DATA says there

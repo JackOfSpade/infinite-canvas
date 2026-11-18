@@ -740,6 +740,8 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         await Promise.allSettled(orphaned.map((orphanJob) => (
           driveJob({ id: null, data: { localApplication: orphanJob } }, orphanJob, generation)
         )));
+      } catch (error) {
+        EventLogger.log(`[LocalAI] fallback tick failed: ${error?.message || error}`);
       } finally {
         tickBusyRef.current = false;
       }

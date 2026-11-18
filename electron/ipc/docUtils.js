@@ -247,6 +247,7 @@ export async function readPlainTextDocumentWithReason(filePath, { readUtf8 = nul
       if (!stats.isFile()) return refuse('unreadable');
       if (stats.size > PLAIN_TEXT_MAX_BYTES) return refuse('too_large');
       text = await fs.readFile(resolved, 'utf8');
+      if (Buffer.byteLength(text, 'utf8') > PLAIN_TEXT_MAX_BYTES) return refuse('too_large');
     }
   } catch {
     return refuse('unreadable');

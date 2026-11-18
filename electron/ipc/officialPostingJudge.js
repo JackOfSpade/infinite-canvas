@@ -21,7 +21,7 @@ const MAX_JUDGE_DESCRIPTION_CHARS = 60_000;
 const MAX_JUDGE_RESPONSE_CHARS = 160_000;
 const OFFICIAL_POSTING_JUDGE_STATUSES = Object.freeze(['open', 'closed', 'unknown']);
 
-export const OFFICIAL_POSTING_JUDGE_CORRECTION_TEMPLATES = Object.freeze({
+const OFFICIAL_POSTING_JUDGE_CORRECTION_TEMPLATES = Object.freeze({
   'lookup.official-judge-json': 'official posting judgment must be one JSON object with exactly the requested keys',
   'lookup.official-judge-length': 'official posting judgment exceeds its response bound; copy the description once and keep quotes short',
   'lookup.official-judge-fields': 'official posting judgment fields have the wrong types or exceed their limits: {ids}',

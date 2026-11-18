@@ -5,7 +5,7 @@ export function startRingtone(win, { intervalMs = 3000 } = {}) {
   if (typeof AudioContextClass !== 'function') return () => {};
   let context;
   try { context = new AudioContextClass(); } catch { return () => {}; }
-  try { context.resume?.(); } catch { /* autoplay policy: the ring stays silent */ }
+  try { Promise.resolve(context.resume?.()).catch(() => {}); } catch { /* autoplay policy: the ring stays silent */ }
   let timer = null;
   let stopped = false;
   const tone = (at, hertz) => {
@@ -21,8 +21,7 @@ export function startRingtone(win, { intervalMs = 3000 } = {}) {
       gain.connect(context.destination);
       oscillator.start(at);
       oscillator.stop(at + 0.42);
-      return oscillator;
-    } catch { return null; }
+    } catch { /* a closed context stays silent */ }
   };
   const ring = () => {
     if (stopped) return;
@@ -47,7 +46,7 @@ export function playJoinChime(win) {
     const AudioContextClass = win?.AudioContext || win?.webkitAudioContext;
     if (typeof AudioContextClass !== 'function') return;
     const context = new AudioContextClass();
-    try { context.resume?.(); } catch { /* autoplay policy: the chime stays silent */ }
+    try { Promise.resolve(context.resume?.()).catch(() => {}); } catch { /* autoplay policy: the chime stays silent */ }
     const now = context.currentTime;
     [[660, 0], [880, 0.14]].forEach(([hertz, offset]) => {
       const oscillator = context.createOscillator();

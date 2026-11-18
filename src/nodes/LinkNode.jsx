@@ -29,9 +29,12 @@ export const LinkNode = React.memo(function LinkNode({ id, data }) {
     if (focusTimerRef.current   !== null) clearTimeout(focusTimerRef.current);
   }, []);
 
+  // A link that still has a URL is kept even when its label is cleared: the
+  // blank label lets the title fetcher repopulate it.
+  const hasUrl = Boolean(data.url);
   const isEmptyPredicate = useCallback(
-    () => !inputRef.current?.innerText?.trim(),
-    [],
+    () => !inputRef.current?.innerText?.trim() && !hasUrl,
+    [hasUrl],
   );
 
   const {
@@ -53,10 +56,6 @@ export const LinkNode = React.memo(function LinkNode({ id, data }) {
 
   const handleKeyDown = useCallback((e) => {
     blurOnEscape(e, inputRef);
-  }, []);
-
-  const handlePaste = useCallback((e) => {
-    pasteAsPlainText(e);
   }, []);
 
   // Sync label content when data changes externally (undo/redo).
@@ -171,7 +170,7 @@ export const LinkNode = React.memo(function LinkNode({ id, data }) {
         onDoubleClick={handleDoubleClick}
         onBlur={handleLabelBlur}
         onKeyDown={handleKeyDown}
-        onPaste={handlePaste}
+        onPaste={pasteAsPlainText}
         className={`${textColor ? '' : 'text-blue-400'} outline-none whitespace-nowrap min-w-[20px] min-h-[1em] ${
           isEditingLabel ? 'cursor-text' : 'select-none cursor-pointer hover:underline'
         }`}

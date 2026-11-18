@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { EDIT_NOTES_MAX_CHARS, RECURRING_MIN_BUNDLES, RECURRING_WINDOW, bundleEditNotes, documentSnapshot, generationGateInputDigest, editSummaries, improvementStatus, logBundleEditNotes, logGeneratedBundle, logSavedBundle, normalizeEditNotes, recurringEditSections, resetImprovementCounter } from '../../electron/ipc/applicationEditLog.js';
+import { EDIT_NOTES_MAX_CHARS, RECURRING_MIN_BUNDLES, RECURRING_WINDOW, bundleEditNotes, documentSnapshot, generationGateInputDigest, generationGateInputs, editSummaries, improvementStatus, logBundleEditNotes, logGeneratedBundle, logSavedBundle, normalizeEditNotes, recurringEditSections, resetImprovementCounter } from '../../electron/ipc/applicationEditLog.js';
 import { __recordWorkspaceEditNotesForTests, __workspaceStatusForTests, __removeCoverLetterForTests, __withoutCoverLetterForTests, inspectApplicationSyncRevision, mergeSelectedApplicationPanel, registerApplicationSyncWorkspace } from '../../electron/ipc/applicationSync.js';
 import electronPkg from 'electron';
 import { PDFDocument } from 'pdf-lib';
@@ -335,5 +335,34 @@ export default [{
       assert.equal(state.pairs.at(-1).editNotesByDocument, undefined, 'a regeneration starts fresh');
       assert.equal(state.pairs.at(-2).editNotesByDocument.resume, 'Revised resume explanation.', 'history retains the document association');
     } finally { await fs.rm(root, { recursive: true, force: true }); }
+  },
+}, {
+  name: 'application edits: a model change seen by the gate archives once, and a partial state file still logs',
+  run: async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ic-edit-log-model-'));
+    const workspaceDir = path.join(root, 'workspace');
+    const stateFile = path.join(root, 'application-improvement/state.json');
+    const archiveDir = path.join(root, 'application-improvement/archive');
+    const priorModelFile = process.env.IC_APPLICATION_MODEL_FILE;
+    try {
+      await logGeneratedBundle({ root, workspaceDir, html: html('<p>one</p>', '<p>letter</p>'), posting: 'Gate archive fixture', appVersion: 'test' });
+      const modelFile = path.join(root, 'model.json');
+      await fs.writeFile(modelFile, '{"label":"synthetic-gate-model"}');
+      process.env.IC_APPLICATION_MODEL_FILE = modelFile;
+      await generationGateInputs(root);
+      await generationGateInputs(root);
+      assert.equal((await fs.readdir(archiveDir)).length, 1, 'the same pairs are archived once');
+      assert.equal(JSON.parse(await fs.readFile(stateFile, 'utf8')).modelLabel, 'synthetic-gate-model', 'the aligned state is persisted');
+      delete process.env.IC_APPLICATION_MODEL_FILE;
+      const partial = JSON.parse(await fs.readFile(stateFile, 'utf8'));
+      delete partial.pairs; delete partial.summaries;
+      await fs.writeFile(stateFile, JSON.stringify(partial));
+      await logGeneratedBundle({ root, workspaceDir, html: html('<p>two</p>', '<p>letter</p>'), posting: 'Partial state fixture', appVersion: 'test' });
+      assert.equal(JSON.parse(await fs.readFile(stateFile, 'utf8')).pairs.length, 1);
+    } finally {
+      if (priorModelFile === undefined) delete process.env.IC_APPLICATION_MODEL_FILE;
+      else process.env.IC_APPLICATION_MODEL_FILE = priorModelFile;
+      await fs.rm(root, { recursive: true, force: true });
+    }
   },
 }];

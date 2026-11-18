@@ -15,7 +15,8 @@ const CONTENT_PAD = 40;
  * Rendered inside ReactFlow so it has access to useViewport / useReactFlow.
  */
 const vpTransformSelector = (s) => s.transform;
-const vpSizeSelector = (s) => ({ width: s.width, height: s.height });
+const vpWidthSelector = (s) => s.width;
+const vpHeightSelector = (s) => s.height;
 
 function samePoint(a, b) {
   return a?.x === b?.x && a?.y === b?.y;
@@ -35,7 +36,7 @@ function sameStrokePreview(a, b) {
 
 const ReactiveMiniMapSVG = React.memo(({ cMinX, cMinY, cMaxX, cMaxY, isAnimating, children }) => {
   const transform = useStore(vpTransformSelector);
-  const size = useStore(vpSizeSelector);
+  const size = { width: useStore(vpWidthSelector), height: useStore(vpHeightSelector) };
   const { setViewport } = useReactFlow();
   const svgRef = useRef(null);
 

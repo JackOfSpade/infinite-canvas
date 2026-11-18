@@ -6,7 +6,7 @@ import { createClaudeTaskWorker } from '../../electron/ipc/claudeTaskWorker.js';
 import { CLAUDE_STALE_AFTER_MS, claudeProgressTimeLines, deriveClaudeTaskProgress } from '../../src/utils/claudeJobProgress.js';
 import { normalizeClaudeTaskActivity } from '../../src/utils/claudeTaskActivityStore.js';
 import { claudeUsageLimitNotice } from '../../src/utils/claudeTaskPause.js';
-import { __resetClaudePauseFlowsForTests, getClaudePauseFlow, startClaudePause } from '../../src/utils/claudePauseFlow.js';
+import { __resetClaudePauseFlowsForTests, getClaudePauseFlow, resumeClaude, startClaudePause } from '../../src/utils/claudePauseFlow.js';
 import { deriveClaudeJobProgress } from '../../src/utils/claudeJobProgress.js';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -574,6 +574,18 @@ export default [
       assert.equal(state.timers.length, 1, 'any later pump re-arms the wake');
       assert.equal(state.timers[0].ms, 3_659_000);
       worker.stop();
+    },
+  },
+  {
+    name: 'claude clean pause: a failing release on resume publishes an error and does not reject',
+    async run() {
+      const previous = globalThis.window;
+      globalThis.window = { electronAPI: { releaseClaude: async () => { throw new Error('Release failed.'); } } };
+      try {
+        __resetClaudePauseFlowsForTests();
+        await resumeClaude(['node:r']);
+        assert.deepEqual({ ...getClaudePauseFlow('node:r') }, { phase: 'paused', error: 'Release failed.' });
+      } finally { globalThis.window = previous; __resetClaudePauseFlowsForTests(); }
     },
   },
 ];

@@ -1363,7 +1363,7 @@ async function captureCareerInner(opts, deps, journal) {
   const concurrency = positiveInt('--concurrency', opts.concurrency ?? 4);
   // --max-calls 0 disables the cap; it is handed to the capture as 0.
   const maxCalls = nonNegativeInt('--max-calls', opts.maxCalls ?? DEFAULT_MAX_CALLS);
-  const maxRepairs = positiveInt('--max-repairs', opts.maxRepairs ?? MAX_REPAIR_ATTEMPTS);
+  const maxRepairs = nonNegativeInt('--max-repairs', opts.maxRepairs ?? MAX_REPAIR_ATTEMPTS);
   const ladderTasks = ladderTasksFrom(opts.ladderTasks);
   const modules = await loadAppFor();
   // deps.compile lets a test drive the whole compile without the real app driver.

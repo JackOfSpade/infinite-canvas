@@ -36,9 +36,9 @@ export const CAREER_FILE_TO_TEXT_STAGE = 'career-file-to-text';
 // narrow exemption for exactly this folder.
 export const CAREER_CONVERSION_DIR = 'interview-helper-career-conversions';
 // Bump when a local conversion changes so stale cached text is not reused.
-export const CAREER_CONVERSION_VERSION = 1;
-export const CAREER_CONVERSION_MAX_SOURCE_BYTES = 50 * 1024 * 1024;
-export const CAREER_CONVERSION_MAX_TEXT_BYTES = 4 * 1024 * 1024;
+const CAREER_CONVERSION_VERSION = 1;
+const CAREER_CONVERSION_MAX_SOURCE_BYTES = 50 * 1024 * 1024;
+const CAREER_CONVERSION_MAX_TEXT_BYTES = 4 * 1024 * 1024;
 
 const ZIP_MAX_ENTRIES = 20_000;
 const ZIP_MAX_XML_BYTES = 48 * 1024 * 1024;
@@ -62,7 +62,7 @@ const READER_REASON_SENTENCES = {
   empty: 'No text was found in it.',
 };
 
-export function careerConversionReasonSentence(reason) {
+function careerConversionReasonSentence(reason) {
   return READER_REASON_SENTENCES[reason] || 'It could not be read as career text.';
 }
 
@@ -192,7 +192,7 @@ function zipError(message) {
   return error;
 }
 
-export function readZipDirectory(buffer) {
+function readZipDirectory(buffer) {
   const minimum = 22;
   if (buffer.length < minimum) throw zipError('It is not a complete zip-based file.');
   let eocd = -1;
@@ -226,7 +226,7 @@ export function readZipDirectory(buffer) {
   return entries;
 }
 
-export function readZipEntry(buffer, entry, maxBytes = ZIP_MAX_XML_BYTES) {
+function readZipEntry(buffer, entry, maxBytes = ZIP_MAX_XML_BYTES) {
   if (entry.flags & 1) throw zipError('It is password-protected.');
   if (entry.size > maxBytes) throw zipError('A part of it is too large to open safely.');
   const at = entry.localOffset;
@@ -266,7 +266,6 @@ function xmlAttribute(attributes, name) {
 }
 
 function* xmlTokens(xml) {
-  XML_TOKEN.lastIndex = 0;
   for (const match of xml.matchAll(XML_TOKEN)) {
     if (match[1] !== undefined) yield { type: 'text', text: match[1] };
     else if (match[3]) yield { type: match[2] ? 'close' : 'open', name: match[3], attributes: match[4] || '', selfClosing: Boolean(match[5]) };
@@ -324,7 +323,7 @@ class DocumentTextBuilder {
   }
 }
 
-export function docxXmlToText(xml) {
+function docxXmlToText(xml) {
   const builder = new DocumentTextBuilder();
   let inText = false;
   let inParagraphProperties = 0;
@@ -368,7 +367,7 @@ export function docxXmlToText(xml) {
   return builder.result();
 }
 
-export function odtXmlToText(xml) {
+function odtXmlToText(xml) {
   const builder = new DocumentTextBuilder();
   let paragraphs = 0;
   let skip = 0;
@@ -624,6 +623,15 @@ async function ensureSubdirectory(root, name) {
   return directory;
 }
 
+/** Lookups never create the folder: a conversion that is refused leaves nothing behind. */
+async function existingSubdirectory(root, name) {
+  const directory = path.join(root, name);
+  let stat;
+  try { stat = await fs.lstat(directory); } catch (error) { if (error?.code === 'ENOENT') return null; throw error; }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error('The converted-files folder is not safe to use.');
+  return directory;
+}
+
 async function writePrivateFile(target, data) {
   const temporary = `${target}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
   try {
@@ -773,9 +781,8 @@ async function convertOne({ filePath, root, taken, readWithAi, signal, loadPdfMo
       return { ...result, ok: true, textPath: resolved, textName: name, method: 'original' };
     }
     const key = createHash('sha256').update(`v${CAREER_CONVERSION_VERSION}\0`).update(bytes).digest('hex').slice(0, 32);
-    const directory = await ensureSubdirectory(root, key);
     const textName = convertedFileName(name, taken);
-    const cached = await cacheLookup(directory, textName);
+    const cached = await existingSubdirectory(root, key).then(existing => (existing ? cacheLookup(existing, textName) : null));
     if (cached) {
       taken.add(textName);
       return { ...result, ok: true, textPath: cached.textPath, textName, method: cached.method, reason: cached.note };
@@ -793,6 +800,7 @@ async function convertOne({ filePath, root, taken, readWithAi, signal, loadPdfMo
     if (/[\u200C\u200D]/.test(String(converted.text ?? ''))) note = [note, 'Zero-width joiner characters were removed so the text could be read; words in some scripts may look joined.'].filter(Boolean).join(' ');
     text += '\n';
     if (Buffer.byteLength(text, 'utf8') > CAREER_CONVERSION_MAX_TEXT_BYTES) return fail(READER_REASON_SENTENCES.too_large);
+    const directory = await ensureSubdirectory(root, key);
     const target = path.join(directory, textName);
     await writePrivateFile(target, text);
     // The converted file must satisfy the reader the career pipeline uses.

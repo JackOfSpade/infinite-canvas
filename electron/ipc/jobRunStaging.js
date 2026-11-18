@@ -94,7 +94,6 @@ const JOB_RUN_RECEIPT_VERSION = 3;
 // because the app stayed closed for more than a day.
 export const RESUMABLE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
-/** Sidecar paths for a canvas file, or null when the canvas was never saved. */
 function normalizeNodeId(nodeIdOrOptions) {
   const nodeId = typeof nodeIdOrOptions === 'object' && nodeIdOrOptions !== null
     ? nodeIdOrOptions.nodeId
@@ -265,7 +264,7 @@ async function appendStagingDurably(filePath, text) {
 // stale manifest and clobber each other's updates — and a late stale write can
 // even revert `stage` back to 'searching'. Keyed by path so different canvases
 // never block one another. Same dependency-free pattern as sharedProfileLock.
-function createPathLock() {
+export function createPathLock() {
   const tails = new Map();
   return (filePath, fn) => {
     const prev = tails.get(filePath) || Promise.resolve();
@@ -897,7 +896,7 @@ async function writeLastRunReceiptRaw(canvasFilePath, receipt, { expectedRunId =
   const filePath = lastRunReceiptPathForCanvas(canvasFilePath, nodeId || receipt?.nodeId || null);
   if (!filePath) return { written: false, receipt: null };
   return withReceiptLock(filePath, async () => {
-    const current = await readLastRunReceipt(canvasFilePath, nodeId || receipt?.nodeId || null);
+    const current = await readLastRunReceiptRaw(canvasFilePath, nodeId || receipt?.nodeId || null);
     if (expectedRunId != null && current?.runId !== expectedRunId) {
       return { written: false, receipt: current, tokenMismatch: true };
     }
@@ -1142,14 +1141,11 @@ export function normalizeJobRunRecoveryDisposition(value) {
 export function isJobRunAutomaticRecoveryEligible(manifest) {
   if (normalizeJobRunRecoveryDisposition(manifest?.recoveryDisposition)
       === JOB_RUN_RECOVERY_DISPOSITION.MANUAL) return false;
-  return !Object.values(manifest?.sources || {}).some((source) => {
-    if (source?.status === 'done' || source?.status === 'skipped') return false;
-    const disposition = normalizeJobRunRecoveryDisposition(source?.recoveryDisposition);
-    if (disposition === JOB_RUN_RECOVERY_DISPOSITION.MANUAL) return true;
-    // Missing/legacy disposition remains automatic. Only an explicit durable
-    // manual gate is allowed to suppress restart recovery.
-    return false;
-  });
+  // A missing or legacy disposition stays automatic; only an explicit durable
+  // manual gate on an unfinished source suppresses restart recovery.
+  return !Object.values(manifest?.sources || {}).some((source) => source?.status !== 'done'
+    && source?.status !== 'skipped'
+    && normalizeJobRunRecoveryDisposition(source?.recoveryDisposition) === JOB_RUN_RECOVERY_DISPOSITION.MANUAL);
 }
 
 /**
@@ -2173,7 +2169,7 @@ async function clearRunWithResultRaw(canvasFilePath, { trashItem = null, expecte
 }
 
 async function clearRunRaw(canvasFilePath, options = {}) {
-  const result = await clearRunWithResult(canvasFilePath, options);
+  const result = await clearRunWithResultRaw(canvasFilePath, options);
   return result.cleared === true;
 }
 

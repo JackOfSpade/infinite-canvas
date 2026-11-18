@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { atomicWriteJson, ensureDirectoryWithinRoot } from '../utils/pathSafety.js';
+import { v2JobDirectoryParts } from './applicationV2JobDirectory.js';
 
 // A heading may be wrapped symmetrically in markdown emphasis (**, *, __ or _),
 // with the optional trailing colon inside the wrapper. One-sided emphasis is not a heading.
@@ -186,14 +187,13 @@ export function splitWriteVerifyWriterResponse(response, allowedIds, { documentS
 }
 
 export function v2WriterShortlistEvidencePaths(jobDir, jobId, filename) {
-  if (path.basename(jobDir) !== jobId || path.basename(path.dirname(jobDir)) !== 'jobs'
-    || path.basename(path.dirname(path.dirname(jobDir))) !== '.local-ai'
-    || !/^revision-[0-9]+-write-[a-f0-9]{64}\.json$/u.test(filename)) {
+  const parts = v2JobDirectoryParts(jobDir, jobId);
+  if (!parts || !/^revision-[0-9]+-write-[a-f0-9]{64}\.json$/u.test(filename)) {
     throw new Error('Invalid v2 writer shortlist evidence path.');
   }
   return {
     working: path.join(jobDir, 'writer-shortlists', filename),
-    retained: path.join(path.dirname(path.dirname(jobDir)), 'writer-shortlists', jobId, filename),
+    retained: path.join(parts.localAiDir, 'writer-shortlists', jobId, filename),
   };
 }
 
@@ -203,7 +203,7 @@ export async function archiveV2WriterNotes({ jobDir, jobId, revision, candidateI
     || !/^[a-f0-9]{64}$/u.test(responseSha256) || typeof split?.shortlist !== 'string'
     || typeof split?.decisions !== 'string') throw new Error('Invalid v2 writer notes record.');
   const paths = v2WriterShortlistEvidencePaths(jobDir, jobId, `revision-${revision}-write-${responseSha256}.json`);
-  const canvasRoot = path.dirname(path.dirname(path.dirname(jobDir)));
+  const { canvasRoot } = v2JobDirectoryParts(jobDir, jobId);
   const evidence = { stage: 'write', revision, candidateId, responseSha256, shortlist: split.shortlist,
     decisions: split.decisions, decisionLogPresent: Boolean(split.decisions), decisionLogKind: 'editorial-summary' };
   for (const file of [paths.working, paths.retained]) {

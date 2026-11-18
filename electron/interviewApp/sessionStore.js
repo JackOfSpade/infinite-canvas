@@ -8,7 +8,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { parseWorkspaceText } from '../ipc/workspaceContentPool.js';
 
-export const INTERVIEW_SESSIONS_VERSION = 1;
+const INTERVIEW_SESSIONS_VERSION = 1;
 const MAX_SESSIONS = 200;
 const MAX_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_CANVAS_BYTES = 512 * 1024 * 1024;

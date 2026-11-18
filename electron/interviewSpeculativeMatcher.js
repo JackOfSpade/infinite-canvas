@@ -1,7 +1,7 @@
 /** Event-driven speculative selection. No timers, provider, or display state. */
 import { isInterviewPartialEligible } from './interviewCallQuestionDetector.js';
 
-export const normalizeSpeculativeText = text => String(text || '').toLowerCase().replace(/\s+/gu, ' ').trim().replace(/[\p{P}\s]+$/gu, '');
+const normalizeSpeculativeText = text => String(text || '').toLowerCase().replace(/\s+/gu, ' ').trim().replace(/[\p{P}\s]+$/gu, '');
 const words = text => text.trim().split(/\s+/u).filter(Boolean).length;
 const roundedConfidence = value => Math.round(value * 20) / 20;
 

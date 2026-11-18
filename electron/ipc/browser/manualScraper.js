@@ -183,11 +183,6 @@ const DESCRIPTION_DETAIL_MISS_SAMPLE_LIMIT = 3;
 // All values are anchors fed through humanDelay() at the call site, so the
 // actual wait is organically spread (never a fixed cadence).
 const DEFAULT_INTER_QUERY_COOLDOWN_MS = 2500;
-// Collection breadth is supplied per task from the persisted hub setting. There
-// are no process-global collection caps, so a saved hub re-runs with its own
-// explicit breadth regardless of test/runtime environment.
-
-
 function countDistinctJobs(jobs) {
   if (!Array.isArray(jobs) || jobs.length === 0) return 0;
   const seen = new Set();
@@ -254,6 +249,10 @@ const SOURCE_LABELS = {
   glassdoor:    'Glassdoor',
 };
 
+// Sizes of the recency windows kept in the telemetry below.
+const EVENT_RING_MAX = 30;
+const ORIGIN_RING_MAX = 24;
+const ANOMALY_RING_MAX = 20;
 const manualScraperTelemetry = {
   active: null,
   events: [],
@@ -672,7 +671,7 @@ export function recordManualScraperTelemetry(event, { updateActive = true } = {}
   };
   if (!collapseRepeatedCardWalk(manualScraperTelemetry.events, entry)) {
     manualScraperTelemetry.events.push(entry);
-    if (manualScraperTelemetry.events.length > 30) manualScraperTelemetry.events.shift();
+    if (manualScraperTelemetry.events.length > EVENT_RING_MAX) manualScraperTelemetry.events.shift();
   }
   // Sources run strictly sequentially, so the last phase to name a source names
   // the source every subsequent overlay paint belongs to. This is what lets the
@@ -680,7 +679,7 @@ export function recordManualScraperTelemetry(event, { updateActive = true } = {}
   if (entry.sourceId) manualScraperTelemetry.currentSourceId = entry.sourceId;
   if (ORIGIN_PHASES.has(entry.phase)) {
     manualScraperTelemetry.origins.push(entry);
-    if (manualScraperTelemetry.origins.length > 24) manualScraperTelemetry.origins.shift();
+    if (manualScraperTelemetry.origins.length > ORIGIN_RING_MAX) manualScraperTelemetry.origins.shift();
   }
   // The 30-slot `events` ring is a recency window: after a source-wide detail
   // block, every later page emits two rows, so 18 pages of skip chatter evicted
@@ -689,7 +688,7 @@ export function recordManualScraperTelemetry(event, { updateActive = true } = {}
   // longer-lived anomaly ring so a report written an hour later still has them.
   if (FIELD_ANOMALY_PHASES.has(entry.phase)) {
     manualScraperTelemetry.fieldAnomalies.push(entry);
-    if (manualScraperTelemetry.fieldAnomalies.length > 20) manualScraperTelemetry.fieldAnomalies.shift();
+    if (manualScraperTelemetry.fieldAnomalies.length > ANOMALY_RING_MAX) manualScraperTelemetry.fieldAnomalies.shift();
   }
   if (!updateActive) return;
   // A source/query/page boundary is a new diagnostic context, not an update to
@@ -1405,7 +1404,6 @@ export function addGoogleApplyCapture(total, { url, candidates, readFailed, coun
  * Signed out of Google, Apply-on links point at an opaque www.google.com/goto token, and only Google's redirect
  * says where they go. Anything else on a Google host stays what it was: an internal route, never a destination.
  */
-
 export function isGoogleApplyRedirect(href) {
   try {
     const url = new URL(String(href || ''));
@@ -1452,11 +1450,14 @@ export function createGoogleApplyRedirectResolver(openPage) {
     get rateLimitedCause() { return rateLimitedCause; },
     /** Redirect navigations attempted so far, the "read" half of the capture tally. */
     get followed() { return followed; },
-    /** Same candidates, each redirect replaced by where it goes. One that can't be followed stays as it was, so it is rejected as before. */
-    async resolve(candidates) {
+    /**
+     * Same candidates, each redirect replaced by where it goes. One that can't be followed stays as it was, so it is rejected as before.
+     * Once `signal` aborts, the remaining candidates come back unchanged and nothing more is followed.
+     */
+    async resolve(candidates, signal = null) {
       const result = [];
       for (const candidate of Array.isArray(candidates) ? candidates : []) {
-        if (!isGoogleApplyRedirect(candidate?.href) || rateLimited) { result.push(candidate); continue; }
+        if (!isGoogleApplyRedirect(candidate?.href) || rateLimited || signal?.aborted) { result.push(candidate); continue; }
         try {
           const page = await prepare();
           pending = { destination: '' };
@@ -1546,7 +1547,7 @@ export async function followGoogleApplyRedirects(pending, { signal = null } = {}
   const platform = await launchScrapePlatformBrowser({ userDataDir, executablePath, sandboxArgs, onCrash: () => {} });
   const resolver = createGoogleApplyRedirectResolver(() => createBackgroundScrapePage(platform.browser));
   try {
-    const resolved = await resolver.resolve(candidates);
+    const resolved = await resolver.resolve(candidates, signal);
     // Paired positionally: the resolver answers in the order it was asked, so an
     // unfollowed redirect comes back with its own /goto href and stays unread.
     result.links = resolved.map((link, index) => ({
@@ -2472,7 +2473,7 @@ export function mergeExpandedJobDetail(job, {
     ...job,
     ...(hasDescriptionText ? { snippet: text } : {}),
     ...(hasDescriptionText && descriptionCapture ? { descriptionCapture } : {}),
-    ...(jsonLdDate && !job.posted ? { posted: jsonLdDate } : {}),
+    ...(jsonLdDate && !job?.posted ? { posted: jsonLdDate } : {}),
     ...(salaryChanged ? { salary: reconciledSalary, salaryProvenance: 'unknown' } : {}),
     // Structured detail pay includes schema.org unitText. Let it repair a
     // present-but-unusable list chip (e.g. Glassdoor "US$19 - US$20 (Employer
@@ -3015,7 +3016,7 @@ async function waitIfPaused(page, signal) {
 // ── waitForReady ──────────────────────────────────────────────────────────────
 // Waits for real page content to appear, handling challenge pages.
 // Returns 'ok' | 'skip' (challenge timed out) | 'abort' (signal aborted).
-async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = null, {
+export async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = null, {
   challengeOnly = false,
   initialChallengeState = null,
 } = {}) {
@@ -3043,9 +3044,15 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
   let terminalTransitionCount  = 0;
   let recordedTextSuppression  = false;
   let inputProbe               = null; // mouse/key input seen while a check is open (diagnostics only)
+  // A check that was counted as open must be closed on every way out of the wait, or the pace record keeps it open.
+  const closeOpenChallenge = () => {
+    if (!inChallenge) return;
+    inChallenge = false;
+    notePaceChallengeEnd(sourceId, { srcName: overlayBase.srcName, input: challengeInputVerdict(inputProbe?.summary() || null) });
+  };
 
   while (true) {
-    if (signal?.aborted) return 'abort';
+    if (signal?.aborted) { closeOpenChallenge(); return 'abort'; }
 
     const signals     = await getChallengeSignals(page);
     if (inputProbe) await inputProbe.poll();
@@ -3152,6 +3159,7 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
         // Challenge appeared immediately after navigating back to the resume URL —
         // that URL is itself blocked. Skip now; no checkbox-solve will unblock it.
         logger.warn(`[BrowserScraper] ${overlayBase.srcName}: resume URL immediately challenged after recovery — session fully blocked, skipping source`);
+        closeOpenChallenge();
         return 'skip';
       }
       // Hard block: no interactive widget present, nothing for the user to solve.
@@ -3196,6 +3204,7 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
           error:  true,
         }).catch(() => {});
         await new Promise(r => setTimeout(r, humanDelay(2000)));
+        closeOpenChallenge();
         return 'hard-block';
       }
       if (!inChallenge) {
@@ -3492,6 +3501,13 @@ async function dismissGlassdoorOpportunityModal(page) {
 // selectors appear stale (≥ DESC_STALE_THRESHOLD consecutive failures of the same
 // type). A non-null descError is an abort signal — the caller must set earlyExit
 // and surface the error just like a SITE_CHANGED extraction failure.
+// Marks every row from startIndex on as not yet described, with the reason the walk stopped.
+function deferRowsFrom(rows, startIndex, reason) {
+  for (let index = startIndex; index < rows.length; index++) {
+    rows[index] = { ...rows[index], descriptionDeferredReason: reason };
+  }
+}
+
 async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar, signal = null, walkPlan = null, runtime = null) {
   const cfg = DESC_CONFIGS[sourceId];
   if (!cfg || jobs.length === 0) {
@@ -4921,12 +4937,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       key: String(key).slice(0, 80), reason: 'http-429', status: rateLimit.status,
       url: rateLimit.url,
     }, { updateActive: false });
-    for (let unresolvedIndex = startIndex; unresolvedIndex < enhanced.length; unresolvedIndex++) {
-      enhanced[unresolvedIndex] = {
-        ...enhanced[unresolvedIndex],
-        descriptionDeferredReason: 'description-rate-limited',
-      };
-    }
+    deferRowsFrom(enhanced, startIndex, 'description-rate-limited');
     descWarning ||= {
       code: 'description-rate-limited', severity: 'block',
       evidence: `Google returned HTTP 429 while loading a job detail panel after ${expandedCount} of ${enhanced.length} listing(s) were expanded. The scraper stopped detail clicks to avoid extending the throttle.`,
@@ -4977,12 +4988,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         evidence: `Glassdoor returned HTTP 429 while loading the right-side panel for "${title || 'an untitled listing'}". The scraper stopped panel enrichment immediately instead of retrying more cards and extending the throttle. List rows were kept, but this and later listings carry no description and are held back from scoring.`,
         suggestion: 'Wait a few minutes, then click Solve to retry the unresolved descriptions. List results were retained; deferred listings are not recorded as seen, so a later run can still collect them.',
       };
-      for (let unresolvedIndex = startIndex; unresolvedIndex < enhanced.length; unresolvedIndex++) {
-        enhanced[unresolvedIndex] = {
-          ...enhanced[unresolvedIndex],
-          descriptionDeferredReason: 'description-rate-limited',
-        };
-      }
+      deferRowsFrom(enhanced, startIndex, 'description-rate-limited');
       await updateOverlay(page, {
         ...overlayBase,
         count: totalSoFar,
@@ -5011,12 +5017,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       evidence: `Glassdoor returned HTTP ${failure.status} from its right-side panel endpoint for "${title || 'an untitled listing'}". This is a source response failure, not a panel-selector timeout; the scraper stopped before issuing another request.`,
       suggestion: 'Retry Glassdoor later. List results were retained; this and later unresolved rows remain eligible for a future run.',
     };
-    for (let unresolvedIndex = startIndex; unresolvedIndex < enhanced.length; unresolvedIndex++) {
-      enhanced[unresolvedIndex] = {
-        ...enhanced[unresolvedIndex],
-        descriptionDeferredReason: 'description-panel-http-error',
-      };
-    }
+    deferRowsFrom(enhanced, startIndex, 'description-panel-http-error');
     await updateOverlay(page, {
       ...overlayBase,
       count: totalSoFar,
@@ -5035,16 +5036,22 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     while (!glassdoorPanelResponseDetails.has(key)
       && !glassdoorPanelRateLimit
       && !glassdoorPanelHttpFailure
+      && !signal?.aborted
       && Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     const detailPromise = glassdoorPanelResponseDetails.get(key);
     let detail = null;
     if (detailPromise) {
-      detail = await Promise.race([
-        detailPromise,
-        new Promise(resolve => setTimeout(() => resolve(null), Math.max(0, deadline - Date.now()))),
-      ]);
+      let raceTimer = null;
+      try {
+        detail = await Promise.race([
+          detailPromise,
+          new Promise(resolve => { raceTimer = setTimeout(() => resolve(null), Math.max(0, deadline - Date.now())); }),
+        ]);
+      } finally {
+        clearTimeout(raceTimer);
+      }
     }
     pendingGlassdoorPanelKeys.delete(key);
     glassdoorPanelResponseDetails.delete(key);
@@ -5396,12 +5403,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             // unmounted their cards. Those rows are still valid search results;
             // stop only this enrichment pass and leave a retry-later warning,
             // rather than misreporting a source abort as user-done.
-            for (let unresolvedIndex = i; unresolvedIndex < enhanced.length; unresolvedIndex++) {
-              enhanced[unresolvedIndex] = {
-                ...enhanced[unresolvedIndex],
-                descriptionDeferredReason: 'description-card-unavailable',
-              };
-            }
+            deferRowsFrom(enhanced, i, 'description-card-unavailable');
             descWarning ||= {
               code: 'description-card-unavailable', severity: 'block',
               evidence: `Google Jobs virtualized result cards before their detail panels could be opened. ${expandedCount} of ${enhanced.length} listing(s) received full descriptions; the remaining cards were retained but deferred.`,
@@ -5781,12 +5783,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           const panelProvenThisWalk = expandedCount > 0 || (walkPlan?.detailPacing?.panelReads || 0) > 0;
           if (!panelInterrupt && panelProvenThisWalk) {
             const firstUnread = Math.max(0, i - (consecutivePanelTimeouts - 1));
-            for (let unresolvedIndex = firstUnread; unresolvedIndex < enhanced.length; unresolvedIndex++) {
-              enhanced[unresolvedIndex] = {
-                ...enhanced[unresolvedIndex],
-                descriptionDeferredReason: 'description-panel-unresponsive',
-              };
-            }
+            deferRowsFrom(enhanced, firstUnread, 'description-panel-unresponsive');
             logger.warn(`[BrowserScraper] ${sourceId}: ${consecutivePanelTimeouts} consecutive panel-read timeouts after panels were read earlier in this walk — deferring ${enhanced.length - firstUnread} row(s) and continuing the list walk`);
             descWarning ||= {
               code: 'description-panel-unresponsive', severity: 'block',
@@ -6538,8 +6535,7 @@ async function revealEndOfListReached(page, sourceId) {
 // guessing a selector for a source we can't verify; add it back with a real,
 // verified selector if a specific source needs it.
 async function preloadContent(page, sourceId, extractorJS, overlayBase, signal, { maxPages, jobsPerPlatform, existingJobs = 0 }) {
-  const isScroll = SCROLL_SOURCES.has(sourceId);
-  if (!isScroll) return null;
+  if (!SCROLL_SOURCES.has(sourceId)) return null;
 
   let prevCount = -1;
   let iterations = 0;
@@ -6608,56 +6604,36 @@ async function preloadContent(page, sourceId, extractorJS, overlayBase, signal, 
       exit = 'reveal-stalled';
       break;
     }
-    if (isScroll) {
-      if (sourceId === 'google') {
-        // Google for Jobs renders cards in its own scrollable container inside the page.
-        // Walk up from the first card to find that container and scroll it; also
-        // scroll document.body so either trigger path gets hit.
-        await updateOverlay(page, {
-          ...overlayBase,
-          activityKey: 'google-preload',
-          status: `Loading the full Google list — not selecting cards yet… ${count}`,
-        });
-        // TRUSTED wheel events are REQUIRED here. Google's batch loader ignores
-        // programmatic scrolling entirely: `window.scrollTo`/`scrollBy` and
-        // `el.scrollTop` move the viewport to the page floor and load NOTHING —
-        // measured sitting at exactly 20 cards across 14 passes, with no
-        // end-of-list sentinel. That is indistinguishable from a genuine small
-        // result set, so the failure is silent. Synthetic `WheelEvent` dispatch
-        // and `End` keypresses are equally ignored (both are untrusted).
-        // page.mouse.wheel goes through CDP Input.dispatchMouseEvent, which the
-        // page receives as a real user wheel.
-        await revealByTrustedWheel(page, '.EimVGf, [jscontroller="b11o3b"]');
-        // Keep a programmatic nudge AFTER the wheel pass. It cannot trigger the
-        // loader, but it costs nothing and still helps any lazy <img>/observer
-        // work that keys off scroll position rather than input trust.
-        await page.evaluate(async () => {
-          const step = Math.floor(window.innerHeight * (0.55 + Math.random() * 0.3));
-          let steps = 0;
-          while (window.scrollY + window.innerHeight < document.body.scrollHeight - 10 && steps < 6) {
-            window.scrollBy(0, step);
-            await new Promise(r => setTimeout(r, 55 + Math.random() * 90));
-            steps++;
-          }
-        }).catch(() => {});
-      } else {
-        // Cap scroll steps to prevent an infinite loop on true infinite-scroll pages
-        // (e.g. ZipRecruiter "Director of Brand Marketing") where scrollHeight grows
-        // as you scroll — without a cap the evaluate() runs until Puppeteer's 3-min
-        // CDP protocol timeout kills the whole scrape. The outer preloadContent loop
-        // re-runs after each evaluate() and stops when job count stops increasing, so
-        // 20 steps per call is plenty to reveal new content while staying bounded.
-        await page.evaluate(async () => {
-          const step = Math.floor(window.innerHeight * (0.55 + Math.random() * 0.3));
-          let steps = 0;
-          while (window.scrollY + window.innerHeight < document.body.scrollHeight - 10 && steps < 20) {
-            window.scrollBy(0, step);
-            await new Promise(r => setTimeout(r, 55 + Math.random() * 90));
-            steps++;
-          }
-        });
+    // Google for Jobs renders cards in its own scrollable container inside the page.
+    // Walk up from the first card to find that container and scroll it; also
+    // scroll document.body so either trigger path gets hit.
+    await updateOverlay(page, {
+      ...overlayBase,
+      activityKey: 'google-preload',
+      status: `Loading the full Google list — not selecting cards yet… ${count}`,
+    });
+    // TRUSTED wheel events are REQUIRED here. Google's batch loader ignores
+    // programmatic scrolling entirely: `window.scrollTo`/`scrollBy` and
+    // `el.scrollTop` move the viewport to the page floor and load NOTHING —
+    // measured sitting at exactly 20 cards across 14 passes, with no
+    // end-of-list sentinel. That is indistinguishable from a genuine small
+    // result set, so the failure is silent. Synthetic `WheelEvent` dispatch
+    // and `End` keypresses are equally ignored (both are untrusted).
+    // page.mouse.wheel goes through CDP Input.dispatchMouseEvent, which the
+    // page receives as a real user wheel.
+    await revealByTrustedWheel(page, '.EimVGf, [jscontroller="b11o3b"]');
+    // Keep a programmatic nudge AFTER the wheel pass. It cannot trigger the
+    // loader, but it costs nothing and still helps any lazy <img>/observer
+    // work that keys off scroll position rather than input trust.
+    await page.evaluate(async () => {
+      const step = Math.floor(window.innerHeight * (0.55 + Math.random() * 0.3));
+      let steps = 0;
+      while (window.scrollY + window.innerHeight < document.body.scrollHeight - 10 && steps < 6) {
+        window.scrollBy(0, step);
+        await new Promise(r => setTimeout(r, 55 + Math.random() * 90));
+        steps++;
       }
-    }
+    }).catch(() => {});
     await new Promise(r => setTimeout(r, humanDelay(NAV_SETTLE_MS)));
   }
   // Observation only — never a stop rule, a filter, or a retry trigger. `exit`
@@ -6705,29 +6681,6 @@ export async function preloadResolvedJobList(page, sourceId, extractorJS, signal
   return Array.isArray(rows) ? rows : [];
 }
 
-// ── Main export ───────────────────────────────────────────────────────────────
-/**
- * Replace scrapeMultiple for the browser-scraped sources with a fully
- * automated visible-browser session. Takes the same flat task array and
- * onResult callback; returns the same result array shape.
- *
- * @param {Array<{id, sourceId, url, extractorJS, query}>} tasks
- * @param {function} onResult  — called with {id, sourceId, success, data, ...} per source
- * @param {AbortSignal|null}   signal
- * @returns {Promise<Array>}
- */
-/**
- * Resolve a Glassdoor location string to its numeric `locId`. Glassdoor's search
- * location FILTER is keyed by locId (the `locKeyword` text alone is silently
- * ignored — verified empirically), and the location-autocomplete endpoint is
- * Cloudflare-gated, so the lookup MUST run from the glassdoor.com origin inside
- * this already-CF-cleared browser (a plain server-side fetch 403s). The result is
- * cached persistently (a locId is a stable platform id), so this costs an extra
- * navigation only on the first-ever use of a given location. A requested
- * location is a safety boundary: failure to resolve or verify it returns a
- * failure object and the caller SKIPS Glassdoor rather than navigating a
- * locKeyword-only (nationwide) URL.
- */
 export function glassdoorRequestedCountry(location) {
   const normalized = normalizeLocationInput(location);
   return normalized.countryCode
@@ -7072,6 +7025,18 @@ async function ensureGlassdoorOrigin(page, host) {
   return false;
 }
 
+/**
+ * Resolve a Glassdoor location string to its numeric `locId`. Glassdoor's search
+ * location FILTER is keyed by locId (the `locKeyword` text alone is silently
+ * ignored — verified empirically), and the location-autocomplete endpoint is
+ * Cloudflare-gated, so the lookup MUST run from the glassdoor.com origin inside
+ * this already-CF-cleared browser (a plain server-side fetch 403s). The result is
+ * cached persistently (a locId is a stable platform id), so this costs an extra
+ * navigation only on the first-ever use of a given location. A requested
+ * location is a safety boundary: failure to resolve or verify it returns a
+ * failure object and the caller SKIPS Glassdoor rather than navigating a
+ * locKeyword-only (nationwide) URL.
+ */
 async function resolveGlassdoorLocId(page, location, signal, runCache = null, overlayBase = null) {
   const key = String(location || '').trim().toLowerCase();
   if (!key) return { failure: 'no location was supplied', failureKind: 'no-location' };
@@ -7399,6 +7364,8 @@ async function launchScrapePlatformBrowser({ userDataDir, executablePath, sandbo
   };
   browser.on('disconnected', () => {
     closed = true;
+    // The keep-alive below is declared after this handler, and the handler only runs later.
+    clearInterval(overlayKeepAlive);
     if (manualScraperTelemetry.browser) {
       manualScraperTelemetry.browser = { ...manualScraperTelemetry.browser, running: false, closedAt: Date.now() };
     }
@@ -7485,12 +7452,24 @@ export function resetManualScraperTelemetry() {
   resetManualScraperDiagnostics();
 }
 
-// `opts`: { resetDiagnostics=true, sourceIndexBase=0, sourceTotal=null, onActivity=null }
-// — for per-source dispatch the orchestrator passes resetDiagnostics:false (it
-// cleared once up front) and the real index/total so the "Starting X/Y" log stays
-// correct. `onActivity` receives the mid-walk liveness beat (see updateOverlay);
-// it is the ONLY channel this module has to the renderer, and it is optional so
-// direct callers and tests need not supply one.
+// ── Main export ───────────────────────────────────────────────────────────────
+/**
+ * Replace scrapeMultiple for the browser-scraped sources with a fully
+ * automated visible-browser session. Takes the same flat task array and
+ * onResult callback; returns the same result array shape.
+ *
+ * @param {Array<{id, sourceId, url, extractorJS, query}>} tasks
+ * @param {function} onResult  — called with {id, sourceId, success, data, ...} per source
+ * @param {AbortSignal|null}   signal
+ * @returns {Promise<Array>}
+ *
+ * `opts`: { resetDiagnostics=true, sourceIndexBase=0, sourceTotal=null, onActivity=null }
+ * — for per-source dispatch the orchestrator passes resetDiagnostics:false (it
+ * cleared once up front) and the real index/total so the "Starting X/Y" log stays
+ * correct. `onActivity` receives the mid-walk liveness beat (see updateOverlay);
+ * it is the ONLY channel this module has to the renderer, and it is optional so
+ * direct callers and tests need not supply one.
+ */
 export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = null, opts = {}) {
   if (isBackgroundE2E()) {
     clearManualScraperTelemetry('disabled');

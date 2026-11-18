@@ -252,6 +252,10 @@ export default [{
     assert(body.slice(blocked, queueCall).includes('return;\n      }'), 'the blocked branch returns before the queue call');
     assert(body.includes('        careerSnapshotId,\n'), 'queue payload anchor intact');
     assert(card.includes("import { generateId } from '../utils/idGenerator';"));
+    const finallyAt = body.indexOf('} finally {', gateCall);
+    assert(finallyAt > gateCall && finallyAt < blocked
+      && body.slice(finallyAt, blocked).includes('completeNonApiAiRun?.(gateRunId)'),
+    'a rejected gate check still completes its non-API AI run');
   },
 }, {
   name: 'generation gate: a due improvement session blocks with no AI call, at whatever SESSION_DUE_COUNT is, and clears on reset',

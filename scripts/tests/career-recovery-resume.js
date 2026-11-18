@@ -23,8 +23,8 @@ import {
 } from '../test-dependencies.js';
 import {
   __assertCareerInputDescriptorsStillMatchForTests, __assertOwnedStagedCareerAttachmentForTests,
-  __bindCareerCompileRunForTests, __careerCompileResumeStatusForTests, __extractCareerFileSectionsForTests,
-  __readOwnedStagedCareerAttachmentForTests, __stageCareerInputFilesForTests,
+  __bindCareerCompileRunForTests, __isWithinCareerConvertedInputRootForTests, __careerCompileResumeStatusForTests, __extractCareerFileSectionsForTests,
+  __readOwnedStagedCareerAttachmentForTests, __stageCareerInputFilesForTests, registerCareerConvertedInputRoot,
 } from '../../electron/ipc/jobs.js';
 import { careerSnapshotId, careerSnapshotInputFingerprint } from '../../electron/ipc/careerSnapshot.js';
 import { readPlainTextDocument } from '../../electron/ipc/docUtils.js';
@@ -132,6 +132,17 @@ const SYNTHETIC_DOMAINS = [
 __allowDurableTaskIdsForTests(['test-career-compile-step', 'test-manual-stale-pending']);
 
 export default [
+  {
+    name: 'A converted career file whose name starts with two dots is still inside its registered root',
+    run() {
+      const root = path.join(process.cwd(), '.career-converted-root-fixture');
+      registerCareerConvertedInputRoot(root);
+      assert(__isWithinCareerConvertedInputRootForTests(path.join(root, '..notes.txt')), 'a child named with two leading dots is inside the root');
+      assert(__isWithinCareerConvertedInputRootForTests(path.join(root, 'sub', 'a.txt')), 'a nested child is inside the root');
+      assert(!__isWithinCareerConvertedInputRootForTests(path.join(root, '..', 'other.txt')), 'a sibling of the root is outside it');
+      assert(!__isWithinCareerConvertedInputRootForTests(root), 'the root itself is not a child');
+    },
+  },
   {
     name: 'career recovery: a plain-text file staged in the real private store is still read verbatim, never demoted to an AI attachment',
     run: async () => {

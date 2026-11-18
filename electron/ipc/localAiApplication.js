@@ -144,27 +144,6 @@ export const LOCAL_AI_APPLICATION_VERSION = 1;
 // contract, while newly queued jobs receive the current audit version.
 const LEGACY_LOCAL_AI_GENERATION_AUDIT_VERSION = 1;
 const JOB_ID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
-const generationSelections = new Map();
-export function recordLocalApplicationGenerationSelection({ jobId, canvasFilePath, stage, model, effort, fallback = false } = {}) {
-  const printable = value => typeof value === 'string' && value.length >= 1 && value.length <= 80
-    && [...value].every(character => character.charCodeAt(0) >= 32);
-  if (!JOB_ID_RE.test(jobId || '') || typeof canvasFilePath !== 'string' || !path.isAbsolute(canvasFilePath)
-    || typeof stage !== 'string' || !/^[a-z][a-z0-9-]{0,39}$/.test(stage)
-    || !printable(model) || !printable(effort)) return false;
-  const key = `${canvasFilePath}\u0000${jobId}`;
-  const rows = generationSelections.get(key) || [];
-  rows.push({ stage, model, effort, fallback: fallback === true });
-  if (!generationSelections.has(key) && generationSelections.size >= 256) generationSelections.delete(generationSelections.keys().next().value);
-  generationSelections.set(key, rows.slice(-100));
-  return true;
-}
-function generationSelectionSummary(canvasFilePath, jobId) {
-  const rows = generationSelections.get(`${canvasFilePath}\u0000${jobId}`) || [];
-  const distinct = [...new Map(rows.map(row => [`${row.model}\u0000${row.effort}\u0000${row.fallback}`, {
-    model: row.model, effort: row.effort, ...(row.fallback ? { fallback: true } : {}),
-  }])).values()];
-  return distinct.length ? distinct : null;
-}
 // Harness-only one-shot seam. It is deliberately not registered with IPC and
 // is consumed before any queue filesystem mutation, so production callers
 // retain crypto.randomUUID() while the guarded acceptance driver can reserve
@@ -206,7 +185,7 @@ const MAX_RESULT_BYTES = 1_000_000;
 // These are deliberately low "visibly unfinished" floors, not page-fill
 // quotas. A source with genuinely sparse evidence can use the audited escape
 // hatch below; ordinary drafts cannot turn a one-line artifact into a pass.
-export const MIN_RESUME_UNDERFILL_CHARACTERS_PER_ROLE = 38;
+const MIN_RESUME_UNDERFILL_CHARACTERS_PER_ROLE = 38;
 // Context and input are created by this process, then reopened before a
 // person can paste a response. Keep their queue-time byte envelope identical
 // to every trusted reader; character limits alone are unsafe for Unicode.
@@ -216,7 +195,7 @@ export const MAX_SOURCE_GROUNDING_QUOTE_CHARS = SOURCE_GROUNDING_QUOTE_CHARS;
 // A paste handoff contains the immutable corpus plus its independently
 // addressable catalog. Bound the exact serialized UTF-8 envelope before a
 // queue write so a job never exists whose first prompt cannot be handed off.
-export const MAX_PASTE_APPLICATION_PROMPT_BYTES = 900_000;
+const MAX_PASTE_APPLICATION_PROMPT_BYTES = 900_000;
 // Allows one-time recovery of pre-ring manifests, after which append trims
 // them back to the compact bounded form. This is not a handoff-round limit.
 const MAX_LOCAL_AI_MANIFEST_BYTES = 8_000_000;
@@ -319,8 +298,8 @@ const REQUIREMENTS_AUDIT_DISAGREEMENT_MESSAGE = 'Independent requirements audit 
 // 2 KB, as the first v5 build did, left almost no room for the conventions
 // clause beside a maximal context; the extra half kilobyte restores the
 // headroom a maximal fact or tailoring scope had before the clause existed.
-export const BLIND_REVIEW_PLAN_PROMPT_BYTE_LIMIT = 24 * 1024 - 1536;
-export const BLIND_REVIEW_PANEL_PLAN_PROMPT_BYTE_LIMIT = 192 * 1024 - 1536;
+const BLIND_REVIEW_PLAN_PROMPT_BYTE_LIMIT = 24 * 1024 - 1536;
+const BLIND_REVIEW_PANEL_PLAN_PROMPT_BYTE_LIMIT = 192 * 1024 - 1536;
 const BLIND_REVIEW_HUMAN_STOP_KIND = 'blind-review-human-stop';
 // Version 4: the 'cycle-cap' stop reads the per-cycle finding counts the signed
 // recurrence record now carries and says whether the findings were trending
@@ -409,7 +388,7 @@ function idLengthCeiling(patternSource) {
   if (!match) throw new Error(`Cannot derive an id length ceiling from pattern: ${patternSource}`);
   return Number(match[1]) + 1;
 }
-export const PASTE_STABLE_ID_MAX_LENGTH = idLengthCeiling(PASTE_STABLE_ID_PATTERN);
+const PASTE_STABLE_ID_MAX_LENGTH = idLengthCeiling(PASTE_STABLE_ID_PATTERN);
 // The priority vocabulary the evidence-plan validator tests membership
 // against, for both evidence items and requirements. Exported so the contract
 // and every repair message that asks for another evidence item print the same
@@ -434,9 +413,9 @@ const PASTE_REQUIREMENTS_SCHEMA_RULE_ID_SET = new Set(PASTE_REQUIREMENTS_SCHEMA_
 // response envelope as every other manual step.  A plan is acquired as an
 // ordered series of these pages; these are per-response bounds, never a cap
 // on the frozen plan or the job/listing corpus.
-export const MAX_EVIDENCE_PLAN_PAGE_EVIDENCE_ITEMS = 24;
-export const MAX_EVIDENCE_PLAN_PAGE_REQUIREMENT_ITEMS = 12;
-export const EVIDENCE_PLAN_LISTING_PAGE_CHARS = 12_000;
+const MAX_EVIDENCE_PLAN_PAGE_EVIDENCE_ITEMS = 24;
+const MAX_EVIDENCE_PLAN_PAGE_REQUIREMENT_ITEMS = 12;
+const EVIDENCE_PLAN_LISTING_PAGE_CHARS = 12_000;
 // Kept as compatibility aliases for callers that displayed the old constants.
 // They now describe one page, not a global selection limit.
 export const MAX_EVIDENCE_PLAN_EVIDENCE_ITEMS = MAX_EVIDENCE_PLAN_PAGE_EVIDENCE_ITEMS;
@@ -613,51 +592,6 @@ function isJsonObject(value) {
 
 function normalizedSourceIncludes(source, value) {
   return String(source ?? '').replace(/\s+/g, ' ').trim().includes(String(value ?? '').replace(/\s+/g, ' ').trim());
-}
-
-// Degree shapes an education entry uses, each anchored at the start of its
-// clause. Spelled forms are matched case-insensitively because the region is
-// already scoped; abbreviations keep the capitalization a degree is written
-// with, so "Ms. Smith" or "Manhattan College" cannot match. Anchoring is the
-// second guard: prose names a degree mid-sentence, an entry leads with it.
-const PASTE_SPELLED_DEGREE_RES = [
-  /^(?:bachelor|master|associate|doctor)(?:'s|’s|s|s'|s’)?\s+(?:of|in)\s+\S/iu,
-  /^(?:bachelor|master|associate|doctor)(?:'s|’s|s|s'|s’)?\s+degree\b/iu,
-  /^doctorate\b/iu,
-];
-const PASTE_DEGREE_ABBREVIATION_RE = /^(?:Ph\.?\s?D|Sc\.?D|Ed\.?D|J\.?D|D\.?Phil|LL\.?[BM]|M\.?B\.?A|M\.?F\.?A|B\.?F\.?A|[BM](?:\.\s?)?(?:Sc|Eng|Ed|BA|FA|S|A))\b/u;
-// An abbreviation must stand alone or be followed by a field of study, so a
-// certification listed under "Education & Certifications" ("MS Office
-// Specialist") is not read as a master's degree.
-const PASTE_DEGREE_FIELD_RE = /^(?:in|of|computer|computing|software|data|information|electrical|mechanical|civil|chemical|industrial|biomedical|systems|engineering|sciences?|mathematics|maths?|statistics|physics|chemistry|biology|economics|business|administration|accounting|finance|marketing|management|psychology|sociology|philosophy|political|history|english|communications?|journalism|design|architecture|nursing|medicine|health|public|education|arts?|law|linguistics|neuroscience|astronomy|geology|geography|environmental|cognitive|honou?rs)\b/i;
-
-function pasteDegreeClauseMatches(clause) {
-  if (PASTE_SPELLED_DEGREE_RES.some(pattern => pattern.test(clause))) return true;
-  const abbreviation = PASTE_DEGREE_ABBREVIATION_RE.exec(clause);
-  if (!abbreviation) return false;
-  const rest = clause.slice(abbreviation[0].length).replace(/^[\s.,:;()'"-]+/u, '');
-  return !rest || PASTE_DEGREE_FIELD_RE.test(rest);
-}
-
-// An education entry states its parts in clauses: degree, institution, dates.
-function pasteEducationClauses(line) {
-  return String(line).split(/\s*[,;|•]\s*|\s+[—–-]\s+/u).map(part => part.trim()).filter(Boolean);
-}
-
-// A credential that is not a degree drops the documented degree just as
-// silently as omitting the field, so presence is not the test — shape is.
-// The shapes are the clause-anchored ones the detector uses, applied to the
-// credential's own leading clause, so the Design System's
-// "<degree>, <institution>" form passes while a job title ("Software
-// Engineer"), a personal name, or an institution alone ("<institution>")
-// does not. No string from careerData is involved, so there is none to quote.
-// This is deliberately weaker than the carriage test it replaces: it cannot
-// tell the documented degree from another degree-shaped phrase elsewhere in
-// careerData ("Master of Ceremonies"). Knowing that difference requires the
-// host to name the degree it means, which is the corruption vector itself.
-export function pasteCredentialIsDegreeShaped(credential) {
-  const [first] = pasteEducationClauses(String(credential ?? '').replace(/\s+/g, ' ').trim());
-  return Boolean(first) && pasteDegreeClauseMatches(first);
 }
 
 // Review replacements are documents, not arbitrary JSON objects.  Object key
@@ -10705,6 +10639,16 @@ export async function withLocalAiJobPruneClaim(jobId, workDir, operation) {
   }
 }
 
+// Removes a file only if it is still the same stale file that was observed
+// earlier: same device, inode and mtime, and still older than the cutoff.
+async function unlinkStaleFileIfUnchanged(filePath, observed, cutoff) {
+  const current = await fs.promises.lstat(filePath).catch(() => null);
+  if (!current?.isFile() || current.isSymbolicLink()
+    || current.dev !== observed.dev || current.ino !== observed.ino
+    || current.mtimeMs !== observed.mtimeMs || current.mtimeMs >= cutoff) return;
+  await fs.promises.unlink(filePath).catch(() => {});
+}
+
 async function pruneAndCountLocalAiJobs(canvasRoot) {
   const root = localJobsRoot(canvasRoot);
   let entries;
@@ -10746,11 +10690,7 @@ async function pruneAndCountLocalAiJobs(canvasRoot) {
             return;
           }
         } catch { /* only stale receipts without a live trusted output expire */ }
-        const current = await fs.promises.lstat(receiptPath).catch(() => null);
-        if (!current?.isFile() || current.isSymbolicLink()
-          || current.dev !== observed.dev || current.ino !== observed.ino
-          || current.mtimeMs !== observed.mtimeMs || current.mtimeMs >= cutoff) return;
-        await fs.promises.unlink(receiptPath).catch(() => {});
+        await unlinkStaleFileIfUnchanged(receiptPath, observed, cutoff);
       });
     }));
   // The phase stamp (LOCAL_AI_JOB_PHASES's own header) answers "why is this
@@ -10775,11 +10715,7 @@ async function pruneAndCountLocalAiJobs(canvasRoot) {
       await withLocalAiJobPruneClaim(stampJobId, workDir, async () => {
         const observed = await fs.promises.lstat(stampPath).catch(() => null);
         if (!observed?.isFile() || observed.isSymbolicLink() || observed.mtimeMs >= cutoff) return;
-        const current = await fs.promises.lstat(stampPath).catch(() => null);
-        if (!current?.isFile() || current.isSymbolicLink()
-          || current.dev !== observed.dev || current.ino !== observed.ino
-          || current.mtimeMs !== observed.mtimeMs || current.mtimeMs >= cutoff) return;
-        await fs.promises.unlink(stampPath).catch(() => {});
+        await unlinkStaleFileIfUnchanged(stampPath, observed, cutoff);
       });
     }));
   let retained = 0;
@@ -12091,7 +12027,7 @@ function assertCoverLetterReviewAttestsToArgument(rationale) {
 // own name back with review boilerplate around it.
 export const QUALITY_NOTE_MIN_CHARS = 24;
 export const QUALITY_NOTE_MIN_WORDS = 5;
-export const QUALITY_NOTE_MIN_CORE_WORDS = 3;
+const QUALITY_NOTE_MIN_CORE_WORDS = 3;
 const QUALITY_NOTE_BOILERPLATE_WORDS = Object.freeze([
   'a', 'an', 'and', 'application', 'applications', 'against', 'all', 'bundle', 'bundles',
   'checked', 'check', 'criterion', 'criteria', 'document', 'documents', 'final', 'for', 'in', 'of', 'on',
@@ -16332,7 +16268,8 @@ async function authoritativeCareerInputForSnapshot(snapshotId) {
   // an evidence-backed project, education record, certification, or standalone
   // evidence can proceed through the same exhaustive authority workflow with
   // an explicit role-less selection. A wholly empty profile still cannot.
-  const hasApplicationEvidence = approvedCareerEvidenceCatalog(snapshot).some(item => /^(?:host\.career\.)?(?:project|education|certification|other)\./u.test(String(item?.id || '')));
+  const careerEvidenceCatalog = approvedCareerEvidenceCatalog(snapshot);
+  const hasApplicationEvidence = careerEvidenceCatalog.some(item => /^(?:host\.career\.)?(?:project|education|certification|other)\./u.test(String(item?.id || '')));
   if ((!Array.isArray(profile.workHistory) || profile.workHistory.length === 0) && !hasApplicationEvidence) {
     throw new Error('The approved career snapshot has no usable work-history role or evidence-backed project, education, certification, or standalone record for application generation. Re-run the Job Search after correcting the career source.');
   }
@@ -16342,7 +16279,7 @@ async function authoritativeCareerInputForSnapshot(snapshotId) {
     resumeProfile: profile,
     snapshotProfile: snapshot.profile,
     careerSkillEvidence: snapshotCareerSkillEvidence(snapshot),
-    careerEvidenceCatalog: approvedCareerEvidenceCatalog(snapshot),
+    careerEvidenceCatalog,
   };
 }
 
@@ -16358,14 +16295,8 @@ function applicationDocumentAlreadyStarted(documentScope) {
 // A job ending in a failed state, or already saved, no longer holds its document.
 async function activeApplicationJobForDocument({ canvasFilePath, nodeId, documentScope, priorLocalApplicationId = null }) {
   const canvas = await resolveCanvasProject(canvasFilePath);
-  for (const { id } of await discoverLocalApplicationJobs(canvasFilePath)) {
+  for (const { entry: { id }, manifest, input } of await discoverLocalApplicationJobRecords(canvasFilePath)) {
     if (id === priorLocalApplicationId) continue;
-    const dir = path.join(path.resolve(localJobsRoot(canvas.canvasRoot)), id);
-    // Discovery has just read this folder; one removed since cannot hold the document.
-    const records = await Promise.all([loadManifest(dir), readOwnedFile(path.dirname(dir), path.join(dir, 'input.json'), { maxBytes: MAX_LOCAL_AI_INPUT_BYTES }).then(JSON.parse)])
-      .catch(error => { if (error?.code === 'ENOENT') return null; throw error; });
-    if (!records) continue;
-    const [manifest, input] = records;
     if (input?.nodeId !== nodeId || (input?.documentScope && input.documentScope !== documentScope)) continue;
     if (REPLACEABLE_APPLICATION_JOB_STATUSES.has(manifest?.status)) continue;
     if (await readLocalAiTerminalReceipt(canvas.canvasRoot, canvas.canonicalCanvasFilePath, id)) continue;
@@ -18167,7 +18098,6 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
         job: input.job,
         documentScope,
         pasteRejectionTrace: savedRejectionTrace,
-        selectedModelEffort: generationSelectionSummary(canvas.canonicalCanvasFilePath, jobId),
       });
       // LOCAL_AI_JOB_PHASES's own header: written beside the receipt above,
       // not in place of it — the receipt is the strong, hash-bound proof of a
@@ -18183,7 +18113,6 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     },
     onBeforeSuccessfulCleanup: () => retireLocalAiJobForCleanup(root, dir, resultSha256),
     onAfterSuccessfulCleanup: () => {
-      generationSelections.delete(`${canvas.canonicalCanvasFilePath}\u0000${jobId}`);
       notifyLocalApplicationDiscarded({
         jobId,
         canvasFilePath: canvas.canonicalCanvasFilePath,
@@ -18228,6 +18157,10 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
 const incompleteDiscoveredJobsLogged = new Set();
 
 export async function discoverLocalApplicationJobs(canvasFilePath) {
+  return (await discoverLocalApplicationJobRecords(canvasFilePath)).map(record => record.entry);
+}
+
+async function discoverLocalApplicationJobRecords(canvasFilePath) {
   const canvas = await resolveCanvasProject(canvasFilePath);
   const root = path.resolve(localJobsRoot(canvas.canvasRoot));
   let rootStat;
@@ -18265,13 +18198,13 @@ export async function discoverLocalApplicationJobs(canvasFilePath) {
         throw new Error('job manifest and input do not agree');
       }
       assertManifestCanvasOwnership(manifest, input, canvas);
-      discovered.push({
+      discovered.push({ manifest, input, entry: {
         id: entry.name,
         canvasFilePath: canvas.canonicalCanvasFilePath,
         createdAt: manifest.createdAt || null,
         job: safeJob(input.job),
         ...(manifest.transport === 'paste' ? { mode: 'paste' } : {}),
-      });
+      } });
     } catch (error) {
       // A malformed or foreign folder must never gain recovery ownership. It
       // is left untouched for explicit diagnostics/recovery, while healthy
@@ -18293,7 +18226,7 @@ export async function discoverLocalApplicationJobs(canvasFilePath) {
       logger.warn(`[LocalAI] Ignored untrusted discovered job ${entry.name}: ${error?.message || error}`);
     }
   }
-  return discovered.sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || a.id.localeCompare(b.id));
+  return discovered.sort((a, b) => String(a.entry.createdAt || '').localeCompare(String(b.entry.createdAt || '')) || a.entry.id.localeCompare(b.entry.id));
 }
 
 let applicationLinkDiagnostics = null;
@@ -18321,10 +18254,11 @@ async function readVerifiedSavedApplicationBundles(canvas) {
       if (!receipt || receipt.version !== 2) continue;
       const dir = await resolveTrustedSavedApplicationOutputDirectory(canvas, receipt);
       let listingKeys = receipt.listingKeys;
+      let audit = null;
       if (!Array.isArray(listingKeys) || !listingKeys.length) {
         // Legacy receipts lack identity. Require the generation audit to bind
         // both the receipt and exact listing bytes before using its header URL.
-        const audit = JSON.parse(await readOwnedFile(dir, path.join(dir, 'Generation Audit.json'), { maxBytes: 4 * 1024 * 1024 }));
+        audit = JSON.parse(await readOwnedFile(dir, path.join(dir, 'Generation Audit.json'), { maxBytes: 4 * 1024 * 1024 }));
         const listing = await readOwnedFile(dir, path.join(dir, 'Original Job Listing.md'), { maxBytes: 4 * 1024 * 1024 });
         if (audit.jobId !== jobId || audit.finalArtifacts?.resultSha256 !== receipt.resultSha256
           || audit.finalArtifacts?.originalJobListingSha256 !== contentHash(listing)) continue;
@@ -18333,7 +18267,7 @@ async function readVerifiedSavedApplicationBundles(canvas) {
         listingKeys = applicationListingKeys({ url });
       }
       // A regenerated folder must never adopt an older receipt's job id.
-      const audit = JSON.parse(await readOwnedFile(dir, path.join(dir, 'Generation Audit.json'), { maxBytes: 4 * 1024 * 1024 }));
+      audit ??= JSON.parse(await readOwnedFile(dir, path.join(dir, 'Generation Audit.json'), { maxBytes: 4 * 1024 * 1024 }));
       if (audit.jobId !== jobId || audit.finalArtifacts?.resultSha256 !== receipt.resultSha256) continue;
       const auditJob = audit.job && typeof audit.job === 'object' ? audit.job : {};
       const str = value => (typeof value === 'string' ? value : '');

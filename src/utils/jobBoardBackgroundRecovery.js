@@ -25,7 +25,7 @@ function profileFingerprint(value) {
   return /^[a-f0-9]{64}$/.test(normalized) ? normalized : null;
 }
 
-export function backgroundBoardChildInputKey(node) {
+function backgroundBoardChildInputKey(node) {
   const data = node?.data || {};
   return stableJson({
     id: node?.id || null,
@@ -199,5 +199,3 @@ export function validateBackgroundBoardChildRequest(prepared, node, boardPlan, c
     },
   };
 }
-
-export const __backgroundSafeJobSourceIdsForTests = BACKGROUND_SAFE_SOURCE_IDS;

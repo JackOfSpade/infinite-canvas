@@ -14,12 +14,12 @@ const MAX_CHECK_DETAIL_VALUE_CHARS = 160;
 export const MAX_LETTER_FIGURES = 3;
 // The brief's own cap: at least one and at most three body points. It lives
 // here as one number so the advisory check and its callers cannot drift apart.
-export const MAX_LETTER_BODY_POINTS = 3;
+const MAX_LETTER_BODY_POINTS = 3;
 const MAX_FIGURE_DETAIL_ITEMS = 12;
 const MAX_GENERIC_OBSERVATIONS = 12;
 export const MAX_LOGISTICS_CONTAINMENT_OBSERVATIONS = 8;
 export const MAX_HYPHENATION_OBSERVATIONS = 8;
-export const MAX_ANCHOR_RELEVANCE_OBSERVATIONS = 8;
+const MAX_ANCHOR_RELEVANCE_OBSERVATIONS = 8;
 const MAX_ADDITIVE_SEAM_OBSERVATIONS = 4;
 const MAX_RESPONSIBILITY_TRANSITION_OBSERVATIONS = 4;
 const MAX_POSTING_REFERENCE_OBSERVATIONS = 4;
@@ -159,7 +159,7 @@ export const BANNED_GENERIC_PATTERNS = Object.freeze([
   { phrase: 'downsides and trade-offs', pattern: /\b(?:downsides?|drawbacks?) and trade offs?\b/u },
 ]);
 
-export const BANNED_OPENERS = Object.freeze([
+const BANNED_OPENERS = Object.freeze([
   'i am writing to express my interest',
   'i am writing to apply',
   "i'm writing to apply",
@@ -260,7 +260,7 @@ function salutationCompanyName(value = '') {
 }
 
 function postingTextKey(value = '') {
-  return text(value).normalize('NFKC').replace(/\s+/gu, ' ').trim().toLowerCase();
+  return normalized(value);
 }
 
 const PARENT_POSITION_PREFIX = String.raw`(?:(?:an?\s+(?:wholly[- ]owned\s+)?(?:subsidiary|division|business unit|brand|affiliate|portfolio company)\s+of)|owned\s+by|acquired\s+by)\s+(?:the\s+)?`;
@@ -275,7 +275,7 @@ const NAME_END = String.raw`(?![\p{L}\p{N}_]|\.[\p{L}\p{N}])`;
  * the subsidiary: host-authored fields never copy a string parsed out of
  * posting text, so the hirer cannot be named here, only the parent ruled out.
  */
-export function postingNamesEmployerAsParent(employerName = '', jobText = '') {
+function postingNamesEmployerAsParent(employerName = '', jobText = '') {
   const haystack = postingTextKey(jobText);
   if (!haystack) return false;
   const rawName = text(employerName);
@@ -325,6 +325,9 @@ function wordCount(value) {
 function genericWords(value) {
   return words(value).flatMap(word => word.split('-').filter(Boolean));
 }
+
+const BANNED_GENERIC_PHRASE_WORDS = BANNED_GENERIC_PHRASES.map(phrase => [phrase, genericWords(phrase)]);
+const BANNED_OPENER_WORDS = BANNED_OPENERS.map(opener => [opener, genericWords(opener)]);
 
 function containsWordSequence(haystack, needle) {
   if (!needle.length || needle.length > haystack.length) return false;
@@ -570,10 +573,21 @@ function joinAbbreviationSplits(segments) {
  * rather than letting a missing segmenter silently disable them.
  */
 export function sentences(value) {
+  const key = typeof value === 'string' ? value : null;
+  const cached = key === null ? undefined : SENTENCE_CACHE.get(key);
+  if (cached) return cached.slice();
   const source = text(value);
-  if (!source) return [];
-  return joinAbbreviationSplits(rawSentenceSegments(source)).map(text).filter(Boolean);
+  const result = source ? joinAbbreviationSplits(rawSentenceSegments(source)).map(text).filter(Boolean) : [];
+  if (key !== null) {
+    // The result depends only on the input, and one evaluation pass asks for the same paragraph many times.
+    if (SENTENCE_CACHE.size >= SENTENCE_CACHE_LIMIT) SENTENCE_CACHE.clear();
+    SENTENCE_CACHE.set(key, result.slice());
+  }
+  return result;
 }
+
+const SENTENCE_CACHE = new Map();
+const SENTENCE_CACHE_LIMIT = 400;
 
 // One segmenter for the module: constructing it costs more than segmenting a
 // paragraph, and every sentence-level check calls this.
@@ -1540,13 +1554,10 @@ const MAX_SPAN_ENUMERATION_WORDS = 200;
 function postingTermOccurrences(posting) {
   const source = normalized(posting);
   const occurrences = [];
-  const pattern = /[\p{L}\p{N}]+(?:[’'-][\p{L}\p{N}]+)*/gu;
-  let match = pattern.exec(source);
-  while (match) {
+  for (const match of source.matchAll(WORD_TOKEN_RE)) {
     for (const term of argumentContentWords(match[0])) {
       occurrences.push({ term, start: match.index, end: match.index + match[0].length });
     }
-    match = pattern.exec(source);
   }
   return occurrences;
 }
@@ -1591,8 +1602,8 @@ function paragraphOffersRelevanceSpan(paragraph, postingQuoteText, { apart = tru
   const boxes = apart ? sentenceBoxes(paragraph) : [];
   if (apart && boxes.length < 2) return false;
   const posting = text(postingQuoteText);
-  const words = String(paragraph).split(/\s+/u).filter(Boolean);
-  if (!posting || words.length > MAX_SPAN_ENUMERATION_WORDS) return true;
+  const whitespaceTokens = String(paragraph).split(/\s+/u).filter(Boolean);
+  if (!posting || whitespaceTokens.length > MAX_SPAN_ENUMERATION_WORDS) return true;
   const occurrences = postingTermOccurrences(posting);
   if (!occurrences.length) return true;
   const proofSentences = apart
@@ -2229,8 +2240,8 @@ export function checkGenericPhrases(paragraphs = []) {
   };
   for (let index = 0; index < list.length; index++) {
     const paragraphWords = genericWords(list[index]);
-    for (const phrase of BANNED_GENERIC_PHRASES) {
-      if (containsWordSequence(paragraphWords, genericWords(phrase))) {
+    for (const [phrase, phraseWords] of BANNED_GENERIC_PHRASE_WORDS) {
+      if (containsWordSequence(paragraphWords, phraseWords)) {
         observe(index, 'banned phrase', phrase);
       }
     }
@@ -2242,8 +2253,7 @@ export function checkGenericPhrases(paragraphs = []) {
     }
   }
   const firstSentenceWords = genericWords(normalized(list[0]).split(/[.!?]/, 1)[0]);
-  for (const opener of BANNED_OPENERS) {
-    const openerWords = genericWords(opener);
+  for (const [opener, openerWords] of BANNED_OPENER_WORDS) {
     if (openerWords.every((word, index) => firstSentenceWords[index] === word)) {
       observe(0, 'banned opener', opener);
     }
@@ -2792,8 +2802,9 @@ export function checkLogisticsExclusion(plan = {}, paragraphs = []) {
       'argument plan contains logistics; availability, location, relocation, commute, travel, and schedule details belong in application fields, not the cover letter');
   }
   const observations = [];
-  for (let index = 0; index < (Array.isArray(paragraphs) ? paragraphs : []).length; index++) {
-    const paragraph = text(paragraphs[index]);
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  for (let index = 0; index < list.length; index++) {
+    const paragraph = text(list[index]);
     for (const promise of COVER_LETTER_LOGISTICS_PROMISES) {
       const match = promise.pattern.exec(paragraph);
       if (match) observations.push(`paragraph ${index + 1} makes a ${promise.label} promise (“${boundedDetailValue(match[0])}”); move it to the application fields`);
@@ -4007,28 +4018,39 @@ function endedBeforeReference(role, reference) {
   return ended ? end : null;
 }
 
-function currentEmploymentFrame(sentence, role) {
+// The sentence patterns that frame a role as current work, built once per role.
+function currentEmploymentFramePatterns(role) {
   const company = text(role?.company);
-  if (!company) return '';
+  if (!company) return null;
   const employer = escapeRegExp(company);
   const title = text(role?.title);
   const roleTitle = title ? escapeRegExp(title) : '';
+  const patterns = [];
   // The title-specific forms capture the common misleading construction
   // (“As a Software Engineer at Acme, I build ...”) without treating a general
   // present-tense capability claim that merely recalls prior evidence as work
   // the candidate is doing now.
   if (roleTitle) {
-    const asRole = new RegExp(`\\bas\\s+(?:an?\\s+|the\\s+)?${roleTitle}\\s+(?:at|with)\\s+${employer}\\s*,?\\s+${CURRENT_WORK_SUBJECT}\\b`, 'iu');
-    if (asRole.test(sentence)) return asRole.exec(sentence)?.[0] || company;
-    const isRole = new RegExp(`\\bi\\s+(?:am|['’]m)\\s+(?:currently\\s+)?(?:an?\\s+|the\\s+)?${roleTitle}\\s+(?:at|with)\\s+${employer}\\b`, 'iu');
-    if (isRole.test(sentence)) return isRole.exec(sentence)?.[0] || company;
+    patterns.push(
+      new RegExp(`\\bas\\s+(?:an?\\s+|the\\s+)?${roleTitle}\\s+(?:at|with)\\s+${employer}\\s*,?\\s+${CURRENT_WORK_SUBJECT}\\b`, 'iu'),
+      new RegExp(`\\bi\\s+(?:am|['’]m)\\s+(?:currently\\s+)?(?:an?\\s+|the\\s+)?${roleTitle}\\s+(?:at|with)\\s+${employer}\\b`, 'iu'),
+    );
   }
-  const currentRole = new RegExp(`\\b(?:my|the)\\s+(?:current|present|ongoing)\\s+(?:role|position|work|employment)\\b[^.!?]{0,80}\\b(?:at|with)\\s+${employer}\\b`, 'iu');
-  if (currentRole.test(sentence)) return currentRole.exec(sentence)?.[0] || company;
-  const employedThere = new RegExp(`\\bi\\s+(?:am|['’]m|remain|continue\\s+to\\s+be)\\s+(?:currently\\s+)?(?:employed|working)\\s+(?:at|with)\\s+${employer}\\b|\\bi\\s+(?:currently\\s+)?(?:work|serve|continue\\s+to\\s+work)\\s+(?:at|with)\\s+${employer}\\b`, 'iu');
-  if (employedThere.test(sentence)) return employedThere.exec(sentence)?.[0] || company;
-  const atEmployer = new RegExp(`\\b(?:at|with)\\s+${employer}\\s*,?\\s+${CURRENT_WORK_SUBJECT}\\b`, 'iu');
-  return atEmployer.test(sentence) ? (atEmployer.exec(sentence)?.[0] || company) : '';
+  patterns.push(
+    new RegExp(`\\b(?:my|the)\\s+(?:current|present|ongoing)\\s+(?:role|position|work|employment)\\b[^.!?]{0,80}\\b(?:at|with)\\s+${employer}\\b`, 'iu'),
+    new RegExp(`\\bi\\s+(?:am|['’]m|remain|continue\\s+to\\s+be)\\s+(?:currently\\s+)?(?:employed|working)\\s+(?:at|with)\\s+${employer}\\b|\\bi\\s+(?:currently\\s+)?(?:work|serve|continue\\s+to\\s+work)\\s+(?:at|with)\\s+${employer}\\b`, 'iu'),
+    new RegExp(`\\b(?:at|with)\\s+${employer}\\s*,?\\s+${CURRENT_WORK_SUBJECT}\\b`, 'iu'),
+  );
+  return { company, patterns };
+}
+
+function currentEmploymentFrame(sentence, frames) {
+  if (!frames) return '';
+  for (const pattern of frames.patterns) {
+    const match = pattern.exec(sentence);
+    if (match) return match[0] || frames.company;
+  }
+  return '';
 }
 
 /**
@@ -4053,11 +4075,12 @@ export function checkEndedRoleCurrentEmployment(paragraphs = [], evidence = {}, 
     endedRoleCount: 0, failureCount: 0, referenceMonth,
   };
   const observations = [];
+  const frameSets = endedRoles.map(({ role }) => currentEmploymentFramePatterns(role));
   const list = Array.isArray(paragraphs) ? paragraphs : [];
   for (let paragraphIndex = 0; paragraphIndex < list.length; paragraphIndex++) {
     for (const sentence of sentences(list[paragraphIndex])) {
-      for (const { role, end } of endedRoles) {
-        const frame = currentEmploymentFrame(text(sentence), role);
+      for (const [roleIndex, { role, end }] of endedRoles.entries()) {
+        const frame = currentEmploymentFrame(text(sentence), frameSets[roleIndex]);
         if (!frame) continue;
         const roleLabel = [text(role.title), text(role.company)].filter(Boolean).join(' at ');
         const endLabel = end.month == null
@@ -5177,7 +5200,7 @@ export const CLOSING_ACTION_MODALS = Object.freeze(['can', 'could', 'would', 'wi
 const CLOSING_ACTION_PRESENT_VERBS = Object.freeze([
   'supports', 'contributes', 'helps', 'advances', 'strengthens', 'improves', 'builds', 'delivers', 'applies', 'serves', 'shortens', 'extends', 'scales', 'accelerates', 'fits',
 ]);
-export const CLOSING_ACTION_OPEN_BASE_VERBS = Object.freeze(['apply', 'bring', 'put', 'use', 'contribute', 'extend', 'connect', 'carry']);
+const CLOSING_ACTION_OPEN_BASE_VERBS = Object.freeze(['apply', 'bring', 'put', 'use', 'contribute', 'extend', 'connect', 'carry']);
 export const CLOSING_ACTION_OPEN_PARTICIPLES = Object.freeze([
   'applying', 'bringing', 'putting', 'using', 'contributing', 'extending', 'connecting', 'carrying',
 ]);
@@ -7473,7 +7496,6 @@ const CHECK_DISPOSITION_ROWS = Object.freeze([
 
 export const CHECK_DISPOSITIONS = Object.freeze(Object.fromEntries(CHECK_DISPOSITION_ROWS.map(([id, disposition]) => [id, disposition])));
 export const CHECK_CLASSES = Object.freeze(Object.fromEntries(CHECK_DISPOSITION_ROWS.map(([id, , checkClass]) => [id, checkClass])));
-export const CHECK_RATIONALES = Object.freeze(Object.fromEntries(CHECK_DISPOSITION_ROWS.map(([id, , , why]) => [id, why])));
 
 const VALID_DISPOSITIONS = new Set(CHECK_DISPOSITION_VALUES);
 
@@ -7496,7 +7518,7 @@ export function checkDisposition(id, table = CHECK_DISPOSITIONS) {
  * any other row is its own single half. A row whose `parts` are not a usable
  * list is read as the whole row, never as nothing.
  */
-export function checkResultParts(row) {
+function checkResultParts(row) {
   const parts = row && typeof row === 'object' ? row.parts : null;
   if (Array.isArray(parts) && parts.length && parts.every(part => part && typeof part === 'object' && typeof part.id === 'string')) {
     return parts;

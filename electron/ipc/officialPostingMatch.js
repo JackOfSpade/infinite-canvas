@@ -344,7 +344,7 @@ export function canonicalLeadUrl(value) {
   const path = url.pathname.replace(/\/+$/u, '');
   return `${url.origin}${path.replace(APPLY_PAGE_SUFFIX, '') || path || '/'}${query ? `?${query}` : ''}`;
 }
-export function frozenEmployerName(scrapedCompany, verifiedEmployer) {
+function frozenEmployerName(scrapedCompany, verifiedEmployer) {
   const original = text(scrapedCompany);
   if (strictEmployerEqual(original, verifiedEmployer) && original.length <= 120 && !/[<>;]|https?:\/\//iu.test(original)) return original;
   // eslint-disable-next-line no-control-regex

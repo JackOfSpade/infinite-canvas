@@ -91,7 +91,7 @@ function rootPath(root, namespace) { assertAuthorityLedgerNamespace(namespace); 
 function journalPath(root, namespace) { assertAuthorityLedgerNamespace(namespace); return path.join(root, `${namespace}.journal.json`); }
 function mutationLockPath(root, namespace) { assertAuthorityLedgerNamespace(namespace); return path.join(root, `${namespace}.mutation.lock`); }
 function isDigest(value) { return typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value); }
-function isPowerOfTwo(value) { return Number.isSafeInteger(value) && value > 0 && Number.isInteger(Math.log2(value)); }
+function isPowerOfTwo(value) { return Number.isSafeInteger(value) && value > 0 && 2 ** Math.round(Math.log2(value)) === value; }
 function sameFileIdentity(left, right) {
   return Boolean(left && right && left.dev === right.dev && left.ino === right.ino
     && left.size === right.size && left.contentDigest === right.contentDigest);

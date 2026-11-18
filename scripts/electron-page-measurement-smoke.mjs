@@ -51,9 +51,12 @@ try {
     bundle: true, platform: 'node', format: 'cjs', packages: 'external',
   });
   const exitCode = await new Promise((resolve, reject) => {
-    const child = spawn(electron, [outfile], { cwd: process.cwd(), stdio: 'inherit', env: { ...process.env, IC_BACKGROUND_E2E: '1' } });
-    child.once('error', reject);
-    child.once('exit', resolve);
+    const env = { ...process.env, INFINITE_CANVAS_E2E_BACKGROUND: '1' };
+    delete env.ELECTRON_RUN_AS_NODE;
+    const child = spawn(electron, [outfile], { cwd: process.cwd(), stdio: 'inherit', env });
+    const timeout = setTimeout(() => child.kill('SIGKILL'), 90_000);
+    child.once('error', error => { clearTimeout(timeout); reject(error); });
+    child.once('exit', code => { clearTimeout(timeout); resolve(code); });
   });
   if (exitCode !== 0) throw new Error('Page measurement smoke failed: ' + exitCode);
 } finally {

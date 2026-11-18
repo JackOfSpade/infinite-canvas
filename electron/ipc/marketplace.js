@@ -1,6 +1,4 @@
-const BUNDLE_FACTOR_SUFFIX = "--- FACTOR CHECK ---\nEvery factor needs a percent above 0 (omit a factor rather than listing 0) and a non-empty reason. A premium factor reason must not use discount wording, and a discount factor reason must not use premium wording. One invalid factor makes the application discard the whole answer and show the plain sum, so omit any factor you cannot state precisely.";
 import { collector, templatesFor } from './validationLines.js';
-export const PRICE_SYNTHESIS_CORRECTION_TEMPLATES = templatesFor('price.');
 /**
  * Marketplace IPC handlers — photo analysis, multi-source FMV research, listing prep.
  *
@@ -62,16 +60,13 @@ import {
   abandonMarketplaceRecoveryBatch,
   beginMarketplaceRecovery,
   checkpointMarketplaceRecovery,
+  fsyncDirectory,
   peekMarketplaceRecovery,
 } from './marketplaceRecoveryStore.js';
 import { logger } from '../logger.js';
+import { wrapUntrustedText } from './promptSafety.js';
 import { VISION_PRODUCT_ANALYSIS_SCHEMA, PRICE_SYNTHESIS_BATCH_SCHEMA, BUNDLE_PRICE_SCHEMA, buildPlatformFitSchema } from './aiSchemas.js';
 
-const { app } = electronPkg;
-const MAX_MARKETPLACE_PHOTO_BYTES = 50 * 1024 * 1024;
-const MAX_MARKETPLACE_PHOTO_TOTAL_BYTES = 200 * 1024 * 1024;
-const MARKETPLACE_PHOTO_STAGE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-import { wrapUntrustedText } from './promptSafety.js';
 import {
   EBAY_SOLD_EXTRACTOR, EBAY_SOLD_CONFIG,
   EBAY_ACTIVE_EXTRACTOR, EBAY_ACTIVE_CONFIG,
@@ -85,6 +80,15 @@ import {
   fetchPriceChartingComps,
   fetchAptDecoComps,
 } from '../extractors/apiExtractors.js';
+
+export const PRICE_SYNTHESIS_CORRECTION_TEMPLATES = templatesFor('price.');
+
+const { app } = electronPkg;
+const MAX_MARKETPLACE_PHOTO_BYTES = 50 * 1024 * 1024;
+const MAX_MARKETPLACE_PHOTO_TOTAL_BYTES = 200 * 1024 * 1024;
+const MARKETPLACE_PHOTO_STAGE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+const BUNDLE_FACTOR_SUFFIX = "--- FACTOR CHECK ---\nEvery factor needs a percent above 0 (omit a factor rather than listing 0) and a non-empty reason. A premium factor reason must not use discount wording, and a discount factor reason must not use premium wording. One invalid factor makes the application discard the whole answer and show the plain sum, so omit any factor you cannot state precisely.";
 
 // ── Pipeline telemetry ───────────────────────────────────────────────────────
 // Sell-side analog of jobs.js's getJobsTelemetry: records the last marketplace
@@ -162,6 +166,17 @@ function batchCompSources(item) {
     .filter(Boolean));
 }
 
+function stampMarketplaceTelemetryOwner(nodeId, event) {
+  marketplaceTelemetry.nodeId = nodeId;
+  marketplaceTelemetry.windowId = event.sender?.id ?? null;
+}
+
+// A checkpoint that did not reach disk must stop the stage, but only for a run
+// that is backed by a canvas file.
+function assertMarketplaceCheckpointSaved(result, what, required = true) {
+  if (required && !result.saved) throw new Error(`Could not persist ${what} (${result.reason || 'unknown'}).`);
+}
+
 function compactBatchComps(items, limit) {
   const sold = Array.isArray(items?.sold) ? items.sold : [];
   const active = Array.isArray(items?.active) ? items.active : [];
@@ -175,7 +190,7 @@ function compactBatchComps(items, limit) {
   const missing = limit - soldCount - activeCount;
   return {
     sold: sold.slice(0, soldCount + (missing > 0 ? Math.min(missing, sold.length - soldCount) : 0)),
-    active: active.slice(0, activeCount + (missing > 0 ? Math.max(0, missing - Math.max(0, sold.length - soldCount)) : 0)),
+    active: active.slice(0, activeCount),
   };
 }
 
@@ -253,15 +268,15 @@ function exactJson(value) {
 }
 
 async function readBoundedMarketplacePhoto(imagePath) {
-    const canonicalPath = await fs.promises.realpath(imagePath);
-    const stat = await fs.promises.lstat(canonicalPath);
-    if (!stat.isFile()) throw new Error(`Marketplace photo is not a regular file: ${imagePath}`);
-    if (stat.size > MAX_MARKETPLACE_PHOTO_BYTES) throw new Error(`Image file too large for marketplace analysis: ${imagePath}`);
-    const bytes = await fs.promises.readFile(canonicalPath);
-    if (bytes.length !== stat.size || bytes.length > MAX_MARKETPLACE_PHOTO_BYTES) {
-      throw new Error(`Marketplace photo changed while it was being staged: ${imagePath}`);
-    }
-    return { canonicalPath, bytes, size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') };
+  const canonicalPath = await fs.promises.realpath(imagePath);
+  const stat = await fs.promises.lstat(canonicalPath);
+  if (!stat.isFile()) throw new Error(`Marketplace photo is not a regular file: ${imagePath}`);
+  if (stat.size > MAX_MARKETPLACE_PHOTO_BYTES) throw new Error(`Image file too large for marketplace analysis: ${imagePath}`);
+  const bytes = await fs.promises.readFile(canonicalPath);
+  if (bytes.length !== stat.size || bytes.length > MAX_MARKETPLACE_PHOTO_BYTES) {
+    throw new Error(`Marketplace photo changed while it was being staged: ${imagePath}`);
+  }
+  return { canonicalPath, bytes, size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') };
 }
 
 function marketplacePhotoStageRoot() {
@@ -278,12 +293,6 @@ function marketplacePhotoStageDir(canvasFilePath, nodeId, runId) {
   return target;
 }
 
-async function fsyncMarketplaceDirectory(directoryPath) {
-  const handle = await fs.promises.open(directoryPath, 'r').catch(() => null);
-  if (!handle) return;
-  try { await handle.sync(); } finally { await handle.close(); }
-}
-
 async function removeMarketplacePhotoStage(canvasFilePath, nodeId, runId) {
   if (!canvasFilePath || !nodeId || !runId) return false;
   const stageDir = marketplacePhotoStageDir(canvasFilePath, nodeId, runId);
@@ -297,7 +306,7 @@ async function removeMarketplacePhotoStage(canvasFilePath, nodeId, runId) {
   // Directory removal is not crash durable until the parent metadata reaches
   // disk. Without this barrier an explicitly stopped/completed run could
   // resurrect private staged bytes after a power loss.
-  await fsyncMarketplaceDirectory(path.dirname(stageDir));
+  await fsyncDirectory(path.dirname(stageDir));
   return true;
 }
 
@@ -344,7 +353,7 @@ async function stageMarketplacePhotos(imagePaths, canvasFilePath, nodeId, runId,
     await removeMarketplacePhotoStage(canvasFilePath, nodeId, runId);
   }
   await fs.promises.mkdir(stageDir, { recursive: false, mode: 0o700 });
-  await fsyncMarketplaceDirectory(root);
+  await fsyncDirectory(root);
   let createdStageDir = true;
   try {
     await writeExclusiveFile(path.join(stageDir, 'owner.json'), JSON.stringify({
@@ -373,7 +382,7 @@ async function stageMarketplacePhotos(imagePaths, canvasFilePath, nodeId, runId,
         sha256: snapshot.sha256,
       });
     }
-    await fsyncMarketplaceDirectory(stageDir);
+    await fsyncDirectory(stageDir);
     createdStageDir = false;
     return identities;
   } finally {
@@ -944,10 +953,6 @@ function enabledApiCompSourceIds() {
   return API_COMP_SOURCE_IDS.filter(isCompSourceEnabledInScope);
 }
 
-/**
- * Fetch API-based marketplace sources in parallel (no Puppeteer needed).
- * Reverb uses an internal REST API.
- */
 function restoredMarketplaceSourceRecord(value, sourceId, kind, category) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   if (value.sourceId !== sourceId || value.kind !== kind || value.category !== category) return null;
@@ -996,6 +1001,10 @@ export function isMarketplaceSourceLifecycleAbort(signal, error) {
   return /^(Aborted|Window closed|Browser pool is shutting down)$/i.test(String(error?.message || error || ''));
 }
 
+/**
+ * Fetch API-based marketplace sources in parallel (no Puppeteer needed).
+ * Reverb uses an internal REST API.
+ */
 async function fetchApiMarketplaceSources(query, signal = null, emit = null, category = undefined, resumeSources = {}, onSourceSettled = null, sourcePlan = null) {
   // PriceCharting is a product-catalog search (not a listing index): seller-style
   // titles miss the exact product and fall back to ~100 fuzzy results, so the
@@ -1316,8 +1325,7 @@ export function registerMarketplaceHandlers() {
       });
     }
     logger.info(`[Marketplace][${nodeId}] Analyzing`, validPaths.length, 'photos');
-    marketplaceTelemetry.nodeId = nodeId;
-    marketplaceTelemetry.windowId = event.sender?.id ?? null;
+    stampMarketplaceTelemetryOwner(nodeId, event);
     marketplaceTelemetry.scrape = null;
     marketplaceTelemetry.resolves = {};
     marketplaceTelemetry.synthesis = null;
@@ -1542,8 +1550,6 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
         event.sender.send('price-queue-status', { nodeId, queuedBehind: aheadInQueue });
       }
     }
-    // The body runs inside the lock (one level of indentation is intentionally
-    // kept flat to keep this a minimal, reviewable diff over the legacy handler).
     // The try/finally guarantees the "waiting" banner clears even on an
     // abort-while-queued, when the in-callback queuedBehind:0 below never runs.
     try {
@@ -1579,9 +1585,7 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
           recovery: next,
           signal,
         });
-        if (args.canvasFilePath && !saved.saved) {
-          throw new Error(`Could not persist ${sourceId} recovery checkpoint (${saved.reason || 'unknown'}).`);
-        }
+        assertMarketplaceCheckpointSaved(saved, `${sourceId} recovery checkpoint`, args.canvasFilePath);
         durableRecovery = next;
         if (event.sender.isDestroyed()) return;
       try {
@@ -1599,8 +1603,7 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
       });
       return checkpointTail;
     };
-    marketplaceTelemetry.nodeId = nodeId;
-    marketplaceTelemetry.windowId = event.sender?.id ?? null;
+    stampMarketplaceTelemetryOwner(nodeId, event);
     // A full scrape starts a new pricing run. Clear every downstream stage now
     // so a report captured mid-run cannot mix this scrape with the previous
     // run's resolve/synthesis/bundle/fit results.
@@ -1694,9 +1697,7 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
         recovery: pausedRecovery,
         signal,
       });
-      if (args.canvasFilePath && !paused.saved) {
-        throw new Error(`Could not persist the login-required pause (${paused.reason || 'unknown'}).`);
-      }
+      assertMarketplaceCheckpointSaved(paused, 'the login-required pause', args.canvasFilePath);
       durableRecovery = pausedRecovery;
       return { items: [], comps: { sold: [], active: [] }, scrapeWarnings: [], preflightBlocked: true, missingLogins, recovery: pausedRecovery };
     }
@@ -1891,15 +1892,12 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
         recovery: executionRecovery,
         signal,
       });
-      if (canvasFilePath && !executionCheckpoint.saved) {
-        throw new Error(`Could not persist exact price-batch input (${executionCheckpoint.reason || 'unknown'}).`);
-      }
+      assertMarketplaceCheckpointSaved(executionCheckpoint, 'exact price-batch input', canvasFilePath);
       effectiveRecovery = executionRecovery;
     }
     const startedAt = Date.now();
     const prepared = executionItems.map((item, index) => prepareBatchPricingItem(item, index));
-    marketplaceTelemetry.nodeId = nodeId;
-    marketplaceTelemetry.windowId = event.sender?.id ?? null;
+    stampMarketplaceTelemetryOwner(nodeId, event);
     const cannedById = new Map();
     const aiItems = [];
     for (const item of prepared) {
@@ -2003,9 +2001,7 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
         recovery: { ...effectiveRecovery, batchResult, updatedAt: Date.now() },
         signal,
       });
-      if (canvasFilePath && !checkpoint.saved) {
-        throw new Error(`Could not persist completed price batch (${checkpoint.reason || 'unknown'}).`);
-      }
+      assertMarketplaceCheckpointSaved(checkpoint, 'completed price batch', canvasFilePath);
     }
     return batchResult;
     } catch (error) {
@@ -2079,9 +2075,7 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
         recovery: executionRecovery,
         signal,
       });
-      if (canvasFilePath && !executionCheckpoint.saved) {
-        throw new Error(`Could not persist exact bundle input (${executionCheckpoint.reason || 'unknown'}).`);
-      }
+      assertMarketplaceCheckpointSaved(executionCheckpoint, 'exact bundle input', canvasFilePath);
       effectiveRecovery = executionRecovery;
     }
     const persistBundleResult = async (result) => {
@@ -2100,12 +2094,9 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
         },
         signal,
       });
-      if (canvasFilePath && !checkpoint.saved) {
-        throw new Error(`Could not persist completed bundle synthesis (${checkpoint.reason || 'unknown'}).`);
-      }
+      assertMarketplaceCheckpointSaved(checkpoint, 'completed bundle synthesis', canvasFilePath);
     };
-    marketplaceTelemetry.nodeId = nodeId;
-    marketplaceTelemetry.windowId = event.sender?.id ?? null;
+    stampMarketplaceTelemetryOwner(nodeId, event);
     const list = executionItems;
     // Bundling is only meaningful with 2+ items, and we can only reason about
     // synergy for the ones that actually got a price. Fewer than 2 priced → let
@@ -2323,7 +2314,7 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
         recovery: intentRecovery,
         signal,
       });
-      if (!intentSaved.saved) throw new Error(`Could not persist source-rescrape intent (${intentSaved.reason || 'unknown'}).`);
+      assertMarketplaceCheckpointSaved(intentSaved, 'source-rescrape intent');
       effectiveRecovery = intentRecovery;
     }
     // Serialize on the shared browser like the full scrape — a rescrape runs
@@ -2447,7 +2438,7 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
         recovery: completedRecovery,
         signal,
       });
-      if (!resultSaved.saved) throw new Error(`Could not persist source-rescrape result (${resultSaved.reason || 'unknown'}).`);
+      assertMarketplaceCheckpointSaved(resultSaved, 'source-rescrape result');
     }
     return resolvedResult;
     } finally {
@@ -2509,7 +2500,7 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
         recovery: manualRecovery,
         signal,
       });
-      if (!pauseSaved.saved) throw new Error(`Could not persist CAPTCHA pause (${pauseSaved.reason || 'unknown'}).`);
+      assertMarketplaceCheckpointSaved(pauseSaved, 'CAPTCHA pause');
       effectiveRecovery = manualRecovery;
     }
     // Hold the sell-side browser lock for the WHOLE resolve: this op CLOSES the
@@ -2629,7 +2620,7 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
         recovery: resolvedRecovery,
         signal,
       });
-      if (!resultSaved.saved) throw new Error(`Could not persist CAPTCHA result (${resultSaved.reason || 'unknown'}).`);
+      assertMarketplaceCheckpointSaved(resultSaved, 'CAPTCHA result');
     }
     return resolvedResult;
     } finally {
@@ -2644,8 +2635,7 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
   // platforms behind a "show all" toggle.
   handleSafe('assess-platform-fit', async (event, { product, platforms, nodeId }, signal) => {
     logger.info(`[Marketplace][${nodeId}] Assessing platform fit across ${platforms?.length || 0} platforms`);
-    marketplaceTelemetry.nodeId = nodeId;
-    marketplaceTelemetry.windowId = event.sender?.id ?? null;
+    stampMarketplaceTelemetryOwner(nodeId, event);
     if (!Array.isArray(platforms) || platforms.length === 0 || !product) {
       return { fit: {} };
     }
@@ -2852,9 +2842,7 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
         recovery: nextRecovery,
         signal,
       });
-      if (canvasFilePath && !checkpoint.saved) {
-        throw new Error(`Could not persist ${platformId} status result (${checkpoint.reason || 'unknown'}).`);
-      }
+      assertMarketplaceCheckpointSaved(checkpoint, `${platformId} status result`, canvasFilePath);
       terminalProcessEpoch = checkpoint.processEpoch || terminalProcessEpoch;
       durableRecovery = nextRecovery;
       results[platformId] = completedResult;
@@ -2906,9 +2894,7 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
         recovery: next,
         signal,
       });
-      if (canvasFilePath && !saved.saved) {
-        throw new Error(`Could not persist ${platformId} prepared pages (${saved.reason || 'unknown'}).`);
-      }
+      assertMarketplaceCheckpointSaved(saved, `${platformId} prepared pages`, canvasFilePath);
       durableRecovery = next;
       if (!event.sender.isDestroyed()) {
         event.sender.send('marketplace-status-checkpoint', {
@@ -3179,9 +3165,7 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
         canvasFilePath, nodeId, kind: 'marketplace-status',
         expectedInputKey: durableRecovery.inputKey, recovery: pausedRecovery, signal,
       });
-      if (canvasFilePath && !pausedCheckpoint.saved) {
-        throw new Error(`Could not persist native-browser manual pause (${pausedCheckpoint.reason || 'unknown'}).`);
-      }
+      assertMarketplaceCheckpointSaved(pausedCheckpoint, 'native-browser manual pause', canvasFilePath);
       durableRecovery = pausedRecovery;
     }
     return {

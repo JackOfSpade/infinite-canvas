@@ -37,7 +37,7 @@ contextBridge.exposeInMainWorld('interviewAPI', Object.freeze({
     return ipcRenderer.invoke('interview-window:set-always-on-top', value);
   },
   setLatencyMode: (value) => {
-    if (!['auto', 'recall', 'continuation'].includes(value)) return Promise.reject(new TypeError('Interview display mode is invalid.'));
+    if (!['auto', 'recall'].includes(value)) return Promise.reject(new TypeError('Interview display mode is invalid.'));
     return ipcRenderer.invoke('interview-window:set-latency-mode', value);
   },
 }));

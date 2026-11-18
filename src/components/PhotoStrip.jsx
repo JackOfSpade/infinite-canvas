@@ -35,7 +35,7 @@ export function PhotoStrip({
   const openAt = useCallback((i) => (e) => {
     e.stopPropagation();
     setLightboxIndex(i);
-  }, [setLightboxIndex]);
+  }, []);
 
   const markBroken = useCallback((path) => {
     setBrokenPaths(prev => {
@@ -59,10 +59,6 @@ export function PhotoStrip({
     setLightboxIndex(null);
     onRemoveImage?.(index);
   }, [onRemoveImage]);
-
-  const getImagePathsFromFiles = useCallback((files) => {
-    return filesToProductImagePaths(files);
-  }, []);
 
   const handleDragEnter = useCallback((e) => {
     if (!canEditPhotos) return;
@@ -95,9 +91,9 @@ export function PhotoStrip({
     e.stopPropagation();
     dragCounterRef.current = 0;
     setIsDropTargetOver(false);
-    const paths = getImagePathsFromFiles(Array.from(e.dataTransfer?.files || []));
+    const paths = filesToProductImagePaths(Array.from(e.dataTransfer?.files || []));
     if (paths.length > 0) onAddImages(paths);
-  }, [canEditPhotos, getImagePathsFromFiles, onAddImages]);
+  }, [canEditPhotos, onAddImages]);
 
   const dropTargetProps = canEditPhotos ? {
     onDragEnter: handleDragEnter,

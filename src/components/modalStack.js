@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useSyncExternalStore } from 'react';
 
 // Tracks how many modal overlays are currently open. Global keyboard shortcuts
 // (undo/redo, tool shortcuts, WASD panning, node delete) suppress themselves
@@ -14,6 +14,13 @@ export function updateModalCount(delta) {
   }));
 }
 
+const getModalCount = () => activeModalCount;
+
+function subscribeModalStack(onChange) {
+  window.addEventListener('modal-stack-changed', onChange);
+  return () => window.removeEventListener('modal-stack-changed', onChange);
+}
+
 /**
  * Live modal-open count for gating a global keyboard/canvas listener.
  * Shared by every listener that must go quiet while a dialog/menu/lightbox is
@@ -22,11 +29,5 @@ export function updateModalCount(delta) {
  * addEventListener('modal-stack-changed', ...) boilerplate independently.
  */
 export function useModalStackCount() {
-  const [count, setCount] = useState(activeModalCount);
-  useEffect(() => {
-    const handler = (e) => setCount(e.detail.count || 0);
-    window.addEventListener('modal-stack-changed', handler);
-    return () => window.removeEventListener('modal-stack-changed', handler);
-  }, []);
-  return count;
+  return useSyncExternalStore(subscribeModalStack, getModalCount, getModalCount);
 }

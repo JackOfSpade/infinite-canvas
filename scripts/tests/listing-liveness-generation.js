@@ -311,6 +311,23 @@ export default [
     },
   },
   {
+    name: 'Generate lock-wait deadline stops counting once the visit holds the profile',
+    async run() {
+      const row = job();
+      const probe = createListingLivenessProbe({ job: row, lockWaitMs: 40, visitMs: 500,
+        withProfileLock: async fn => { await new Promise(resolve => setTimeout(resolve, 20)); return fn(); },
+        paceLinkedIn: async () => {},
+        visitLinkedIn: async (_url, { signal }) => {
+          await new Promise(resolve => setTimeout(resolve, 80));
+          if (signal.aborted) throw signal.reason;
+          return evidence();
+        } });
+      const result = await probe.probe(row.url);
+      assert.notEqual(result.unknown, 'lock-timeout');
+      assert.equal(result.unknown, undefined);
+    },
+  },
+  {
     name: 'Generate LinkedIn guest pacing gate separates two rapid one-page visits',
     async run() {
       const starts = [];

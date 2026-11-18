@@ -27,6 +27,7 @@ function limitedLine(account) {
 export function ClaudeAccountsPanel({ className = '' }) {
   const [loaded, setLoaded] = useState([]);
   const [removingId, setRemovingId] = useState(null);
+  const [removeNotice, setRemoveNotice] = useState('');
   const activity = useSyncExternalStore(subscribeClaudeTaskActivity, getClaudeTaskActivity, getClaudeTaskActivity);
   const live = activity.claudeAccounts;
   const accounts = live.length ? live : loaded;
@@ -46,8 +47,14 @@ export function ClaudeAccountsPanel({ className = '' }) {
     const confirmed = globalThis.window?.confirm?.(`Remove ${name} from Claude? You can sign in again later.`);
     if (!confirmed) return;
     setRemovingId(account.id);
-    await removeClaudeAccount(account.id);
-    setRemovingId(null);
+    setRemoveNotice('');
+    let removed = false;
+    try {
+      removed = await removeClaudeAccount(account.id);
+    } finally {
+      setRemovingId(null);
+    }
+    if (!removed) setRemoveNotice(`Could not remove ${name}. Try again.`);
     await refresh();
   }, [refresh]);
 
@@ -117,8 +124,7 @@ export function ClaudeAccountsPanel({ className = '' }) {
         )}
       </div>
       {!pending && message && <div className="text-white/40 text-[10px] mt-2">{message}</div>}
+      {removeNotice && <div role="alert" className="text-amber-300/80 text-[10px] mt-2">{removeNotice}</div>}
     </section>
   );
 }
-
-export default ClaudeAccountsPanel;

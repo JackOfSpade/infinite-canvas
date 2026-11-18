@@ -1,6 +1,6 @@
 import { JSDOM } from 'jsdom';
 import { renderMarkdown } from '../../src/utils/markdownRenderer.js';
-import { escapeHtmlAttribute, normalizeExternalHttpUrl } from '../../src/utils/urlSafety.js';
+import { escapeHtmlAttribute, normalizeExternalHttpUrl, normalizeMarkdownUrl } from '../../src/utils/urlSafety.js';
 import { openExternalFailureMessage, openExternalUrl } from '../../src/utils/openExternal.js';
 import { isGoogleJobsInternalUrl, normalizeJobListingExternalUrl, summarizeJobListingUrl } from '../../src/utils/jobListingUrl.js';
 import { describeUnexpectedNetworkTarget } from '../test-stubs/networkGuard.mjs';
@@ -44,6 +44,18 @@ export default [
       const document = markdownDocument('[bad](javascript:alert(1))\n\n![bad](data:text/html,boom)\n\n<img src=x onerror=alert(1)>');
       assert(document.querySelectorAll('a, img').length === 0, 'unsafe markdown URLs and raw HTML must not render as elements');
       return { renderedElements: document.querySelectorAll('*').length };
+    },
+  },
+  {
+    name: 'renderer markdown keeps relative paths and rejects protocol-relative hosts',
+    run() {
+      for (const ok of ['#top', '/docs/a.md', './a.md', '../a.md']) {
+        assert(normalizeMarkdownUrl(ok) === ok, `relative path must pass through: ${ok}`);
+      }
+      for (const bad of ['//evil.test/x', '/\\evil.test/x']) {
+        assert(normalizeMarkdownUrl(bad) === '', `protocol-relative URL must be rejected: ${bad}`);
+      }
+      return { rejected: 2 };
     },
   },
   {

@@ -243,6 +243,21 @@ export default [
     },
   },
   {
+    name: 'official-posting missing text is refetched again after a failed fetch but not after a page that answered with other text',
+    async run() {
+      await withStore(async ({ store, root }) => {
+        const job = row(); const record = await store.save(job, { officialPosting: posting(), description: TEXT });
+        await fs.unlink(textPath(root, record.officialPosting.contentHash));
+        const bound = { ...job, officialPosting: record.officialPosting };
+        let calls = 0;
+        const refetch = async () => { calls += 1; if (calls === 1) throw new Error('offline'); return TEXT; };
+        assert.equal((await officialPostingView(bound, { store, refetch })).description, job.snippet);
+        assert.equal((await officialPostingView(bound, { store, refetch })).description, TEXT);
+        assert.equal(calls, 2);
+      });
+    },
+  },
+  {
     name: 'official-posting old missing-text refetch restores only its bytes and cannot overwrite a concurrently reverified resolution',
     async run() {
       await withStore(async ({ store, root }) => {

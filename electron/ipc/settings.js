@@ -206,7 +206,7 @@ export function rendererJobsSettingsUpdate(value) {
 export function mergeRendererJobsSettingsUpdate(current, value) {
   const update = rendererJobsSettingsUpdate(value);
   if (Object.keys(update).length === 0) return null;
-  return encryptSectionSecrets(JOBS_SECRET_KEYS, mergeSettingsSection('jobs', current, update));
+  return encryptSectionSecrets(JOBS_SECRET_KEYS, mergeSettingsSection(current, update));
 }
 
 export function rendererStoreSnapshot(data) {
@@ -228,8 +228,17 @@ export function rendererStoreSnapshot(data) {
  * keys). Exported (pure, no store/encryption side effects) so this behavior
  * is directly unit-testable.
  */
-export function mergeSettingsSection(section, current, value) {
+export function mergeSettingsSection(current, value) {
   return { ...(current || {}), ...value };
+}
+
+// Sections other than `application` and `jobs` that a renderer may write.
+// Dotted names are refused because electron-store resolves them as nested
+// paths, which would reach main-process-owned fields such as `jobs.diceApiKey`.
+const RENDERER_WRITABLE_SECTIONS = new Set(['marketplaceWatchUrls']);
+
+export function isRendererWritableSection(section) {
+  return typeof section === 'string' && !section.includes('.') && RENDERER_WRITABLE_SECTIONS.has(section);
 }
 
 export function registerSettingsHandlers() {
@@ -241,9 +250,13 @@ export function registerSettingsHandlers() {
   // changing one jobs field) doesn't wipe sibling keys.
   handleSafe('update-settings', async (_event, updates) => {
     const s = getStore();
+    const applied = [];
     for (const [section, value] of Object.entries(updates || {})) {
       if (section === 'application') {
-        if (typeof value?.protocol === 'string') s.set('application.protocol', applicationProtocolSetting(value.protocol));
+        if (typeof value?.protocol === 'string') {
+          s.set('application.protocol', applicationProtocolSetting(value.protocol));
+          applied.push(section);
+        }
         continue;
       }
       // `jobs` is the one section that carries main-process-only secrets.
@@ -254,11 +267,13 @@ export function registerSettingsHandlers() {
         const merged = mergeRendererJobsSettingsUpdate(s.get(section), value);
         if (!merged) continue;
         s.set(section, merged);
+        applied.push(section);
         continue;
       }
+      if (!isRendererWritableSection(section)) continue;
+      applied.push(section);
       if (value && typeof value === 'object' && !Array.isArray(value)) {
-        const merged = mergeSettingsSection(section, s.get(section), value);
-        s.set(section, merged);
+        s.set(section, mergeSettingsSection(s.get(section), value));
       } else {
         s.set(section, value);
       }
@@ -268,7 +283,7 @@ export function registerSettingsHandlers() {
     // We deliberately send only `changedSections` — not the values — so keys
     // never round-trip through extra channels.
     broadcastToAllRenderers('settings-changed', {
-      changedSections: Object.keys(updates || {}),
+      changedSections: applied,
     });
     return rendererStoreSnapshot(s.store);
   });

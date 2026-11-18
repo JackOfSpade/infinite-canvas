@@ -66,11 +66,10 @@ export default function CodingPad({ lang = '', initialText = '', value = '', rea
     beat();
   };
   const onKeyDown = event => {
+    if (readOnly) return;
     if (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return;
     if (event.key !== 'Tab' && event.key !== 'Enter') return;
-    if (event.key === 'Enter' && readOnly) return;
     event.preventDefault();
-    if (readOnly) return;
     const area = event.currentTarget;
     const start = area.selectionStart ?? own.length;
     const end = area.selectionEnd ?? start;

@@ -202,7 +202,6 @@ function licensedEquivalent(word, source, original) {
   if (word === 'avoid') return has('steer') && has('warning');
   if (word === 'follow' || word === 'up') return has('flag') && has('appointment');
   if (word === 'miss') return /not (?:called|booked)/iu.test(original);
-  if (word === 'therapist' && has('therapist')) return true;
   // These are narrow speech equivalents, each retaining the cited objects and
   // the independent agency/candor checks below. They cannot license an entity,
   // a measurement, a new outcome or a new candidate contribution.

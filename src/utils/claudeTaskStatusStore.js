@@ -7,7 +7,6 @@ let snapshot = IDLE;
 const listeners = new Set();
 let timer = null;
 let pollers = 0;
-let loaded = false;
 
 function api() {
   try { return globalThis.window?.electronAPI || null; } catch { return null; }
@@ -37,12 +36,12 @@ async function refresh() {
   } catch { /* the last status stands until the next poll */ }
 }
 
-// Reads the status once when something first subscribes, so a component that
+// Reads the status whenever the first subscriber attaches, so a component that
 // only needs to know the worker exists never starts a timer.
 export function subscribeClaudeTaskStatus(listener) {
   if (typeof listener !== 'function') return () => {};
   listeners.add(listener);
-  if (!loaded) { loaded = true; void refresh(); }
+  if (listeners.size === 1) void refresh();
   return () => { listeners.delete(listener); };
 }
 

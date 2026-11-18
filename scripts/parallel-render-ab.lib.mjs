@@ -2,20 +2,19 @@
 // hidden browser reads an official job-posting page against Parallel's page reader for the
 // same URL. Plain Node ESM with no 'electron' import, so node:test can exercise it without
 // a browser, a network or the Keychain. Everything reused from scripts/parallel-extract-ab.mjs
-// is imported, not copied: canvasJobRows and loadCanvasRows' pool, seededShuffle, titleHit,
-// companyHit, closedSignal, USABLE_MIN_CHARS, the Parallel body builder and response parser,
-// hostOf and pageFileName. parallel-extract-ab.mjs does not export its stored-URL helper or its
-// canvas loader, so postingUrlForRow and loadCanvasRows are re-implemented minimally here.
+// is imported, not copied: loadCanvasRows, storedPostingUrls, seededShuffle,
+// urlKey, median, titleHit, companyHit, closedSignal, USABLE_MIN_CHARS, the Parallel body
+// builder and response parser, hostOf and pageFileName.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertDurableOutDir, createRunJournal } from './ai-test-journal.mjs';
 import {
-  PARALLEL_EXTRACT_ENDPOINT, USABLE_MIN_CHARS, canvasJobRows, closedSignal, companyHit, hostOf,
-  pageFileName, parallelExtractBody, parseParallelExtract, seededShuffle, titleHit,
+  PARALLEL_EXTRACT_ENDPOINT, USABLE_MIN_CHARS, closedSignal, companyHit, hostOf, loadCanvasRows, median,
+  pageFileName, parallelExtractBody, parseParallelExtract, seededShuffle, storedPostingUrls, titleHit, urlKey,
 } from './parallel-extract-ab.mjs';
 
-export { USABLE_MIN_CHARS };
+export { USABLE_MIN_CHARS, loadCanvasRows, storedPostingUrls };
 export const GROUPS = Object.freeze(['closed', 'open']);
 export const READERS = Object.freeze(['render', 'parallel']);
 /** The canvas outcome each group comes from: closed postings are known closed, found ones confirmed open. */
@@ -65,21 +64,6 @@ const httpsUrl = (value) => {
   return /^https:\/\/\S+$/iu.test(url) ? url : '';
 };
 
-/** Every https posting URL a row stores, in the order the app itself tries them. */
-export function storedPostingUrls(row) {
-  const posting = row?.officialPosting;
-  if (!posting || typeof posting !== 'object') return [];
-  const urls = [];
-  const add = (value) => {
-    const url = httpsUrl(value);
-    if (url && !urls.includes(url)) urls.push(url);
-  };
-  add(posting.sourceUrl);
-  add(posting.officialApplyUrl);
-  for (const alternative of Array.isArray(posting.alternatives) ? posting.alternatives : []) add(alternative?.url);
-  return urls;
-}
-
 /** The stored posting URL, or — for a known-closed row — its source or apply URL. https only. */
 export function postingUrlForRow(row, group) {
   const [stored] = storedPostingUrls(row);
@@ -115,17 +99,7 @@ export function selectRenderRows(rows, { closed = 20, open = 20, seed = 1 } = {}
     eligible: { closed: eligible.closed.length, open: eligible.open.length } };
 }
 
-/** The canvas rows the way the app stores them (restore a pooled canvas first). */
-export async function loadCanvasRows(canvasPath, modules = {}) {
-  const pool = modules.pool ?? await import(new URL('../electron/ipc/workspaceContentPool.js', import.meta.url).href);
-  const parsed = pool.parseWorkspaceText(fs.readFileSync(canvasPath, 'utf8'));
-  const canvas = pool.restoreWorkspaceContent(parsed) ?? parsed;
-  return canvasJobRows(canvas);
-}
-
 // ---- one read -> one record ------------------------------------------------
-
-const urlKey = url => String(url ?? '').trim().replace(/#.*$/u, '').replace(/\/+$/u, '').toLowerCase();
 
 /** True when Parallel named this URL under `errors` (its "could not read this page" list). */
 export function listedUnderErrors(payload, url) {
@@ -195,13 +169,6 @@ export function buildRecord({ url, group, reader, title = '', company = '', read
 }
 
 // ---- summary ---------------------------------------------------------------
-
-const median = (values) => {
-  const sorted = values.filter(value => Number.isFinite(value)).sort((a, b) => a - b);
-  if (!sorted.length) return 0;
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
-};
 
 /**
  * Per group and reader: n, ok, usable, closedDetected and medians; per group the 2x2 agreement

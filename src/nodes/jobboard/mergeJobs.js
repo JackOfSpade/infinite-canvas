@@ -486,13 +486,12 @@ export function moduleFingerprint(scoredJobs) {
  */
 export function isLegacyCombineSignature(signature) {
   const parsed = parseCombineSignature(signature);
-  if (parsed.format === 'empty') return false;
-  if (parsed.format === 'v8') return false;
-  // A corrupted structured signature may have been written after a Combine
-  // but cannot be verified against the visible cascade. Unlike pre-v3 legacy
-  // signatures, it must *not* be adopted as a fresh baseline: normal Board
-  // equality will flag it stale and hide the unverifiable old result.
-  if (parsed.format === 'v8-invalid') return false;
+  // An empty or current (v8) signature is not legacy. A corrupted structured
+  // one may have been written after a Combine but cannot be verified against
+  // the visible cascade; unlike pre-v3 legacy signatures it must not be adopted
+  // as a fresh baseline: normal Board equality will flag it stale and hide the
+  // unverifiable old result.
+  if (parsed.format === 'empty' || parsed.format === 'v8' || parsed.format === 'v8-invalid') return false;
   // A malformed delimiter signature cannot safely describe the visible
   // cascade. Treat it like the older pre-versioned shapes: the Board will
   // adopt its live input baseline rather than parse a truncated id and claim

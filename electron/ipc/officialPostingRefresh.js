@@ -1,7 +1,7 @@
 import { handleSafe } from './ipcUtils.js';
 import { getOfficialPostingStore, resolveOfficialPostings } from './officialPostingService.js';
 import { officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
-import { RESEARCH_UNSETTLED_TRAIL, boundedOfficialPostingTrail, normalizeOfficialPosting, officialHttpsUrl, officialPostingAfterRepeatAttempt, officialPostingLookupStatus, officialPostingCitedLeadUrls } from './officialPostingFields.js';
+import { OFFICIAL_LEVELS, RESEARCH_UNSETTLED_TRAIL, boundedOfficialPostingTrail, normalizeOfficialPosting, officialHttpsUrl, officialPostingAfterRepeatAttempt, officialPostingLookupStatus, officialPostingCitedLeadUrls } from './officialPostingFields.js';
 import { officialPostingSemanticInputHash, officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
 import { strictEmployerEqual } from './officialSourceHosts.js';
 import { projectOfficialPostingSourceFields } from './officialPostingSourceProjection.js';
@@ -20,7 +20,6 @@ const OFFICIAL_POSTING_REFRESH_MAX_ENTRIES = 128;
 const MAX_JOB_BYTES = 512 * 1024;
 const MAX_REQUEST_BYTES = 16 * 1024 * 1024;
 const ID = /^[a-zA-Z0-9_.:-]{1,300}$/u;
-const officialLevels = new Set(['L1', 'L2', 'L3', 'L4']);
 const error = (message, code) => Object.assign(new Error(message), { code });
 function active(signal) {
   if (signal?.aborted) throw signal.reason || error('Official posting refresh was cancelled.', 'worker-aborted');
@@ -124,12 +123,12 @@ export async function refreshOfficialPostingEntries(args, {
   const entries = resolved.jobs.map((row, index) => {
     const posting = normalizeOfficialPosting(row?.officialPosting);
     if (!posting || officialPostingSemanticInputHash(row) !== officialPostingSemanticInputHash(jobs[index])
-      || (!officialPostingLookupStatus(posting).retryable || officialLevels.has(posting.level))
+      || (!officialPostingLookupStatus(posting).retryable || OFFICIAL_LEVELS.has(posting.level))
         && !officialPostingSemanticProofMatches(jobs[index], posting)) {
       throw error('Official posting refresh returned an invalid match.', 'OFFICIAL_POSTING_REFRESH_INVALID');
     }
     const prior = normalizeOfficialPosting(priorOfficialRecords[index]?.officialPosting);
-    const retain = prior && officialLevels.has(prior.level) && ['found', 'link-only'].includes(prior.outcome)
+    const retain = prior && OFFICIAL_LEVELS.has(prior.level) && ['found', 'link-only'].includes(prior.outcome)
       && posting.outcome !== 'closed' && officialPostingLookupStatus(posting).retryable;
     const trail = retain ? retainedRecheckTrail(prior, posting) : null;
     // Failures describe one run: the record carries this recheck's, never an earlier recheck's.
@@ -142,7 +141,7 @@ export async function refreshOfficialPostingEntries(args, {
       ...(posting.fetchFailures?.length ? { fetchFailures: posting.fetchFailures } : {}) } : posting;
     const officialPosting = officialPostingAfterRepeatAttempt(args.entries[index].job.officialPosting, settled);
     return { cardId: args.entries[index].cardId, officialPosting,
-      postedBy: officialLevels.has(officialPosting.level)
+      postedBy: OFFICIAL_LEVELS.has(officialPosting.level)
         ? strictEmployerEqual(officialPosting.employer, jobs[index].company) ? '' : jobs[index].company
         : row.postedBy || '' };
   });

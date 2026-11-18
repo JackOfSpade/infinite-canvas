@@ -144,5 +144,9 @@ export async function main(argv = process.argv.slice(2)) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  main().catch(() => { process.stderr.write('Speculative replay failed. Check input paths, cases and local Claude availability.\n'); process.exitCode = 1; });
+  main().catch(error => {
+    const code = typeof error?.code === 'string' && error.code ? ` (${error.code})` : '';
+    process.stderr.write(`Speculative replay failed${code}. Check input paths, cases and local Claude availability.\n`);
+    process.exitCode = 1;
+  });
 }

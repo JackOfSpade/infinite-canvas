@@ -15,17 +15,16 @@
 //
 // The Tavily key is read from the macOS Keychain (service infinite-canvas-tavily-api-key)
 // and never printed. Job details are written only to the private --out directory.
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parseArgs as parseNodeArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { readTavilyKey as readKeychainTavilyKey, TAVILY_KEYCHAIN_SERVICE, TAVILY_RESEARCH_TOOLS, tavilyMcpServers } from './lib/tavily-arm.mjs';
+import { mulberry32, sample } from './lib/seeded-random.mjs';
 
-const KEYCHAIN_SERVICE = 'infinite-canvas-tavily-api-key';
 const TASK = 'job-official-posting-research';
 const RESEARCH_MAX_TURNS = 16;
-const TAVILY_TOOLS = ['mcp__tavily__tavily_search', 'mcp__tavily__tavily_extract'];
 const ipc = rel => import(new URL(`../electron/ipc/${rel}`, import.meta.url).href);
 
 function options(argv) {
@@ -42,33 +41,13 @@ function options(argv) {
     arms: String(values.arms).split(',').map(arm => arm.trim()).filter(Boolean) };
 }
 
-function readTavilyKey() {
-  try {
-    const key = execFileSync('security', ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-w'], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-    if (!key) throw new Error('empty');
-    return key;
-  } catch {
-    throw new Error(`No Tavily key in the Keychain. Run: security add-generic-password -s ${KEYCHAIN_SERVICE} -a tavily -w`);
-  }
+async function readTavilyKey() {
+  const key = await readKeychainTavilyKey();
+  if (!key) throw new Error(`No Tavily key in the Keychain. Run: security add-generic-password -s ${TAVILY_KEYCHAIN_SERVICE} -a tavily -w`);
+  return key;
 }
 
-const redactWith = key => text => String(text ?? '').split(key).join('<tavily-key>');
-
-function mulberry32(seed) {
-  let state = seed >>> 0;
-  return () => {
-    state = (state + 0x6d2b79f5) >>> 0;
-    let t = state;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-function sample(list, count, random) {
-  const copy = [...list];
-  for (let i = copy.length - 1; i > 0; i -= 1) { const j = Math.floor(random() * (i + 1)); [copy[i], copy[j]] = [copy[j], copy[i]]; }
-  return copy.slice(0, count);
-}
+const redactWith = key => text => (key ? String(text ?? '').split(key).join('<tavily-key>') : String(text ?? ''));
 
 /** host without www + path without trailing slash, lowercased; query and hash dropped. */
 export function normalizeUrl(value) {
@@ -95,7 +74,8 @@ async function usage(key) {
 
 async function main(argv) {
   const opts = options(argv);
-  const key = opts.dryRun ? 'dry-run-no-key' : readTavilyKey();
+  const needsTavily = opts.arms.some(arm => arm === 'tavily' || arm === 'both');
+  const key = opts.dryRun ? 'dry-run-no-key' : needsTavily ? await readTavilyKey() : '';
   const redact = redactWith(key);
   const [{ parseWorkspaceText, restoreWorkspaceContent }, bridge, nonApi, worker, profiles, sdk, runner, offload, replay, parallelSearch] = await Promise.all([
     ipc('workspaceContentPool.js'), ipc('officialPostingBridge.js'), ipc('nonApiAi.js'), ipc('claudeTaskWorker.js'),
@@ -131,14 +111,14 @@ async function main(argv) {
   const arms = {
     // Comparison arm only: the app itself never offers built-in web tools (2026-11-14).
     native: { tools: ['WebSearch', 'WebFetch'], mcpServers: {}, allowBuiltInWebTools: true },
-    tavily: { tools: TAVILY_TOOLS, mcpServers: { tavily: { type: 'http', url: `https://mcp.tavily.com/mcp/?tavilyApiKey=${encodeURIComponent(key)}` } } },
+    tavily: { tools: [...TAVILY_RESEARCH_TOOLS], mcpServers: tavilyMcpServers(key) },
   };
   // The Parallel Search MCP server with the Keychain key, exactly as the app gives it to a research call
   // (keyed since 2026-11-15: the anonymous server throttled after about 60 lookups and returned no usable results).
   const parallelKey = opts.arms.includes('parallel') ? await parallelSearch.readParallelKey() : '';
   arms.parallel = { tools: [...parallelSearch.PARALLEL_RESEARCH_TOOLS], mcpServers: parallelSearch.parallelMcpServers(parallelKey) };
   // Both toolsets in one call: Claude's own search and page reader plus Tavily's.
-  arms.both = { tools: [...arms.native.tools, ...TAVILY_TOOLS], mcpServers: arms.tavily.mcpServers, allowBuiltInWebTools: true };
+  arms.both = { tools: [...arms.native.tools, ...TAVILY_RESEARCH_TOOLS], mcpServers: arms.tavily.mcpServers, allowBuiltInWebTools: true };
   // DeepSeek Flash through Offload with its own web_search/web_fetch, exactly as a routed task call.
   arms.deepseek = { offload: { route: 'deepseek-flash', reasoning: 'high' } };
   const armNames = opts.arms;
@@ -147,7 +127,7 @@ async function main(argv) {
   fs.mkdirSync(opts.out, { recursive: true, mode: 0o700 });
   const resultsPath = path.join(opts.out, 'results.jsonl');
   fs.writeFileSync(resultsPath, '', { mode: 0o600 });
-  const usageBefore = await usage(key);
+  const usageBefore = needsTavily ? await usage(key) : null;
 
   async function runArm(armName, item) {
     const job = { ...item.row };
@@ -208,7 +188,7 @@ async function main(argv) {
       console.log(`${String(records.length).padStart(3)}/${queue.length} ${arm.padEnd(6)} ${item.kind.padEnd(6)} valid=${record.valid ?? false} exact=${record.exactHit} tools=${JSON.stringify(record.toolCalls)}${record.error ? ` error=${record.error}` : ''}`);
     }
   }));
-  const usageAfter = await usage(key);
+  const usageAfter = needsTavily ? await usage(key) : null;
 
   const summary = {};
   for (const arm of armNames) {
@@ -229,7 +209,7 @@ async function main(argv) {
       toolCalls: mine.reduce((all, record) => { for (const [tool, n] of Object.entries(record.toolCalls || {})) all[tool] = (all[tool] || 0) + n; return all; }, {}),
     };
   }
-  summary.tavilyCredits = usageBefore !== null && usageAfter !== null ? usageAfter - usageBefore : 'unavailable';
+  if (needsTavily) summary.tavilyCredits = usageBefore !== null && usageAfter !== null ? usageAfter - usageBefore : 'unavailable';
   fs.writeFileSync(path.join(opts.out, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`, { mode: 0o600 });
   console.log(redact(JSON.stringify(summary, null, 2)));
   console.log(`details: ${resultsPath}`);

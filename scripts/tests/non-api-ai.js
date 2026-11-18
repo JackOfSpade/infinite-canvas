@@ -420,6 +420,35 @@ export default [
     },
   },
   {
+    name: 'non-API AI durable state: a failed read never lets the next write replace saved handoffs, and a corrupt file is kept aside',
+    run: async () => {
+      const file = `${electronPkg.app.getPath('userData')}/non-api-ai-handoffs.json`;
+      const saved = JSON.stringify({ version: 1, runs: { 'keep-me': { steps: {} } } });
+      await __reloadDurableStateForTests();
+      fs.writeFileSync(file, saved);
+      const originalRead = fs.promises.readFile;
+      fs.promises.readFile = async (target, ...rest) => {
+        if (String(target).endsWith('non-api-ai-handoffs.json')) throw Object.assign(new Error('Synthetic EACCES'), { code: 'EACCES' });
+        return originalRead(target, ...rest);
+      };
+      try {
+        await rejects(flushNonApiAiPersistence(), /left untouched/, 'a write after an unreadable file is refused');
+      } finally { fs.promises.readFile = originalRead; }
+      assert(fs.readFileSync(file, 'utf8') === saved, 'the saved file is untouched after the refused write');
+      await flushNonApiAiPersistence();
+      assert('keep-me' in JSON.parse(fs.readFileSync(file, 'utf8')).runs, 'the next load reads the file again and keeps its runs');
+      await __reloadDurableStateForTests();
+      fs.writeFileSync(file, '{ half written');
+      await flushNonApiAiPersistence();
+      const dir = file.slice(0, file.lastIndexOf('/'));
+      const aside = fs.readdirSync(dir).filter(name => name.startsWith('non-api-ai-handoffs.json.corrupt-'));
+      assert(aside.length === 1 && fs.readFileSync(`${dir}/${aside[0]}`, 'utf8') === '{ half written', 'a corrupt file is renamed, not lost');
+      fs.rmSync(`${dir}/${aside[0]}`, { force: true });
+      assert(JSON.parse(fs.readFileSync(file, 'utf8')).runs && Object.keys(JSON.parse(fs.readFileSync(file, 'utf8')).runs).length === 0,
+        'a fresh empty file replaces the corrupt one');
+    },
+  },
+  {
     name: 'non-API AI: every career-profile compiler stage can be paused with its Job Search',
     run: () => {
       const dialogSource = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');

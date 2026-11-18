@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { v2JobDirectoryParts } from './applicationV2JobDirectory.js';
 
 // A saved job removes .local-ai/jobs/<id>. This archive is deliberately a
 // sibling of jobs, so accepted as well as rejected handoffs survive saving.
@@ -11,12 +12,9 @@ const STAGE = /^[a-z-]+$/u;
 const KINDS = new Set(['prompt', 'reply', 'candidate-final']);
 
 export function v2EvidenceArchiveDirectory(jobDir, jobId) {
-  if (!JOB_ID.test(jobId) || path.basename(jobDir) !== jobId
-    || path.basename(path.dirname(jobDir)) !== 'jobs'
-    || path.basename(path.dirname(path.dirname(jobDir))) !== '.local-ai') {
-    throw new Error('Invalid application v2 evidence archive path.');
-  }
-  return path.join(path.dirname(path.dirname(jobDir)), 'evidence-archive', jobId);
+  const parts = JOB_ID.test(jobId) ? v2JobDirectoryParts(jobDir, jobId) : null;
+  if (!parts) throw new Error('Invalid application v2 evidence archive path.');
+  return path.join(parts.localAiDir, 'evidence-archive', jobId);
 }
 
 /** Persist content only. A limit failure blocks the handoff rather than losing evidence. */

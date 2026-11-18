@@ -461,6 +461,7 @@ export const US_ONLY_SOURCES = new Set(['usajobs']);
 // from the source's country instead — unlike an unrecognized real place name, which
 // must stay `unclear`. ("Anywhere in the U.S. (remote job)" never reaches this test;
 // the remote check upstream claims it first.)
+const REMOTE_LOCATION_RE = /\b(remote|anywhere|work from home|wfh|distributed)\b/;
 const PLACELESS_LOCATION_RE = /negotiable after selection|(?:multiple|various)\s+locations?/i;
 
 // Escape a string for literal use inside a `new RegExp(...)` pattern. Hoisted
@@ -804,7 +805,7 @@ export function filterProvablyOutsideCountryScope(jobs, canonical) {
   for (const job of (Array.isArray(jobs) ? jobs : [])) {
     const source = String(job?.source || '?');
     const location = String(job?.location || '').trim().toLowerCase();
-    if (REMOTE_BOARD_SOURCES.has(source) || !location || /\b(remote|anywhere|work from home|wfh|distributed)\b/.test(location)) {
+    if (REMOTE_BOARD_SOURCES.has(source) || !location || REMOTE_LOCATION_RE.test(location)) {
       kept.push(job);
       continue;
     }
@@ -875,7 +876,7 @@ export function summarizeLocationAdherence(jobs, canonical) {
     if (REMOTE_BOARD_SOURCES.has(src)) { counts.remote++; continue; }
     const jl = String(j?.location || '').trim().toLowerCase();
     if (!jl) { counts.unknown++; continue; }
-    if (/\b(remote|anywhere|work from home|wfh|distributed)\b/.test(jl)) { counts.remote++; continue; }
+    if (REMOTE_LOCATION_RE.test(jl)) { counts.remote++; continue; }
     const sample = `${String(j?.title || '?').slice(0, 48)} — ${String(j?.location || '').slice(0, 40)} [${src}]`;
     if (countryRe) {
       // A COUNTRY target can only be judged on POSITIVE evidence, in both

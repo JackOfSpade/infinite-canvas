@@ -37,7 +37,7 @@ function parseRange(header, size) {
  * exist in the store are readable; traversal, symlinks and unknown ids are 404.
  */
 export function createReplayHandler({ store, createReadStream = nodeCreateReadStream } = {}) {
-  if (!store || typeof store.hasCall !== 'function' || typeof store.audioPath !== 'function') throw new TypeError('Replay protocol requires a call store.');
+  if (!store || typeof store.audioPath !== 'function') throw new TypeError('Replay protocol requires a call store.');
   return async function handler(request) {
     if (!request || typeof request.url !== 'string') return notFound();
     let url;
@@ -50,17 +50,13 @@ export function createReplayHandler({ store, createReadStream = nodeCreateReadSt
     if (url.pathname !== `/${AUDIO_NAME}` || url.search) return notFound();
     const callId = url.hostname;
     if (!callId) return notFound();
-    let known = false;
-    try {
-      known = await store.hasCall(callId);
-    } catch {
-      return notFound();
-    }
-    if (!known) return notFound();
-    const file = await store.audioPath(callId);
-    if (!file) return notFound();
+    // audioPath validates the id and the call's real directory; the lstat below checks the file.
+    // Range requests arrive many times per playback, so the call record is not parsed here.
+    let file;
     let entry;
     try {
+      file = await store.audioPath(callId);
+      if (!file) return notFound();
       entry = await lstat(file);
     } catch {
       return notFound();

@@ -12,7 +12,7 @@ const LEVELS = Object.freeze(['off', 'low', 'medium', 'high', 'max']);
 const CONCURRENCY = 2;
 
 /** The valid `<flash|pro>:<level>` entries of INFINITE_CANVAS_SHADOW_OFFLOAD. */
-export function parseShadowConfigs(value) {
+function parseShadowConfigs(value) {
   if (typeof value !== 'string') return [];
   const configs = [];
   for (const part of value.split(',')) {

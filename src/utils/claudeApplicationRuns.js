@@ -8,7 +8,7 @@
 import { normalizeApplicationProgress } from './applicationProgress.js';
 import { normalizeClaudeActivityEntry } from './claudeTaskActivityStore.js';
 
-export const CLAUDE_RUN_STATUSES = Object.freeze([
+const CLAUDE_RUN_STATUSES = Object.freeze([
   'running', 'failed', 'done', 'needs-review', 'invalid',
 ]);
 

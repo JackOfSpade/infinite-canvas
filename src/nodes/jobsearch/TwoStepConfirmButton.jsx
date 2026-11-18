@@ -1,5 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 
+function clearTimerRef(timerRef) {
+  if (timerRef.current != null) {
+    clearTimeout(timerRef.current);
+    timerRef.current = null;
+  }
+}
+
 // Destructive-action button that needs two deliberate clicks: the first arms it
 // (label swaps to `confirmLabel`), the second within `timeoutMs` confirms. An
 // armed button quietly reverts on its own so a stray first click is harmless.
@@ -28,12 +35,7 @@ export function TwoStepConfirmButton({
     setArmed(false);
   }
 
-  const clearTimer = () => {
-    if (timerRef.current != null) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-  };
+  const clearTimer = () => clearTimerRef(timerRef);
 
   // Locking the owner invalidates its pending confirmation. A later unlock
   // must always require two fresh clicks, even if the old timer has not fired.
@@ -41,12 +43,7 @@ export function TwoStepConfirmButton({
     if (disabled) {
       armedUntilRef.current = 0;
     }
-    return () => {
-      if (timerRef.current != null) {
-        clearTimeout(timerRef.current);
-        timerRef.current = null;
-      }
-    };
+    return () => clearTimerRef(timerRef);
   }, [disabled]);
 
   const handleClick = (event) => {

@@ -32,7 +32,7 @@ const applicationEntry = (stage, route = 'deepseek-flash', reasoning = 'high', w
 });
 
 /** A `qa:<interview stage>` entry. `claude` is the stage's own interview profile, kept for the record: a routed interview call never falls back to it. */
-export const qaEntry = (stage, route = 'deepseek-flash', reasoning = 'high', why = WHY, options = {}) => Object.freeze({
+const qaEntry = (stage, route = 'deepseek-flash', reasoning = 'high', why = WHY, options = {}) => Object.freeze({
   provider: 'offload',
   route,
   reasoning,

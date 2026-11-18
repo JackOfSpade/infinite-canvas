@@ -243,13 +243,11 @@ export function cloneNode(original, dx = 40, dy = 40) {
   }
 
   // Clear flags that should not carry over from source
-  if (clone.data) {
-    clone.data.isNew = false;
-    // Renderer-only receipt used to restore a source card's local progress
-    // guard after an exact Board rollback. A duplicate has no abandoned run
-    // to fence and must not replay the receipt under its new identity.
-    delete clone.data._boardRollbackProgressRestore;
-  }
+  clone.data.isNew = false;
+  // Renderer-only receipt used to restore a source card's local progress
+  // guard after an exact Board rollback. A duplicate has no abandoned run
+  // to fence and must not replay the receipt under its new identity.
+  delete clone.data._boardRollbackProgressRestore;
 
   // Unlock: clones should always be freely movable/deletable
   if (clone.data?.locked) {

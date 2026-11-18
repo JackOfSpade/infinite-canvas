@@ -11,7 +11,7 @@ function unicodeFromHex(hex) {
 // prose faces switch to system fonts. Its ToUnicode map preserves emoji text.
 // Allow only that known font and only explicit emoji mappings; never exempt a
 // prose font, missing/malformed map, or an unfamiliar CMap representation.
-export function isExtractableColorEmojiFont(font) {
+function isExtractableColorEmojiFont(font) {
   try {
     const descriptor = font.lookup(PDFName.of('FontDescriptor'));
     if (!(descriptor instanceof PDFDict)) return false;

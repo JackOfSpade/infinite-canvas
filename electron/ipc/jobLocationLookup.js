@@ -1,6 +1,11 @@
+import crypto from 'node:crypto';
 import { validationFailure } from './validationFailure.js';
 import { collector, diagnoseMarkedSections, templatesFor } from './validationLines.js';
-export const LOCATION_LOOKUP_CORRECTION_TEMPLATES = templatesFor('lookup.');
+import { wrapUntrustedText } from './promptSafety.js';
+import { canonicalHttpUrl, canonicalizeCompensationLocation } from './jobCompensation.js';
+import { classifyOfficialSourceHost } from './officialSourceHosts.js';
+
+const LOCATION_LOOKUP_CORRECTION_TEMPLATES = templatesFor('lookup.');
 /**
  * Career-site location lookup for the competitive-pay check.
  *
@@ -26,10 +31,6 @@ export const LOCATION_LOOKUP_CORRECTION_TEMPLATES = templatesFor('lookup.');
  * Everything except `runJobLocationLookup` is pure and unit-testable.
  */
 
-import crypto from 'node:crypto';
-import { wrapUntrustedText } from './promptSafety.js';
-import { canonicalHttpUrl, canonicalizeCompensationLocation } from './jobCompensation.js';
-
 /**
  * Upper bound on postings per handoff. The requirement is ONE handoff per run,
  * so overflow is dropped (and counted) rather than chunked into a second one.
@@ -48,9 +49,6 @@ const MISS_TTL_MS = 24 * 60 * 60 * 1000;
 // registered everywhere a task id must be. A new id would need five lists and
 // their drift tests for no behavioural gain.
 export const JOB_LOCATION_LOOKUP_TASK = 'job-compensation-research-batch';
-
-import { classifyOfficialSourceHost } from './officialSourceHosts.js';
-export { classifyOfficialSourceHost, isAggregatorHost, isKnownAtsHost } from './officialSourceHosts.js';
 
 const COMPANY_SUFFIXES = new Set([
   'inc', 'incorporated', 'llc', 'ltd', 'limited', 'corp', 'corporation', 'co', 'company', 'gmbh',
@@ -381,7 +379,9 @@ function parseRow(id, section) {
   const missing = ['sourceUrl', 'postingTitle', 'company', 'location', 'workMode', 'evidenceQuote']
     .filter(key => !clean(fields[key]));
   if (missing.length) {
-    throw structuralError(`Job location lookup section ${id} says FOUND but is missing: ${missing.join(', ')}. Provide every field, or answer NOT FOUND.`);
+    const error = structuralError(`Job location lookup section ${id} says FOUND but is missing: ${missing.join(', ')}. Provide every field, or answer NOT FOUND.`);
+    error.missingFields = missing;
+    throw error;
   }
   return {
     id,
@@ -396,7 +396,7 @@ function parseRow(id, section) {
   };
 }
 
-function parseJobLocationLookupBatchLegacy(raw, requests) {
+function parseJobLocationLookupBatchCore(raw, requests) {
   const ids = (Array.isArray(requests) ? requests : []).map(request => request.id);
   const sections = parseJobLocationLookupSections(raw, ids);
   return new Map(ids.map(id => [id, parseRow(id, sections.get(id))]));
@@ -542,6 +542,13 @@ const lookupCache = new Map();
 
 export function __resetJobLocationLookupCacheForTests() { lookupCache.clear(); }
 
+function pruneLookupCache(now) {
+  for (const [id, entry] of lookupCache) {
+    const ttl = entry.outcome.outcome === 'found' ? FOUND_TTL_MS : MISS_TTL_MS;
+    if (now - entry.createdAt > ttl) lookupCache.delete(id);
+  }
+}
+
 function cachedOutcome(id, now) {
   const entry = lookupCache.get(id);
   if (!entry) return null;
@@ -564,6 +571,7 @@ export async function runJobLocationLookup({ requests, jobsById, callRaw, signal
   const result = { outcomes: new Map(), handoffs: 0, failed: false, interrupted: false, cacheHit: false, error: '' };
   if (!requests.length) return result;
   if (signal?.aborted) { result.interrupted = true; return result; }
+  pruneLookupCache(now);
   const cached = requests.map(request => cachedOutcome(request.id, now));
   if (cached.every(Boolean)) {
     requests.forEach((request, index) => result.outcomes.set(request.id, cached[index]));
@@ -610,16 +618,15 @@ export function parseJobLocationLookupSections(raw, expectedIds) {
 }
 
 export function parseJobLocationLookupBatch(raw, requests) {
-  try { return parseJobLocationLookupBatchLegacy(raw, requests); } catch (error) {
+  try { return parseJobLocationLookupBatchCore(raw, requests); } catch (error) {
     const issues = collector();
     const ids = (Array.isArray(requests) ? requests : []).map(row => row.id);
     let sections;
     try { sections = parseJobLocationLookupSections(raw, ids); } catch { throw error; }
     for (const id of ids) {
       try { parseRow(id, sections.get(id)); } catch (rowError) {
-        if (rowError.message.includes('is missing:')) {
-          const list = rowError.message.split('is missing: ')[1].split('.')[0].split(', ');
-          issues.add('lookup.found-fields', id, { list });
+        if (Array.isArray(rowError.missingFields)) {
+          issues.add('lookup.found-fields', id, { list: rowError.missingFields });
         } else issues.add('lookup.result-line', id);
       }
     }

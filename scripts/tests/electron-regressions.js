@@ -434,6 +434,8 @@ export default [
         'first launch must pass a supplied canvas to the renderer instead of auto-restoring a workspace');
         assert(secondInstanceCanvasWindowSpec(['Infinite Canvas', canvasPath]).mode === 'file',
           'second instance must recognize a supplied canvas file');
+        assert(secondInstanceCanvasWindowSpec(['Infinite Canvas', path.basename(canvasPath)], { cwd: path.dirname(canvasPath) }).filePath === canonicalCanvas,
+          'a relative canvas path from a second launch must resolve against that launch\'s own working directory');
         assert(initialCanvasWindowSpec(['Infinite Canvas', ACCEPTANCE_NO_NATIVE_MENU_FLAG, canvasPath]).mode === 'file'
           && secondInstanceCanvasWindowSpec(['Infinite Canvas', ACCEPTANCE_NO_NATIVE_MENU_FLAG, canvasPath]).mode === 'file',
         'the acceptance-only native-menu flag must not be mistaken for, or displace, the supplied canvas path');
@@ -612,6 +614,12 @@ export default [
         const refused = await load(event, { filePath: oversized });
         assert(refused?.success === false && /too large to open/.test(refused.error),
           'a file past the runtime string bound is refused with its reason, without being read');
+
+        const malformed = path.join(root, 'malformed.json');
+        await fs.promises.writeFile(malformed, '{"nodes": [');
+        const corrupt = await load(event, { filePath: malformed });
+        assert(corrupt?.success === false && /Invalid workspace file format/.test(corrupt.error),
+          'text that does not parse is still reported as a corrupted workspace file');
 
         const canvas = path.join(root, 'canvas.json');
         const lastGood = '{"nodes":[],"edges":[],"drawings":[]}';

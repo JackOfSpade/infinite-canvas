@@ -142,12 +142,10 @@ function labelFor(kind, url) {
   return `Open listing on ${displayHost(parsedHost(url))}`;
 }
 
-/** Normalize, de-duplicate and cap a stored dead-mark list (newest kept). */
-export function normalizeDeadSourceUrls(value) {
-  return mergeDeadSourceUrls(value);
-}
-
-/** Union of several dead-mark lists, in first-seen order, capped to the newest. */
+/**
+ * Union of several dead-mark lists, in first-seen order, capped to the newest.
+ * A single list is normalized and de-duplicated the same way.
+ */
 export function mergeDeadSourceUrls(...lists) {
   const seen = new Set();
   const out = [];
@@ -166,7 +164,7 @@ export function mergeDeadSourceUrls(...lists) {
 
 /** Append one mark; returns the input list itself when it was already marked. */
 export function appendDeadSourceUrl(list, url) {
-  const current = normalizeDeadSourceUrls(list);
+  const current = mergeDeadSourceUrls(list);
   const normalized = normalizeExternalHttpUrl(url);
   if (!normalized || current.includes(normalized)) return Array.isArray(list) ? list : current;
   return mergeDeadSourceUrls(current, [normalized]);
@@ -204,7 +202,7 @@ export function jobSourceLinks(job) {
     if (!url || !key || seen.has(url) || seen.has(key)) return;
     seen.add(url);
     seen.add(key);
-    bucket.push({ url, key, kind: kind || sourceLinkHostClass(url, companyNames), label });
+    bucket.push({ url, key, kind, label });
   };
 
   const posting = normalizeOfficialPosting(job.officialPosting);
@@ -264,7 +262,7 @@ function linkMarkForms(link) {
 /** The first link not marked dead, the ones after it, and whether all are gone. */
 export function pickCurrentJobSourceLink(links, deadSourceUrls) {
   const list = Array.isArray(links) ? links : [];
-  const dead = new Set(normalizeDeadSourceUrls(deadSourceUrls));
+  const dead = new Set(mergeDeadSourceUrls(deadSourceUrls));
   const live = list.filter(link => link?.url && !linkMarkForms(link).some(form => dead.has(form)));
   return { current: live[0] || null, remaining: live.slice(1), exhausted: list.length > 0 && live.length === 0 };
 }
@@ -299,7 +297,7 @@ export function carryBoardDeadSourceUrls(jobs, cards) {
   const marked = [];
   for (const card of Array.isArray(cards) ? cards : []) {
     if (card?.type !== 'jobcard' || !card.data) continue;
-    const dead = normalizeDeadSourceUrls(card.data.deadSourceUrls);
+    const dead = mergeDeadSourceUrls(card.data.deadSourceUrls);
     if (dead.length === 0) continue;
     marked.push({
       dead,

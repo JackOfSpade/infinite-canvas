@@ -58,10 +58,6 @@ export const TextNode = React.memo(function TextNode({ id, data, selected, width
     }
   }, [isEditing]);
 
-  const handlePaste = useCallback((e) => {
-    pasteAsPlainText(e);
-  }, []);
-
   const fontSize = data.fontSize || 14;
   const fontFamily = data.fontFamily
     || (data.isSticky ? "'Indie Flower', 'Comic Sans MS', cursive" : 'sans-serif');
@@ -160,7 +156,7 @@ export const TextNode = React.memo(function TextNode({ id, data, selected, width
         onDoubleClick={handleDoubleClick}
         onBlur={handleTextBlur}
         onKeyDown={handleKeyDown}
-        onPaste={handlePaste}
+        onPaste={pasteAsPlainText}
         className={`outline-none min-w-[20px] min-h-[1em] ${
           isEditing
             ? `cursor-text ${isResized ? 'whitespace-pre-wrap break-words thin-scrollbar' : 'whitespace-nowrap'}`

@@ -22,10 +22,10 @@ export function useNodeAutoEdit(id, isNew, isEmptyPredicate, inputRef) {
     let rafId;
 
     if (isNewInitial && !hasFocusedRef.current) {
-      hasFocusedRef.current = true;
       updateNodeData(id, { isNew: undefined });
       
       timeoutId = setTimeout(() => {
+        hasFocusedRef.current = true;
         if (inputRef.current) {
           // Capture viewport state before focus to prevent any auto-zoom/pan
           const { transform } = store.getState();

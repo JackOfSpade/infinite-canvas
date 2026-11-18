@@ -19,8 +19,12 @@ const MONTHS = {
   nov: 10, november: 10, dec: 11, december: 11,
 };
 
-function text(value) {
+export function text(value) {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+export function isUnscored(scoreStatus) {
+  return typeof scoreStatus === 'string' && scoreStatus.startsWith('unscored');
 }
 
 function normalizeText(value) {
@@ -40,7 +44,7 @@ function normalizePriority(value) {
   // out of material-gap and score-cap logic just as a preferred signal is.
   if (normalized === 'contextual') return 'preferred';
   if (PRIORITIES.has(normalized)) return normalized;
-  if (['must', 'must-have', 'required', 'high', 'highest'].includes(normalized)) return 'critical';
+  if (['must', 'must-have', 'high', 'highest'].includes(normalized)) return 'critical';
   if (['nice-to-have', 'nice to have', 'optional', 'low'].includes(normalized)) return 'preferred';
   return 'important';
 }
@@ -703,9 +707,10 @@ function statusCounts(rows) {
   }), {});
 }
 
-// 3: ceilings count distinct requirements (overlapping gap rows merge) and
-//    only hard gaps (not documented / contradicted) reach the 69 ceilings.
-export const JOB_FIT_SCORE_RULES_VERSION = 3;
+// Version 3: the ceilings count distinct requirements (overlapping gap rows
+// merge), and only hard gaps (not documented or contradicted) reach the 69
+// ceilings.
+const JOB_FIT_SCORE_RULES_VERSION = 3;
 
 /**
  * Aggregate how often the deterministic ceilings above actually moved a score,
@@ -731,7 +736,7 @@ export function summarizeFitCalibration(scoredJobs, { threshold } = {}) {
   for (const job of Array.isArray(scoredJobs) ? scoredJobs : []) {
     if (!job || typeof job !== 'object') continue;
     summary.scored += 1;
-    if (typeof job.scoreStatus === 'string' && job.scoreStatus.startsWith('unscored')) {
+    if (isUnscored(job.scoreStatus)) {
       summary.unscored += 1;
       continue;
     }
@@ -800,7 +805,7 @@ function gapRowsOverlap(left, right) {
  * priority has a hard status — so adding a row can only ever add to a count,
  * never move one, which keeps "more gaps never raise the score" true.
  */
-export function clusterMaterialGaps(requirementRows) {
+function clusterMaterialGaps(requirementRows) {
   const clusters = [];
   for (const row of requirementRows.filter(row => row?.materialGap)) {
     const linked = clusters.filter(cluster => cluster.rows.some(member => gapRowsOverlap(member, row)));
@@ -886,6 +891,45 @@ export function calibrateGroundedJobRequirements(rawScore, requirementRows, { le
   return { adjustedScore, adjustments, mergedGapClusters: mergedClusterSummaries(clusters) };
 }
 
+const isGroundedScored = row => row.scoreImpact === 'scored'
+  && row.grounding.requirementGrounded && row.grounding.candidateClaimGrounded;
+
+// The views of a requirement-row list that both a fresh audit and a
+// recalibrated one derive: strengths, adjacent matches, material gaps, rows
+// whose cited evidence was rejected, and the scored and grounded row sets.
+function deriveAuditViews(rows) {
+  const scoredRequirementRows = rows.filter(row => row.scoreImpact === 'scored');
+  return {
+    strengths: rows.filter(row => row.effectiveStatus === 'direct' && isGroundedScored(row)),
+    adjacentMatches: rows.filter(row => row.effectiveStatus === 'adjacent' && isGroundedScored(row)),
+    materialGaps: rows.filter(row => row.materialGap),
+    rejectedEvidenceRows: rows.filter(row => !row.grounding.requirementGrounded
+      || row.grounding.rejectedJobEvidence.length > 0 || row.grounding.rejectedCandidateEvidence.length > 0),
+    scoredRequirementRows,
+    groundedRows: scoredRequirementRows.filter(row => row.grounding.requirementGrounded),
+  };
+}
+
+function buildConfidence(base, reported, rows, legacy, { scoredRequirementRows, groundedRows }) {
+  return {
+    ...base,
+    reported,
+    effective: effectiveConfidence(reported, rows, legacy),
+    groundedRequirementCount: groundedRows.length,
+    requirementCount: scoredRequirementRows.length,
+    groundedRequirementRatio: scoredRequirementRows.length ? groundedRows.length / scoredRequirementRows.length : 0,
+  };
+}
+
+const summarizeStrengthRows = rows => rows.map(row => ({ id: row.id, requirement: row.requirement, priority: row.priority }));
+const summarizeGapRows = rows => rows.map(row => ({
+  id: row.id,
+  requirement: row.requirement,
+  priority: row.priority,
+  status: row.effectiveStatus,
+  reportedStatus: row.reportedStatus,
+}));
+
 // Reapply deterministic policy to an already grounded audit without asking an
 // AI to reinterpret its evidence, priorities, tenure, confidence, or raw score.
 //
@@ -908,24 +952,10 @@ export function recalibrateAuditedFitAssessment(audit) {
   });
   const rows = recomputed.some((row, index) => row !== audit.requirementRows[index]) ? recomputed : audit.requirementRows;
   const { adjustedScore, adjustments, mergedGapClusters } = calibrateGroundedJobRequirements(audit.rawScore, rows);
-  const strengths = rows.filter(row => row.effectiveStatus === 'direct' && row.scoreImpact === 'scored'
-    && row.grounding.requirementGrounded && row.grounding.candidateClaimGrounded);
-  const adjacentMatches = rows.filter(row => row.effectiveStatus === 'adjacent' && row.scoreImpact === 'scored'
-    && row.grounding.requirementGrounded && row.grounding.candidateClaimGrounded);
-  const materialGaps = rows.filter(row => row.materialGap);
-  const rejectedEvidenceRows = rows.filter(row => !row.grounding.requirementGrounded
-    || row.grounding.rejectedJobEvidence.length > 0 || row.grounding.rejectedCandidateEvidence.length > 0);
-  const scoredRequirementRows = rows.filter(row => row.scoreImpact === 'scored');
-  const groundedRows = scoredRequirementRows.filter(row => row.grounding.requirementGrounded);
+  const views = deriveAuditViews(rows);
+  const { strengths, adjacentMatches, materialGaps, rejectedEvidenceRows } = views;
   const reported = confidenceLevel(audit.confidence.reported);
-  const rebuiltConfidence = {
-    ...audit.confidence,
-    reported,
-    effective: effectiveConfidence(reported, rows, false),
-    groundedRequirementCount: groundedRows.length,
-    requirementCount: scoredRequirementRows.length,
-    groundedRequirementRatio: scoredRequirementRows.length ? groundedRows.length / scoredRequirementRows.length : 0,
-  };
+  const rebuiltConfidence = buildConfidence(audit.confidence, reported, rows, false, views);
   const confidence = ['reported', 'effective', 'groundedRequirementCount', 'requirementCount', 'groundedRequirementRatio']
     .every(key => rebuiltConfidence[key] === audit.confidence[key])
     ? audit.confidence
@@ -948,15 +978,9 @@ export function recalibrateAuditedFitAssessment(audit) {
     confidence,
     statusCounts: statusCounts(rows),
     requirementRows: rows,
-    strengths: strengths.map(row => ({ id: row.id, requirement: row.requirement, priority: row.priority })),
-    adjacentMatches: adjacentMatches.map(row => ({ id: row.id, requirement: row.requirement, priority: row.priority })),
-    materialGaps: materialGaps.map(row => ({
-      id: row.id,
-      requirement: row.requirement,
-      priority: row.priority,
-      status: row.effectiveStatus,
-      reportedStatus: row.reportedStatus,
-    })),
+    strengths: summarizeStrengthRows(strengths),
+    adjacentMatches: summarizeStrengthRows(adjacentMatches),
+    materialGaps: summarizeGapRows(materialGaps),
     reasoning,
   };
 }
@@ -979,32 +1003,15 @@ export function validateAndNormalizeFitAssessment(raw, {
   const experience = normalizeExperience(safeRaw, candidateRoles, { asOf }, { candidateText, jobText });
   const requirementRows = applyDatedTenureToRequirements(normalizedRows, experience);
   const legacy = sourceRows.length === 0;
-  const materialGaps = requirementRows.filter(row => row.materialGap);
-  const strengths = requirementRows.filter(row => row.effectiveStatus === 'direct'
-    && row.scoreImpact === 'scored'
-    && row.grounding.requirementGrounded && row.grounding.candidateClaimGrounded);
-  const adjacentMatches = requirementRows.filter(row => row.effectiveStatus === 'adjacent'
-    && row.scoreImpact === 'scored'
-    && row.grounding.requirementGrounded && row.grounding.candidateClaimGrounded);
+  // Rows whose cited posting or candidate evidence was rejected get a label in
+  // the public explanation, which deliberately omits the rejected quote.
+  const views = deriveAuditViews(requirementRows);
+  const { strengths, adjacentMatches, materialGaps, rejectedEvidenceRows } = views;
   const { adjustedScore, adjustments, mergedGapClusters } = calibrateGroundedJobRequirements(rawScore, requirementRows, { legacy });
   const rejectedRequirementRows = requirementRows.filter(row => !row.grounding.requirementGrounded);
-  // Include a label for any row whose cited posting or candidate evidence was
-  // rejected. The public explanation deliberately omits the rejected quote.
-  const rejectedEvidenceRows = requirementRows.filter(row => !row.grounding.requirementGrounded
-    || row.grounding.rejectedJobEvidence.length > 0
-    || row.grounding.rejectedCandidateEvidence.length > 0);
-  const scoredRequirementRows = requirementRows.filter(row => row.scoreImpact === 'scored');
-  const groundedRows = scoredRequirementRows.filter(row => row.grounding.requirementGrounded);
-  const reportedConfidence = confidenceLevel(safeRaw?.confidence ?? safeRaw?.confidenceLevel);
-  const confidence = {
-    // `reported` is retained only for audit. UI should show `effective`,
-    // which accounts for rejected evidence and incomplete requirement rows.
-    reported: reportedConfidence,
-    effective: effectiveConfidence(reportedConfidence, requirementRows, legacy),
-    groundedRequirementCount: groundedRows.length,
-    requirementCount: scoredRequirementRows.length,
-    groundedRequirementRatio: scoredRequirementRows.length ? groundedRows.length / scoredRequirementRows.length : 0,
-  };
+  // `reported` is retained only for audit. UI should show `effective`, which
+  // accounts for rejected evidence and incomplete requirement rows.
+  const confidence = buildConfidence({}, confidenceLevel(safeRaw?.confidence ?? safeRaw?.confidenceLevel), requirementRows, legacy, views);
   const reasoning = calibratedReasoning({
     legacy,
     strengths,
@@ -1034,17 +1041,11 @@ export function validateAndNormalizeFitAssessment(raw, {
     // relying on prose or legacy status labels.
     statusCounts: statusCounts(requirementRows),
     requirementRows,
-    strengths: strengths.map(row => ({ id: row.id, requirement: row.requirement, priority: row.priority })),
+    strengths: summarizeStrengthRows(strengths),
     // Adjacent evidence is intentionally visible apart from a direct strength:
     // it is transferable context, not proof of an equivalent requirement.
-    adjacentMatches: adjacentMatches.map(row => ({ id: row.id, requirement: row.requirement, priority: row.priority })),
-    materialGaps: materialGaps.map(row => ({
-      id: row.id,
-      requirement: row.requirement,
-      priority: row.priority,
-      status: row.effectiveStatus,
-      reportedStatus: row.reportedStatus,
-    })),
+    adjacentMatches: summarizeStrengthRows(adjacentMatches),
+    materialGaps: summarizeGapRows(materialGaps),
     rejectedRequirementRows: rejectedRequirementRows.map(row => ({ id: row.id, requirement: row.requirement, rejectedEvidence: row.grounding.rejectedJobEvidence })),
     experience,
     // Never carry over the model's free-form positive narrative: it may have

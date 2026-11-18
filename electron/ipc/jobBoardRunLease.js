@@ -76,7 +76,7 @@ export async function claimJobBoardRunExecution(args = {}, { sender = null } = {
     ? executionOwner({ ...args, canvasFilePath: recoveryLease.canvasFilePath })
     : null;
   const operation = token(args.operation, 120) || 'board-orchestration';
-  if (!owner || !sender) {
+  if (!owner) {
     recoveryLease.release();
     return { ok: false, reason: 'missing-ownership' };
   }

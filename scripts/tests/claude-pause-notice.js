@@ -377,4 +377,21 @@ export default [
       assert.equal(claudePauseNotice({ active: true, paused: false, pauseCode: 'PARALLEL_SEARCH_EXHAUSTED' }), null);
     },
   },
+  {
+    name: 'claude pause notice: a plain subscriber that attaches after others left reads the status again',
+    async run() {
+      const previous = globalThis.window;
+      let reads = 0;
+      globalThis.window = { electronAPI: { getClaudeTaskStatus: async () => { reads += 1; return { paused: true, pauseCode: 'CLAUDE_USAGE_LIMIT' }; } } };
+      try {
+        for (let round = 0; round < 2; round += 1) {
+          const stop = subscribeClaudeTaskStatus(() => {});
+          await settle();
+          stop();
+          applyClaudeTaskStatus(null);
+        }
+        assert.equal(reads, 2, 'each first subscriber triggers a read');
+      } finally { globalThis.window = previous; applyClaudeTaskStatus(null); }
+    },
+  },
 ];

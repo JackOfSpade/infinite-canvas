@@ -157,6 +157,16 @@ export default [
     },
   },
   {
+    name: 'Dice: a listing with no link, guid or id gets an empty url, never a job-detail/undefined page',
+    async run() {
+      const bare = { title: 'Engineer', companyName: 'Acme', jobLocation: { displayName: 'Remote' }, summary: 'Build things.' };
+      const result = await fetchDiceListings('engineer', '', null, null, null, dicePage({ data: [bare, { ...bare, id: 'abc', title: 'Other' }], meta: { totalHits: 2 } }));
+      const byTitle = Object.fromEntries(result.items.map(item => [item.title, item.url]));
+      assert.equal(byTitle.Engineer, '');
+      assert.equal(byTitle.Other, 'https://www.dice.com/job-detail/abc');
+    },
+  },
+  {
     name: 'LinkedIn: a page-one body of real size with no readable card alarms; an empty end-of-results body, a short reply and a normal page do not',
     async run() {
       const run = async body => withFetch(() => respond(body), () => fetchLinkedInJobs(['software engineer'], null, 7, 'Toronto', null));

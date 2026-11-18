@@ -83,6 +83,9 @@ export function pixelEraseStroke(stroke, C, R, halfStroke = 0) {
         current = [];
       }
       prevInside = bIn;
+    } else if (ts.length === 1 && insideCircle(b) === prevInside) {
+      // The segment only grazes the circle: no boundary is crossed
+      if (!prevInside) current.push(b);
     } else if (ts.length === 1) {
       // One crossing
       const cross = lerpPt(a, b, ts[0]);

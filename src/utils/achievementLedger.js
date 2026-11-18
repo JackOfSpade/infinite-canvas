@@ -105,8 +105,9 @@ const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const MONTH_YEAR_RE = /^([A-Za-z]{3,9})\.?\s+(\d{4})$/;
 const YEAR_ONLY_RE = /^(\d{4})$/;
 const MONTH_NAMES = {
-  jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
-  jul: 6, aug: 7, sep: 8, sept: 8, oct: 9, nov: 10, dec: 11,
+  january: 0, jan: 0, february: 1, feb: 1, march: 2, mar: 2, april: 3, apr: 3, may: 4,
+  june: 5, jun: 5, july: 6, jul: 6, august: 7, aug: 7, september: 8, sept: 8, sep: 8,
+  october: 9, oct: 9, november: 10, nov: 10, december: 11, dec: 11,
 };
 // Same three shapes as the anchored parser above, unanchored, for scanning a
 // whole corpus to find its overall date span.
@@ -128,7 +129,7 @@ function parseLooseDate(label) {
 
   m = s.match(MONTH_YEAR_RE);
   if (m) {
-    const month = MONTH_NAMES[m[1].slice(0, 3).toLowerCase()];
+    const month = MONTH_NAMES[m[1].toLowerCase()];
     if (month === undefined) return null;
     return new Date(Date.UTC(Number(m[2]), month, 1));
   }
@@ -181,8 +182,8 @@ function checkDateSanity(metric, corpusSpan) {
 }
 
 // ---------------------------------------------------------------------------
-// Arithmetic (§3.4 item 1) — mirrors the bundle-pricing discipline at
-// bundlePricing.js:397-434: the model returns attributable factors (here,
+// Arithmetic (§3.4 item 1) — mirrors the bundle-pricing discipline in
+// bundlePricing.js: the model returns attributable factors (here,
 // raw metric endpoints), code derives every number and the final
 // human-readable string. The model NEVER supplies delta/pct/display.
 // ---------------------------------------------------------------------------

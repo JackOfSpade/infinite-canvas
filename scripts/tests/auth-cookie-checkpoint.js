@@ -1,4 +1,4 @@
-import { assert, hasProfileCookieCommitAdvanced, path, profileCookieStorePaths } from '../test-dependencies.js';
+import { assert, hasProfileCookieCommitAdvanced, path, profileCookieStorePaths, waitForNativeProfileCookieCommit } from '../test-dependencies.js';
 
 // What a wrong answer here costs: hasProfileCookieCommitAdvanced is the sole gate
 // waitForNativeProfileCookieCommit polls on before it closes a native (CDP-less)
@@ -17,6 +17,16 @@ import { assert, hasProfileCookieCommitAdvanced, path, profileCookieStorePaths }
 // to false — never "committed").
 
 export default [
+{
+    name: 'waitForNativeProfileCookieCommit: a cancelled wait returns at once without waiting out the ceiling',
+    run: async () => {
+      const started = Date.now();
+      const result = await waitForNativeProfileCookieCommit(path.join('/nonexistent', 'profile'), 'test', () => true);
+      assert(result.committed === false && result.cancelled === true, 'a cancelled wait reports uncommitted and cancelled');
+      assert(Date.now() - started < 400, 'a cancelled wait must not sleep a poll interval');
+      return { ok: true };
+    },
+  },
 {
     name: 'profileCookieStorePaths: empty/nullish input yields no paths to watch',
     run: () => {

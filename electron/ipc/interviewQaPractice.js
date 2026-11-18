@@ -14,7 +14,7 @@ import { normalizeQuestion } from './interviewQaStore.js';
 export const PRACTICE_MAX_QUESTIONS = 40;
 const CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 const CODE_LENGTH = 20;
-export const PRACTICE_CODE_RE = /^PRACTICE-[2-9A-HJ-NP-Z]{20}$/u;
+export const PRACTICE_CODE_RE = new RegExp(`^PRACTICE-[${CODE_ALPHABET}]{${CODE_LENGTH}}$`, 'u');
 const INTRO = normalizeQuestion('Tell me about yourself.');
 
 const LIMITS = Object.freeze({
@@ -109,7 +109,7 @@ export const INTERVIEW_PRACTICE_FEEDBACK_SCHEMA = Object.freeze({
     communication: { type: 'object', additionalProperties: false, properties: { pace: str(LIMITS.short), clarity: str(LIMITS.short), structure: str(LIMITS.short), confidence: str(LIMITS.short), filler: str(LIMITS.short) } },
     priorities: { type: 'array', maxItems: LIMITS.priorities, items: str(LIMITS.short), description: 'The few things to work on first, most important first.' },
     transcript: { type: 'array', maxItems: LIMITS.transcript, items: { type: 'object', additionalProperties: false, required: ['role', 'text'], properties: { role: { type: 'string', enum: ['interviewer', 'candidate'] }, text: str(LIMITS.transcriptText) } } },
-    callId: { ...str(64), pattern: '^[A-Za-z0-9_-]{1,64}$', description: 'The practice call this feedback analyses, when it came from a recorded call.' },
+    callId: { ...str(64), pattern: PRACTICE_CALL_ID_RE.source, description: 'The practice call this feedback analyses, when it came from a recorded call.' },
     delivery: INTERVIEW_PRACTICE_DELIVERY_SCHEMA,
   },
 });

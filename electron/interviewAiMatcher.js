@@ -75,7 +75,7 @@ export function parseInterviewAiSelection(response, cards, previousCardId = null
   return { kind: value.kind, cardId: value.cardId, confidence: value.confidence };
 }
 
-export function interviewAiMatchInstructions(cards, extensions = []) {
+function interviewAiMatchInstructions(cards, extensions = []) {
   return 'Classify the entire interviewer turn and select the prepared card that answers its meaning in one response. '
     + 'kind question means a new interviewer question or request for an answer, even if very short or preceded by acknowledgements or small talk. '
     + 'Map the full question, including all independent parts, to a prepared card; choose cardId none if no card adequately answers it. '

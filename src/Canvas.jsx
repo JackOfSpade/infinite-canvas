@@ -80,6 +80,8 @@ import { viewportForZoomAtScreenPoint } from './utils/layoutGeometry';
 import { buildCustomizationDialogData, filterNodeCustomizationUpdates } from './utils/nodeCustomization';
 import { settlePreFenceCanvasBatches } from './utils/quitCommitSettle';
 
+const basenameOf = (filePath) => filePath.split(/[/\\]/).pop();
+
 const wheelZoomDelta = (event) => {
   const platform = window.navigator?.platform || '';
   const factor = event.ctrlKey && /Mac/.test(platform) ? 10 : 1;
@@ -480,7 +482,7 @@ export function Canvas() {
       if (!newPath) return;
       setCurrentFile(newPath);
       updateSetting?.('lastOpenedWorkspace', newPath);
-      const name = newPath.split(/[/\\]/).pop();
+      const name = basenameOf(newPath);
       addToast({ title: 'Canvas file renamed', description: `Now saving to “${name}”.`, type: 'info' });
     });
     const unlistenFailure = window.electronAPI.onCanvasFileRenameRecoveryFailed?.(() => {
@@ -501,7 +503,7 @@ export function Canvas() {
   useEffect(() => {
     let title = 'Infinite Canvas';
     if (currentFile) {
-      let basename = currentFile.split(/[/\\]/).pop();
+      let basename = basenameOf(currentFile);
       if (basename.endsWith('.json')) {
         basename = basename.slice(0, -5);
       }
@@ -882,6 +884,8 @@ export function Canvas() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const sidebarStats = useMemo(() => getStats(nodes), [statsSignature]);
 
+  const loadPercent = Math.round(Math.max(0, Math.min(1, loadState.progress || 0)) * 100);
+
   return (
     <div className="w-screen h-screen bg-neutral-950 flex">
       <Sidebar
@@ -911,13 +915,13 @@ export function Canvas() {
                 <div className="mb-2 flex items-center justify-between gap-3">
                   <div className="text-xs font-semibold text-white/85">Loading workspace</div>
                   <div className="font-mono text-[10px] text-white/45">
-                    {Math.round(Math.max(0, Math.min(1, loadState.progress || 0)) * 100)}%
+                    {loadPercent}%
                   </div>
                 </div>
                 <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
                   <div
                     className="h-full rounded-full bg-emerald-400 transition-[width] duration-200 ease-out"
-                    style={{ width: `${Math.round(Math.max(0, Math.min(1, loadState.progress || 0)) * 100)}%` }}
+                    style={{ width: `${loadPercent}%` }}
                   />
                 </div>
                 <div className="mt-2 text-[10px] text-white/45">

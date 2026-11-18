@@ -258,7 +258,7 @@ export default [
         assert(!unsupported.files[0].ok);
         const failing = await convertCareerFiles({ filePaths: [jpg], userDataPath: w.userData, readWithAi: async () => { throw new Error('rate limited'); } });
         assert(!failing.files[0].ok && /rate limited/.test(failing.files[0].reason));
-        assert(!fs.existsSync(path.join(w.userData, CAREER_CONVERSION_DIR)) || fs.readdirSync(path.join(w.userData, CAREER_CONVERSION_DIR)).every(dir => fs.readdirSync(path.join(w.userData, CAREER_CONVERSION_DIR, dir)).length === 0), 'a refusal leaves no converted file');
+        assert(!fs.existsSync(path.join(w.userData, CAREER_CONVERSION_DIR)) || fs.readdirSync(path.join(w.userData, CAREER_CONVERSION_DIR)).length === 0, 'a refusal leaves no converted file and no empty folder');
       } finally { w.cleanup(); }
     },
   },

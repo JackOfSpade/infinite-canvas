@@ -1,31 +1,15 @@
 // Mix candidate and interviewer WAVs into one 24 kHz mono 16-bit track.
 // Streamed in ~10 s blocks so a 45 minute call never sits in memory at once.
-const OUT_RATE = 24000;
-const HEADER_BYTES = 44;
-const TWO_POW_15 = 32768;
-const BLOCK_SECONDS = 10;
+import { HEADER_BYTES, TWO_POW_15, wavHeader, pcm16FrameCount, readPcm16MonoHeader } from './wavFormat.js';
 
-function readHeader(fd, fs, label) {
-  const header = Buffer.alloc(HEADER_BYTES);
-  if (fs.readSync(fd, header, 0, HEADER_BYTES, 0) < HEADER_BYTES) throw new Error(`mixdown: ${label} header incomplete`);
-  if (header.toString('ascii', 0, 4) !== 'RIFF' || header.toString('ascii', 8, 12) !== 'WAVE') {
-    throw new Error(`mixdown: ${label} is not a RIFF/WAVE file`);
-  }
-  const audioFormat = header.readUInt16LE(20);
-  const channels = header.readUInt16LE(22);
-  const sampleRate = header.readUInt32LE(24);
-  const bits = header.readUInt16LE(34);
-  if (audioFormat !== 1 || bits !== 16 || channels !== 1) {
-    throw new Error(`mixdown: ${label} must be PCM16 mono, got format ${audioFormat} channels ${channels} bits ${bits}`);
-  }
-  return { sampleRate };
-}
+const OUT_RATE = 24000;
+const BLOCK_SECONDS = 10;
 
 function openTrack(path, fs, label) {
   const fd = fs.openSync(path, 'r');
   try {
-    const { sampleRate } = readHeader(fd, fs, label);
-    const frames = Math.max(0, Math.floor((fs.fstatSync(fd).size - HEADER_BYTES) / 2));
+    const { sampleRate } = readPcm16MonoHeader(fd, fs, { prefix: 'mixdown', subject: label });
+    const frames = pcm16FrameCount(fs.fstatSync(fd).size);
     return { fd, sampleRate, frames, durationMs: Math.round((frames * 1000) / sampleRate) };
   } catch (error) { fs.closeSync(fd); throw error; }
 }
@@ -64,24 +48,6 @@ function mixBlock(outFrames, offset, fs, candidate, interviewer) {
   addTrack(candidate);
   addTrack(interviewer);
   return target;
-}
-
-function wavHeader(dataBytes, sampleRate) {
-  const header = Buffer.alloc(HEADER_BYTES);
-  header.write('RIFF', 0, 'ascii');
-  header.writeUInt32LE(36 + dataBytes, 4);
-  header.write('WAVE', 8, 'ascii');
-  header.write('fmt ', 12, 'ascii');
-  header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20);
-  header.writeUInt16LE(1, 22);
-  header.writeUInt32LE(sampleRate, 24);
-  header.writeUInt32LE(sampleRate * 2, 28);
-  header.writeUInt16LE(2, 32);
-  header.writeUInt16LE(16, 34);
-  header.write('data', 36, 'ascii');
-  header.writeUInt32LE(dataBytes, 40);
-  return header;
 }
 
 export function mixTracks({ candidatePath, interviewerPath, outPath, fs } = {}) {

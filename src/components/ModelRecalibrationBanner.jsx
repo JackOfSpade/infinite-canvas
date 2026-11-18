@@ -73,4 +73,3 @@ export function ModelRecalibrationBanner() {
   );
 }
 
-export default ModelRecalibrationBanner;

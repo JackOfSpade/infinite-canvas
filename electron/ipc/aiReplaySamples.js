@@ -8,9 +8,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const AI_REPLAY_SAMPLES_DIR = 'ai-replay-samples';
+const AI_REPLAY_SAMPLES_DIR = 'ai-replay-samples';
 export const AI_USAGE_FILE = 'claude-task-usage.jsonl';
-export const AI_REPLAY_KEEP_PER_TASK = 24;
+const AI_REPLAY_KEEP_PER_TASK = 24;
 // Task names become directory names, so only this shape is accepted.
 const TASK_NAME = /^[a-z0-9-]{1,80}$/;
 
@@ -27,11 +27,6 @@ export function configureAiRecording({ userData } = {}) {
     recordingRoot = null;
   }
   return recordingRoot;
-}
-
-/** True once configureAiRecording gave recording a root. */
-export function aiRecordingConfigured() {
-  return recordingRoot !== null;
 }
 
 const stringOrNull = value => (typeof value === 'string' && value ? value : null);

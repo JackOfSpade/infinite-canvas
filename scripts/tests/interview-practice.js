@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 import { withTimeout } from './fixtures/practice-connector/harness.js';
-import { PRACTICE_CODE_RE, newPracticeCode, orderPracticeQuestions, practiceCodeHash, validatePracticeFeedback } from '../../electron/ipc/interviewQaPractice.js';
+import { INTERVIEW_PRACTICE_FEEDBACK_SCHEMA, PRACTICE_CALL_ID_RE, PRACTICE_CODE_RE, newPracticeCode, orderPracticeQuestions, practiceCodeHash, validatePracticeFeedback } from '../../electron/ipc/interviewQaPractice.js';
 import { findInterviewPracticeSession, listInterviewPracticeSessions, loadInterviewPractice, recordInterviewPracticeFeedback, saveInterviewPractice, saveInterviewPracticeSession } from '../../electron/ipc/interviewQaStore.js';
 import { createInterviewPracticeRegistry } from '../../electron/ipc/interviewPracticeRegistry.js';
 
@@ -199,6 +199,11 @@ export default [
     assert.notEqual(newPracticeCode(), code, 'every run arms a fresh one-shot code');
     assert.notEqual(practiceCodeHash(code), code, 'the code is never stored in the clear');
     assert.notEqual(practiceCodeHash(code), practiceCodeHash(newPracticeCode()), 'a hash names exactly one code');
+  } },
+  { name: 'practice code pattern is built from the alphabet and length, and the schema reuses the call id pattern', async run() {
+    assert.equal(PRACTICE_CODE_RE.source, '^PRACTICE-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{20}$');
+    assert.equal(PRACTICE_CODE_RE.flags, 'u');
+    assert.equal(INTERVIEW_PRACTICE_FEEDBACK_SCHEMA.properties.callId.pattern, PRACTICE_CALL_ID_RE.source);
   } },
   { name: 'practice plan order: saved order first, then any card the plan does not know yet', async run() {
     const ordered = orderPracticeQuestions([{ question: 'B?' }, { question: 'A?' }, { question: 'a?' }, { question: 'C?' }], ['A?', 'Missing?', 'C?']);

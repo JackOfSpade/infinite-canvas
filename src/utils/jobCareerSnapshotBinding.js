@@ -2,7 +2,7 @@
 // the authority boundary; fingerprints and projections can coincide across
 // distinct approved source records, so they are never sufficient cache keys.
 
-export const JOB_CAREER_QUERY_CACHE_STRATEGY_VERSION = 9;
+const JOB_CAREER_QUERY_CACHE_STRATEGY_VERSION = 9;
 
 export function normalizedJobCareerSnapshotId(value) {
   const snapshotId = typeof value === 'string' ? value.trim() : '';

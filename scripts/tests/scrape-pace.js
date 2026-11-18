@@ -11,6 +11,7 @@ import {
   recordManualScraperTelemetry,
   resetManualScraperTelemetry,
   resetScrapePace,
+  waitForReady,
 } from '../../electron/ipc/browser/manualScraper.js';
 import { buildJobsPipelineSnapshot, renderScrapePaceLines } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { challengeInputVerdict, createChallengeInputProbe, describeChallengeInput } from '../../electron/ipc/browser/challengeInputProbe.js';
@@ -99,6 +100,24 @@ export default [{
     assert.equal(closed.openChallengeSince, null);
     // Once resolved the total is frozen: a later report time cannot inflate it.
     assert.match(formatScrapePaceLine(closed, midChallenge + 60_000), /waiting on you 7m12s · spacing/u);
+  },
+}, {
+  name: 'leaving the verification wait by abort closes the open check in the pace record',
+  async run() {
+    startPace();
+    const challenge = {
+      isChallenge: true, isHardBlock: false, reason: 'cloudflare-challenge-frame', hasCloudflareChallengeFrame: true,
+      hasCloudflareTurnstileWidget: true, url: 'https://example.test/', title: 'check', bodyHead: '',
+      bodyTextLength: 10, matchedVerificationMarkers: [], hasNormalContent: false,
+    };
+    const page = { evaluate: async () => challenge, url: () => 'https://example.test/', isClosed: () => false, mouse: {}, on() {}, off() {}, frames: () => [], mainFrame: () => ({}) };
+    let reads = 0;
+    const signal = { get aborted() { reads += 1; return reads > 3; } };
+    const outcome = await waitForReady(page, SOURCE, { srcName: 'ZipRecruiter' }, signal);
+    assert.equal(outcome, 'abort');
+    assert.equal(paceOf().challenges.list, 1);
+    assert.equal(paceOf().openChallengeSince, null);
+    assert.doesNotMatch(formatScrapePaceLine(paceOf(), Date.now() + 60_000), /check still open/u);
   },
 }, {
   name: 'a source restart resets its pace record instead of inheriting the previous attempt',

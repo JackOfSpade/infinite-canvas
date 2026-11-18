@@ -10,22 +10,12 @@ import { stripNonRestorableNodeDataForUndo } from './undoNonRestorableState.js';
 import { isRestorableMarketplaceRecovery } from './marketplaceRunRecovery.js';
 import { consolidateBoardCascadeNodes } from './jobLocationConsolidation.js';
 import { isLegacyUnscoredPlaceholder, UNSCORED_SCORE_STATUS } from './jobCardFilters.js';
+import { cyrb53 } from './cyrb53.js';
 import { OFFICIAL_POSTING_ROW_FIELDS } from '../../electron/ipc/officialPostingFields.js';
 
 // 53-bit string hash (cyrb53). A node's undo signature can run to tens of
 // kilobytes; the fingerprint keeps this digest plus the length instead.
-function hashText(text) {
-  let h1 = 0xdeadbeef;
-  let h2 = 0x41c6ce57;
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
-    h1 = Math.imul(h1 ^ code, 2654435761);
-    h2 = Math.imul(h2 ^ code, 1597334677);
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
-}
+const hashText = cyrb53;
 
 // A canvas node is never changed in place, so its signature is worked out once
 // per node object. Re-serializing every node on every edit cost tens of
@@ -696,6 +686,13 @@ export function runNodeMigrations(nodes, fromVersion = 0) {
   return out;
 }
 
+// Keeps an edge only when both ends are live. Returns the original array when
+// nothing was dropped so callers can tell an unchanged list by identity.
+function filterEdgesToLiveIds(edges, liveIds) {
+  const out = edges.filter(edge => liveIds.has(edge?.source) && liveIds.has(edge?.target));
+  return out.length === edges.length ? edges : out;
+}
+
 /**
  * Drop edges whose source or target node no longer exists in the live set.
  * Orphan edges accumulate when a node is force-deleted from outside the
@@ -723,16 +720,7 @@ export function sanitizeEdgesForSave(edges, sanitizedNodes) {
     }
   };
   collect(sanitizedNodes);
-  let changed = false;
-  const out = [];
-  for (const edge of edges) {
-    if (liveIds.has(edge?.source) && liveIds.has(edge?.target)) {
-      out.push(edge);
-    } else {
-      changed = true;
-    }
-  }
-  return changed ? out : edges;
+  return filterEdgesToLiveIds(edges, liveIds);
 }
 
 // A group's `canvasData.edges` belongs to that group's immediate canvas, not
@@ -747,16 +735,7 @@ function sanitizeNestedCanvasEdgesForSave(edges, sanitizedNodes) {
   const liveIds = new Set((Array.isArray(sanitizedNodes) ? sanitizedNodes : [])
     .map(node => node?.id)
     .filter(Boolean));
-  let changed = false;
-  const out = [];
-  for (const edge of edges) {
-    if (liveIds.has(edge?.source) && liveIds.has(edge?.target)) {
-      out.push(edge);
-    } else {
-      changed = true;
-    }
-  }
-  return changed ? out : edges;
+  return filterEdgesToLiveIds(edges, liveIds);
 }
 
 /**
@@ -767,6 +746,25 @@ function sanitizeNestedCanvasEdgesForSave(edges, sanitizedNodes) {
  * This is recursive: group (CanvasNode) nodes can contain arbitrary
  * nested canvases, so we must sanitize down every level.
  */
+// Renderer-only keys that never reach the saved file on any node type.
+const SAVE_TRANSIENT_DATA_KEYS = [
+  'isDropTarget',
+  'dragHover',
+  '_hmr',
+  '_boardRollbackProgressRestore',
+  '_preserveTreeLayoutOnRestore',
+];
+
+function hasSaveTransientKey(data) {
+  return !!data && SAVE_TRANSIENT_DATA_KEYS.some(key => key in data);
+}
+
+function omitSaveTransientKeys(data) {
+  const clean = { ...(data || {}) };
+  for (const key of SAVE_TRANSIENT_DATA_KEYS) delete clean[key];
+  return clean;
+}
+
 // A cleaned copy depends only on the node it was made from, so the same node
 // always gets the same copy. Auto-save tells changed nodes from unchanged ones
 // by identity; a fresh copy on every save would resend the node every time.
@@ -864,21 +862,8 @@ export function sanitizeNodesForSave(nodes) {
         || innerNodes !== rawCanvasData.nodes
         || innerEdges !== rawCanvasData.edges
         || innerDrawings !== rawCanvasData.drawings;
-      const {
-        isDropTarget: _idt,
-        dragHover: _dh,
-        _hmr: _h,
-        _boardRollbackProgressRestore: _rollbackProgressRestore,
-        _preserveTreeLayoutOnRestore: _preserveTreeLayoutOnRestore,
-        ...cleanData
-      } = n.data || {};
-      const hasTransientData = n.data && (
-        'isDropTarget' in n.data
-        || 'dragHover' in n.data
-        || '_hmr' in n.data
-        || '_boardRollbackProgressRestore' in n.data
-        || '_preserveTreeLayoutOnRestore' in n.data
-      );
+      const cleanData = omitSaveTransientKeys(n.data);
+      const hasTransientData = hasSaveTransientKey(n.data);
       if (
         hasTransientData
         || canvasDataNeedsNormalization
@@ -912,13 +897,7 @@ export function sanitizeNodesForSave(nodes) {
     // - _boardRollbackProgressRestore: in-memory receipt used to restore a
     //   source card's local progress generation after Board cancellation.
     // - style.opacity (jobcard only): set transiently by toggleSourceFilter.
-    const hasTransientData = n.data && (
-      'isDropTarget' in n.data
-      || 'dragHover' in n.data
-      || '_hmr' in n.data
-      || '_boardRollbackProgressRestore' in n.data
-      || '_preserveTreeLayoutOnRestore' in n.data
-    );
+    const hasTransientData = hasSaveTransientKey(n.data);
     const hasTransientOpacity = n.type === 'jobcard' && n.style?.opacity !== undefined;
 
     // Reset stuck *processing* states so hubs auto-restart gracefully on reload.
@@ -957,8 +936,8 @@ export function sanitizeNodesForSave(nodes) {
     // "report an issue" banners from runs they don't remember. Stripping on
     // save means the same-session experience is unchanged (the fields live
     // in React state until the next save) but a fresh session loads clean.
-    const JOBSEARCH_TRANSIENT_KEYS = isJobSearch ? getJobSearchTransientKeysForSave(n.data?.hubState) : [];
-    const hasJobSearchTransient = isJobSearch && n.data && JOBSEARCH_TRANSIENT_KEYS.some(k => k in n.data);
+    const jobSearchTransientKeys = isJobSearch ? getJobSearchTransientKeysForSave(n.data?.hubState) : [];
+    const hasJobSearchTransient = isJobSearch && n.data && jobSearchTransientKeys.some(k => k in n.data);
 
     // SellHub: platformFitPending gates the marketplace list on the in-flight
     // fit-assessment AI call. It's a within-session UI flag — persisting it true
@@ -982,19 +961,12 @@ export function sanitizeNodesForSave(nodes) {
     }
     let result = n;
     if (hasTransientData || hasTransientHubState || hasJobSearchTransient || hasSellHubTransient || hasJobBoardTransient) {
-      const {
-        isDropTarget: _idt,
-        dragHover: _dh,
-        _hmr: _h,
-        _boardRollbackProgressRestore: _rollbackProgressRestore,
-        _preserveTreeLayoutOnRestore: _preserveTreeLayoutOnRestore,
-        ...cleanData
-      } = result.data || {};
+      const cleanData = omitSaveTransientKeys(result.data);
       if (hasTransientHubState && !hasRestorableSellRun) {
         cleanData.hubState = hasPersistedJobResults ? 'done' : hasPersistedSellDraft ? 'draft' : 'empty';
       }
       if (hasJobSearchTransient) {
-        for (const k of JOBSEARCH_TRANSIENT_KEYS) delete cleanData[k];
+        for (const k of jobSearchTransientKeys) delete cleanData[k];
       }
       if (hasSellHubTransient) {
         for (const k of SELLHUB_TRANSIENT_KEYS) delete cleanData[k];

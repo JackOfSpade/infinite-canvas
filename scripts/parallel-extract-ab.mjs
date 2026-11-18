@@ -17,6 +17,7 @@ import { assertDurableOutDir, createRunJournal } from './ai-test-journal.mjs';
 import { fetchOfficialPosting } from '../electron/ipc/officialPostingFetch.js';
 import { snapshotOfficialPostingLead } from '../electron/ipc/officialPostingSnapshot.js';
 import { readParallelKey } from '../electron/ipc/parallelSearch.js';
+import { mulberry32, shuffle } from './lib/seeded-random.mjs';
 
 export const ARMS = Object.freeze(['app', 'parallel-live', 'parallel-default']);
 export const PARALLEL_EXTRACT_ENDPOINT = 'https://api.parallel.ai/v1/extract';
@@ -107,32 +108,19 @@ export function classifyUsable({ ok = false, chars = 0, titleHit: titleMatch = f
 
 // ---- rows from the canvas --------------------------------------------------
 
-/** A seeded mulberry32 (the generator scripts/web-research-ab.mjs uses, not exported there). */
+/** A seeded mulberry32 generator; the seed is coerced with Number() and a non-number draws from seed 0. */
 export function seededRandom(seed) {
-  let state = (Number(seed) || 0) >>> 0;
-  return () => {
-    state = (state + 0x6d2b79f5) >>> 0;
-    let t = state;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+  return mulberry32(Number(seed) || 0);
 }
 
 /** Fisher-Yates with a seeded generator, so --seed picks the same rows every run. */
 export function seededShuffle(items, seed) {
-  const out = [...(Array.isArray(items) ? items : [])];
-  const next = seededRandom(seed);
-  for (let i = out.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(next() * (i + 1));
-    [out[i], out[j]] = [out[j], out[i]];
-  }
-  return out;
+  return shuffle(Array.isArray(items) ? items : [], seededRandom(seed));
 }
 
 // scripts/ai-task-replay.mjs exports storedPostingUrls, but importing it would load the whole
 // replay harness and its Electron IPC modules; this is the same URL list, minimal.
-function storedPostingUrls(row) {
+export function storedPostingUrls(row) {
   const posting = row?.officialPosting;
   if (!posting || typeof posting !== 'object') return [];
   const urls = [];
@@ -148,9 +136,9 @@ function storedPostingUrls(row) {
 
 /**
  * Rows whose stored official posting is confirmed (outcome 'found'), with an https posting
- * URL and a title and company. Deduped by URL, then seeded-shuffled and cut to --count.
+ * URL and a title and company, deduped by URL, in canvas order.
  */
-export function selectPostingRows(rows, { count = 40, seed = 1 } = {}) {
+export function eligiblePostingRows(rows) {
   const seen = new Set();
   const eligible = [];
   for (const row of Array.isArray(rows) ? rows : []) {
@@ -163,13 +151,18 @@ export function selectPostingRows(rows, { count = 40, seed = 1 } = {}) {
     seen.add(url);
     eligible.push({ url, title, company });
   }
+  return eligible;
+}
+
+/** The eligible rows, seeded-shuffled and cut to --count. */
+export function selectPostingRows(rows, { count = 40, seed = 1 } = {}) {
   const take = Math.max(0, Number(count) || 0);
-  return seededShuffle(eligible, seed).slice(0, take);
+  return seededShuffle(eligiblePostingRows(rows), seed).slice(0, take);
 }
 
 // ---- summary ---------------------------------------------------------------
 
-const median = (values) => {
+export const median = (values) => {
   const sorted = values.filter(value => Number.isFinite(value)).sort((a, b) => a - b);
   if (!sorted.length) return 0;
   const mid = Math.floor(sorted.length / 2);
@@ -218,7 +211,7 @@ export function summarize(rows, { arms = ARMS } = {}) {
 
 // ---- Parallel --------------------------------------------------------------
 
-const urlKey = url => String(url ?? '').trim().replace(/#.*$/u, '').replace(/\/+$/u, '').toLowerCase();
+export const urlKey = url => String(url ?? '').trim().replace(/#.*$/u, '').replace(/\/+$/u, '').toLowerCase();
 
 /** The documented /v1/extract body; live also sets fetch_policy, default leaves it out. */
 export function parallelExtractBody(url, { fetchPolicy = true } = {}) {
@@ -321,6 +314,7 @@ const ROW_ARRAYS = new Set(['scoredJobs', 'rows', 'jobs']);
 /** Every object under a scoredJobs/rows/jobs array anywhere in the canvas, deduped. */
 export function canvasJobRows(canvas) {
   const out = [];
+  const pushed = new Set();
   const seen = new Set();
   const visit = (value, depth) => {
     if (!value || typeof value !== 'object' || seen.has(value) || depth > 12) return;
@@ -328,7 +322,7 @@ export function canvasJobRows(canvas) {
     if (Array.isArray(value)) { for (const item of value) visit(item, depth + 1); return; }
     for (const [key, child] of Object.entries(value)) {
       if (ROW_ARRAYS.has(key) && Array.isArray(child)) {
-        for (const row of child) if (row && typeof row === 'object' && !out.includes(row)) out.push(row);
+        for (const row of child) if (row && typeof row === 'object' && !pushed.has(row)) { pushed.add(row); out.push(row); }
       }
       visit(child, depth + 1);
     }
@@ -338,7 +332,7 @@ export function canvasJobRows(canvas) {
 }
 
 /** Loads the canvas the way scripts/ai-task-replay.mjs does (restore a pooled canvas first). */
-async function loadCanvasRows(canvasPath, modules = {}) {
+export async function loadCanvasRows(canvasPath, modules = {}) {
   const pool = modules.pool ?? await import(new URL('../electron/ipc/workspaceContentPool.js', import.meta.url).href);
   const parsed = pool.parseWorkspaceText(fs.readFileSync(canvasPath, 'utf8'));
   const canvas = pool.restoreWorkspaceContent(parsed) ?? parsed;
@@ -401,8 +395,8 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     console.error(`Could not load the canvas: ${noUrls(error?.message || error)}`);
     return 2;
   }
-  const eligible = selectPostingRows(canvasRows, { count: 1_000_000, seed: opts.seed });
-  const selected = eligible.slice(0, opts.count);
+  const eligible = eligiblePostingRows(canvasRows);
+  const selected = seededShuffle(eligible, opts.seed).slice(0, opts.count);
   log(`canvas rows ${canvasRows.length} · eligible ${eligible.length} · selected ${selected.length} · arms ${opts.arms.join(',')}`);
   if (opts.dryRun) {
     log(`dry run: ${selected.length * opts.arms.length} reads would run; no network call was made`);

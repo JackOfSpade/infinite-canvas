@@ -204,7 +204,7 @@ function textFence(value) {
 // interpolates them instead of hand-copying text that can drift.
 export const ORIGINAL_JOB_LISTING_BODY_HEADING = '## Original scraped listing';
 export const EMPTY_JOB_LISTING_BODY_NOTE = '_No listing text was returned by the source._';
-export const ORIGINAL_JOB_LISTING_TARGETS_HEADING = '## Posting locations';
+const ORIGINAL_JOB_LISTING_TARGETS_HEADING = '## Posting locations';
 
 /** One safe, escaped `- Location: <url>` line per retained posting target. */
 function postingTargetLines(variants) {

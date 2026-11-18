@@ -65,9 +65,8 @@ const handoffProgressScopes = new Map();
 const EPHEMERAL_PROGRESS_SCOPE_MAX_INACTIVE = 200;
 const EPHEMERAL_PROGRESS_SCOPE_MAX_AGE_MS = 30 * 60 * 1000;
 // A worker-pool planner needs to see beyond the small active wave of a long
-// manual run. Keep that projection strictly aggregate-only and bounded: it is
+// manual run. Keep that projection strictly aggregate-only: it is
 // process-local planning metadata, never prompt/durable/renderer/report data.
-const MAX_QUEUED_WORK_FORECAST_UNITS = Number.MAX_SAFE_INTEGER;
 const QUEUED_WORK_FORECAST_SCOPE_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 // Code derivation happens before the first durable write and before a request
 // enters `pendingRequests`. Reserve a selected code synchronously in that gap
@@ -587,29 +586,53 @@ export function dropRetiredDurableSteps(runs, knownTasks = new Set([...getKnownT
 
 async function loadDurableState() {
   if (durableStatePromise) return durableStatePromise;
-  durableStatePromise = (async () => {
+  const loading = (async () => {
     const filePath = durableFilePath();
     if (!filePath) return { version: DURABLE_HANDOFF_VERSION, runs: {} };
+    let text;
     try {
-      const parsed = JSON.parse(await fs.promises.readFile(filePath, 'utf8'));
-      const runs = parsed?.runs && typeof parsed.runs === 'object' ? parsed.runs : {};
-      // A pending manual-AI handoff is the user's resumable work, not a cache.
-      // Never discard it just because a machine was off for a week (or much
-      // longer).  Completion and cancellation own their explicit, atomic
-      // cleanup paths below; silently expiring a run here made recovery depend
-      // on an arbitrary wall-clock deadline.
-      // Calibration intentionally does not survive process restart. This
-      // transport cannot identify the user's chosen chat model/profile, so a
-      // persisted sample could be dangerously applied to a different output
-      // ceiling. Older on-disk `calibration` data is ignored and is removed on
-      // the next durable run-state write.
-      dropRetiredDurableSteps(runs);
-      return { version: DURABLE_HANDOFF_VERSION, runs };
-    } catch {
+      text = await fs.promises.readFile(filePath, 'utf8');
+    } catch (error) {
+      if (error?.code === 'ENOENT') return { version: DURABLE_HANDOFF_VERSION, runs: {} };
+      // Any other read failure says nothing about what is on disk. The state
+      // stays unwritable so a later write cannot replace resumable runs with an
+      // empty file, and the next load reads the file again.
+      logger.warn(`[Non-API AI] Could not read saved handoffs: ${error?.message || error}`);
+      return { version: DURABLE_HANDOFF_VERSION, runs: {}, loadFailed: true };
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (error) {
+      const aside = `${filePath}.corrupt-${Date.now()}`;
+      try {
+        await fs.promises.rename(filePath, aside);
+        logger.warn(`[Non-API AI] Saved handoffs were unreadable (${error?.message || error}); kept the file as ${path.basename(aside)}.`);
+      } catch (renameError) {
+        logger.warn(`[Non-API AI] Saved handoffs were unreadable and could not be set aside: ${renameError?.message || renameError}`);
+        return { version: DURABLE_HANDOFF_VERSION, runs: {}, loadFailed: true };
+      }
       return { version: DURABLE_HANDOFF_VERSION, runs: {} };
     }
+    const runs = parsed?.runs && typeof parsed.runs === 'object' ? parsed.runs : {};
+    // A pending manual-AI handoff is the user's resumable work, not a cache.
+    // Never discard it just because a machine was off for a week (or much
+    // longer).  Completion and cancellation own their explicit, atomic
+    // cleanup paths below; silently expiring a run here made recovery depend
+    // on an arbitrary wall-clock deadline.
+    // Calibration intentionally does not survive process restart. This
+    // transport cannot identify the user's chosen chat model/profile, so a
+    // persisted sample could be dangerously applied to a different output
+    // ceiling. Older on-disk `calibration` data is ignored and is removed on
+    // the next durable run-state write.
+    dropRetiredDurableSteps(runs);
+    return { version: DURABLE_HANDOFF_VERSION, runs };
   })();
-  return durableStatePromise;
+  durableStatePromise = loading;
+  const state = await loading;
+  // A failed read is not cached, so the next load tries the file again.
+  if (state.loadFailed && durableStatePromise === loading) durableStatePromise = null;
+  return state;
 }
 
 function writeDurableState() {
@@ -617,6 +640,7 @@ function writeDurableState() {
     const filePath = durableFilePath();
     if (!filePath) return;
     const state = await loadDurableState();
+    if (state.loadFailed) throw new Error('Saved handoffs could not be read, so they were left untouched.');
     const tmp = `${filePath}.${process.pid}.tmp`;
     try {
       await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
@@ -1406,7 +1430,7 @@ function cleanQueuedWorkForecast(value, progressScopeId) {
   const units = Number(value.remainingUnits);
   if (!QUEUED_WORK_FORECAST_SCOPE_RE.test(scopeId)
     || scopeId !== cleanProgressIdentifier(progressScopeId)
-    || !Number.isSafeInteger(units) || units < 1 || units > MAX_QUEUED_WORK_FORECAST_UNITS) return null;
+    || !Number.isSafeInteger(units) || units < 1) return null;
   return Object.freeze({ scopeId, remainingUnits: units });
 }
 
@@ -2154,6 +2178,11 @@ function clearReissueTimer(record) {
 function clearPresentationRetry(record) {
   if (record.presentationRetryTimer) clearTimeout(record.presentationRetryTimer);
   record.presentationRetryTimer = null;
+}
+
+// The window that presents a handoff is the only one allowed to act on it.
+function ownsRecord(event, record) {
+  return event.sender === (record.presentationSender || record.sender);
 }
 
 function rendererIsGone(record) {
@@ -3633,7 +3662,7 @@ export function registerNonApiAiHandlers({ clipboard = electronPkg.clipboard } =
   ipcMain.handle('replay-pending-non-api-ai-requests', async (event) => {
     let count = 0;
     for (const record of pendingRequests.values()) {
-      if ((record.presentationSender || record.sender) !== event.sender) continue;
+      if (!ownsRecord(event, record)) continue;
       if (sendRequest(record, 'replay')) count += 1;
     }
     return { count };
@@ -3650,7 +3679,7 @@ export function registerNonApiAiHandlers({ clipboard = electronPkg.clipboard } =
     const requestId = typeof args.requestId === 'string' ? args.requestId : '';
     const record = pendingRequests.get(requestId);
     if (!record) return { accepted: false, validationErrors: ['This Non-API AI request is no longer pending.'] };
-    if (event.sender !== (record.presentationSender || record.sender)) return { accepted: false, validationErrors: ['This response belongs to a different window.'] };
+    if (!ownsRecord(event, record)) return { accepted: false, validationErrors: ['This response belongs to a different window.'] };
     if (record.handoffRoute === 'mcp') return { accepted: false, validationErrors: ['This handoff is handled through the automatic AI worker.'] };
     if (record.settling) return { accepted: false, validationErrors: ['This response is already being submitted.'] };
     // `reason` is internal (the in-process worker reads it); the renderer contract stays
@@ -3663,7 +3692,7 @@ export function registerNonApiAiHandlers({ clipboard = electronPkg.clipboard } =
     const requestId = typeof args.requestId === 'string' ? args.requestId : '';
     const record = pendingRequests.get(requestId);
     if (!record) return { steppedBack: false, error: 'This Non-API AI request is no longer pending.' };
-    if (event.sender !== (record.presentationSender || record.sender)) return { steppedBack: false, error: 'This response belongs to a different window.' };
+    if (!ownsRecord(event, record)) return { steppedBack: false, error: 'This response belongs to a different window.' };
     if (record.handoffRoute === 'mcp') return { steppedBack: false, error: 'This handoff is handled through the automatic AI worker.' };
     if (record.settling) return { steppedBack: false, error: 'This response is already being saved.' };
     if (!record.canStepBack) return { steppedBack: false, error: 'There is no previous handoff step available for this request.' };
@@ -3683,7 +3712,7 @@ export function registerNonApiAiHandlers({ clipboard = electronPkg.clipboard } =
   ipcMain.handle('cancel-non-api-ai-request', async (event, args = {}) => {
     const record = pendingRequests.get(args?.requestId);
     if (!record) return { cancelled: false };
-    if (event.sender !== (record.presentationSender || record.sender)) return { cancelled: false };
+    if (!ownsRecord(event, record)) return { cancelled: false };
     // A manual cancellation is a cancellation of the owning job operation, not
     // merely one prompt. In particular, scoring must not mistake it for a
     // recoverable model failure and split/reissue more prompts.
@@ -3718,7 +3747,7 @@ export function registerNonApiAiHandlers({ clipboard = electronPkg.clipboard } =
   // The worker list consults manualIntent before both read and submit.
   ipcMain.handle('claim-non-api-ai-manual', (event, args = {}) => {
     const record = pendingRequests.get(args?.requestId);
-    if (!record || event.sender !== (record.presentationSender || record.sender) || record.settling) return { claimed: false, copied: false };
+    if (!record || !ownsRecord(event, record) || record.settling) return { claimed: false, copied: false };
     if (record.handoffRoute === 'mcp') return { claimed: false, copied: false, code: 'MCP_ROUTE' };
     const prompt = promptForRetry(record, record.validationError || null).prompt;
     if (typeof prompt !== 'string' || !prompt || typeof clipboard?.writeText !== 'function') {
@@ -3735,7 +3764,7 @@ export function registerNonApiAiHandlers({ clipboard = electronPkg.clipboard } =
   ipcMain.handle('update-non-api-ai-draft', async (event, args = {}) => {
     const record = pendingRequests.get(args?.requestId);
     if (!record) return { saved: false, code: 'REQUEST_SETTLED' };
-    if (event.sender !== (record.presentationSender || record.sender)) return { saved: false, code: 'REQUEST_OWNER_MISMATCH' };
+    if (!ownsRecord(event, record)) return { saved: false, code: 'REQUEST_OWNER_MISMATCH' };
     // An acceptance can still fail its durable write. Preserve the retryable
     // draft until that operation actually settles, rather than treating an
     // in-progress write as proof the response is already safe on disk.
@@ -3780,7 +3809,7 @@ export function registerNonApiAiHandlers({ clipboard = electronPkg.clipboard } =
     const requestId = typeof args.requestId === 'string' ? args.requestId : '';
     const filePath = typeof args.filePath === 'string' ? args.filePath : '';
     const record = pendingRequests.get(requestId);
-    if (!record || event.sender !== (record.presentationSender || record.sender)) {
+    if (!record || !ownsRecord(event, record)) {
       throw new Error('This attachment belongs to a different or completed Non-API AI request.');
     }
     if (!record.attachmentPaths.includes(filePath)) {
