@@ -32,7 +32,7 @@ class FixtureWindow extends EventEmitter {
 
 export default [
   {
-    name: 'interview window realistic session: sealed controller preserves truth across all 27 candidate questions',
+    name: 'interview window realistic session: sealed controller preserves truth across all 27 candidate questions heard through the listening path',
     async run() {
       const fixture = createInterviewWindowE2EFixture();
       const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'interview-window-session-test-'));
@@ -43,7 +43,9 @@ export default [
         const publishedBrief = await publishInterviewPreparedBrief({ brief: fixture.brief, userDataPath: directory });
         const publishedBank = await publishInterviewAnswerBank({ bank: fixture.bank, userDataPath: directory });
         let snapshotReads = 0; let bankReads = 0;
-        controller = createInterviewWindowController({ matcherTransportFactory: () => { throw new Error('Offline fixture: AI unavailable.'); }, BrowserWindow: FixtureWindow, ipcMain: {}, registerIpc: false,
+        let audioInput = null; let turn = 0;
+        controller = createInterviewWindowController({ createAudioService: input => { audioInput = input; return { start: () => ({ status: 'listening' }), stop: () => ({ status: 'idle' }), notice() {} }; },
+          matcherTransportFactory: () => { throw new Error('Offline fixture: AI unavailable.'); }, BrowserWindow: FixtureWindow, ipcMain: {}, registerIpc: false,
           appInstance: { getPath: () => directory }, isAuthorizedOwner: candidate => candidate === owner,
           loadSnapshot: async () => { snapshotReads += 1; return structuredClone(fixture.snapshot); },
           loadBundle: async () => structuredClone(fixture.bundle),
@@ -58,8 +60,16 @@ export default [
           ['claim', 'description', 'name', 'title', 'employer', 'text', 'label', 'credential', 'institution'].map(field => entity[field]).filter(Boolean)));
         let kafkaCues; let matched = 0; let cues = 0; let abstained = 0;
         for (const scenario of fixture.questions) {
-          if (!scenario.followUp) controller.nextQuestion(event);
-          const display = await controller[scenario.followUp ? 'followUpQuestion' : 'submitQuestion'](event, scenario.question);
+          // Questions arrive from the call: deliver each one the way the listening path does.
+          controller.startListening(event);
+          const shownBefore = controller.getBrief(event);
+          await audioInput.onQuestion({ text: scenario.question, id: ++turn }, () => true);
+          const display = controller.getBrief(event);
+          if (scenario.id === 'multipart') {
+            // The listening path declines a multi-part question and leaves the card as it was.
+            assert(display === shownBefore, 'a multi-part spoken question must leave the current display untouched');
+            continue;
+          }
           const kind = display.answerCard ? 'card' : display.plan?.status === 'supported' ? 'cue' : 'abstain';
           assert(kind === scenario.expectedKind, `${scenario.id}: expected ${scenario.expectedKind}, received ${kind}`);
           if (kind === 'card') {
@@ -84,11 +94,11 @@ export default [
             assert(display.answerCard === null && display.plan.steps.length === 0 && !session.locked, `${scenario.id}: unsupported questions must show no confident card or unsafe evidence`);
           }
         }
-        assert(snapshotReads === 28 && bankReads === 28, 'launch and all 27 submits must keep authoritative snapshot and sealed-bank reads');
+        assert(snapshotReads === 1 && bankReads === 1, 'the launch alone reads the authoritative snapshot and sealed bank; detected questions reuse the verified copies');
         return { questions: fixture.questions.length, matched, cues, abstained, wrongCards: 0, snapshotReads, bankReads };
       } finally {
         controller?.cleanupOwner(owner); owner.close();
-        await fs.rm(directory, { recursive: true, force: true });
+        await fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
       }
     },
   },

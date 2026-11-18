@@ -119,6 +119,8 @@ import {
   sourcesBehindLatest,
   coverageSourceIdsForLocation,
   sourceFinishedQueriesForRun,
+  sourceReadContextKey,
+  sourceReadKeysForRun,
   sourcesWithoutDateProgress,
 } from '../utils/jobSearchSourceCoverage';
 import { backgroundJobResumeRequest } from '../utils/workspaceStartupRecovery';
@@ -1745,6 +1747,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             // run starts at the first query that never finished.
             sourceQueryProgress: searchResult.sourceQueryProgress || null,
             locationKey: searchResult.sourceQueryLocationKey || '',
+            readContextKey: searchResult.sourceReadContextKey || '',
             participatingSourceIds: searchResult.participatingSourceIds || null,
           }
           : null;
@@ -1810,6 +1813,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             completedSourceIds: searchResult.completedSourceIds,
             sourceQueryProgress: searchResult.sourceQueryProgress || null,
             locationKey: searchResult.sourceQueryLocationKey || '',
+            readContextKey: searchResult.sourceReadContextKey || '',
             participatingSourceIds: searchResult.participatingSourceIds || null,
           },
         }
@@ -4261,6 +4265,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const runSourceFinishedQueries = recoveredPreSearchContext
         ? null
         : sourceFinishedQueriesForRun(laneTurnData, runActiveEnabledSourceIds, runSourceQueryLocationKey);
+      // Read listings are reused only under the job preferences they were judged by.
+      const runSourceReadContextKey = sourceReadContextKey(laneTurnData.jobPreferences);
+      const runSourceReadKeys = recoveredPreSearchContext
+        ? null
+        : sourceReadKeysForRun(laneTurnData, runActiveEnabledSourceIds, runSourceQueryLocationKey, runSourceReadContextKey);
+      if (runSourceReadKeys && Object.keys(runSourceReadKeys).length > 0) {
+        EventLogger.log(
+          `[JobSearch][${currentId}] Listings an earlier blocked run already read will not be opened again: `
+          + Object.entries(runSourceReadKeys).map(([sourceId, list]) => `${sourceId} ${list.length}`).join(', '),
+        );
+      }
       if (runSourceFinishedQueries && Object.keys(runSourceFinishedQueries).length > 0) {
         EventLogger.log(
           `[JobSearch][${currentId}] Skipping queries finished by an earlier blocked run: `
@@ -4838,6 +4853,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // Queries each platform finished in an earlier run that was blocked
         // part-way, for this run to skip. Fresh runs only, like the windows.
         sourceFinishedQueries: runSourceFinishedQueries,
+        // Listings those same platforms already read, to leave unopened.
+        sourceReadKeys: runSourceReadKeys,
         runOrigin,
         profileInputMode: 'stored-profile',
         ...(providerPhaseOnly ? { providerPhaseOnly: true } : {}),
@@ -4908,6 +4925,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // The location these queries were run for travels with the result so
       // saved query progress is only reused for the same search location.
       searchResult.sourceQueryLocationKey = runSourceQueryLocationKey;
+      searchResult.sourceReadContextKey = runSourceReadContextKey;
       // The platforms this run really used, so a date that fails to move is
       // reported only for them (not for unchecked or still-fresh platforms).
       searchResult.participatingSourceIds = runActiveEnabledSourceIds;

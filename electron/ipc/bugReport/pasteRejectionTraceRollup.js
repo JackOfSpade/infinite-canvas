@@ -146,8 +146,8 @@ function boundedRow(raw) {
 // own stored `rejectionStreak` (bumpPasteRejectionStreak, localAiApplication.js)
 // is not trusted here instead: that counter compares check id SETS only, so
 // it cannot tell a repeated check apart from the SAME check id failing on a
-// DIFFERENT branch (measured: checkDirectWelcomeClosing, coverLetterChecks.js,
-// has four branches that all report check id "direct-welcome-closing" with
+// DIFFERENT branch (measured: the since-retired direct-welcome-closing check
+// had four branches that all reported check id "direct-welcome-closing" with
 // different fingerprints) — and it lives in a process-local map that a
 // restart wipes, resetting to 1 on the very next rejection even though the
 // same cause kept failing before and after the restart. Re-deriving every

@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { readAllJobsSources } from './jobsSourceFixture.mjs';
 import { validateGapReviewSubmission as gapValidator, w4Lines as lines, __rejectionCauseKeysForTests as causeKeys, diagnoseCompensationExperienceBandLadder, isValidCompensationExperienceBandLadder } from '../test-dependencies.js';
 import {
   assert, w4Jobs as jobs, w4Preferences as prefs,
@@ -127,7 +128,7 @@ export default [
   { name: 'W4 repro R5: display-only suffixes teach their hidden validator rules', run: () => {
     for (const [name, phrase, count] of [['COMPENSATION_SECTION_FORMAT_SUFFIX', 'nothing outside', 4], ['ROLE_FAMILY_LADDER_SUFFIX', 'whole numbers', 2], ['COHORT_PROVENANCE_SUFFIX', 'at least 8 characters', 1]]) {
       assert(typeof jobs[name] === 'string' && jobs[name].includes(phrase), `${name} must expose its rule`);
-      const sourceText = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      const sourceText = readAllJobsSources();
       assert(sourceText.split(`displayOnlyPromptSuffix: ${name}`).length - 1 === count, `${name} must be wired at every v2 call site`);
     }
   } },

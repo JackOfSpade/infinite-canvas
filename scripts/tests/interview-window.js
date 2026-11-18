@@ -124,107 +124,46 @@ function makeController({ authorized = true, additionalOwners = [], loadBundle =
   const owner = new FakeWindow();
   const authorizedOwners = new Set([owner, ...additionalOwners]);
   const briefRecordId = interviewPreparedBriefRecordId(storedBrief);
+  let audioOptions = null;
   const controller = createInterviewWindowController({ BrowserWindow: FakeWindow, ipcMain: { handle() {} }, registerIpc: false,
+    // The running app advances the rail only from detected speech, through the
+    // audio service's onQuestion. The fake service hands that callback back.
+    createAudioService: input => { audioOptions = input; return { start: () => ({ status: 'listening' }), stop: () => ({ status: 'idle' }), notice() {} }; },
     isAuthorizedOwner: value => authorized && authorizedOwners.has(value),
     loadSnapshot, loadBundle, loadAnswerBank: async () => null,
     loadPreparedBrief: loadPreparedBrief || (async args => args.briefRecordId === briefRecordId && stableJson(args.brief) === stableJson(storedBrief) ? storedBrief : null),
     devServerUrl: 'http://localhost:5173/', preloadPath: '/narrow-preload.cjs' });
   const question = 'How did you improve onboarding conversion?';
   const plan = buildInterviewPlan({ question, profile: profile(), snapshotId: SNAPSHOT });
-  return { owner, controller, args: { nodeId: 'interview_node_1', snapshotId: SNAPSHOT, jobUrl: JOB_URL, briefRecordId, brief: structuredClone(storedBrief), plan, currentStep: 0 } };
+  // Delivers one detected question the way the listening path does and
+  // returns the display the child now holds.
+  const ask = async text => {
+    const session = controller.sessions.get(owner.id);
+    const event = { sender: session.child.webContents };
+    controller.startListening(event);
+    await audioOptions.onQuestion({ text }, () => true);
+    return controller.getBrief(event);
+  };
+  // A detected question that nothing prepared or saved answers leaves the rail
+  // unlocked and retires the parent plan on screen, as moving on does.
+  const unlock = () => ask('How do you negotiate a real-estate lease?');
+  return { owner, controller, ask, unlock, args: { nodeId: 'interview_node_1', snapshotId: SNAPSHOT, jobUrl: JOB_URL, briefRecordId, brief: structuredClone(storedBrief), plan, currentStep: 0 } };
 }
 
 export default [
   {
-    name: 'interview window: explicit follow-up is sender-bound, bounded and confined to the selected example',
-    async run() {
-      const { owner, controller, args } = makeController();
-      await controller.launch({ sender: owner.webContents }, args);
-      const session = [...controller.sessions.values()][0];
-      const event = { sender: session.child.webContents };
-      const before = controller.getBrief(event);
-      const first = await controller.followUpQuestion(event, 'What did you learn?');
-      assert(JSON.stringify(first.plan.steps) === JSON.stringify(before.plan.steps), 'follow-up must preserve every literal cue and attribution');
-      assert(first.plan.missingComponents.includes('lesson') && first.plan.question.endsWith('What did you learn?'), 'missing lesson must be disclosed, with follow-up visible');
-      const second = await controller.followUpQuestion(event, 'What trade-offs did you make?');
-      assert(JSON.stringify(second.plan.steps) === JSON.stringify(before.plan.steps) && second.plan.missingComponents.includes('decision'), 'consecutive follow-ups must not drift to a new story');
-      assert(controller.getBrief(event).plan.question === second.plan.question, 'renderer reload must retain the main-owned follow-up');
-      for (const question of ['Could you expand on the impact in that same situation?', 'How did you improve onboarding conversion?']) {
-        const continued = await controller.followUpQuestion(event, question);
-        assert(continued.question === question && JSON.stringify(continued.plan.steps) === JSON.stringify(before.plan.steps), 'explicit follow-up wording must retain the selected evidence without a lexical veto');
-      }
-      const lastQuestion = controller.getBrief(event).plan.question;
-      for (const question of ['x'.repeat(2001), '']) {
-        const rejected = await controller.followUpQuestion(event, question).then(() => false, () => true);
-        assert(rejected && controller.getBrief(event).plan.question === lastQuestion, 'invalid follow-up must retain the previous usable answer');
-      }
-      assert(await controller.followUpQuestion({ sender: owner.webContents }, 'What did you learn?').then(() => false, () => true), 'canvas cannot impersonate restricted child');
-      controller.nextQuestion(event);
-      const ignored = await controller.followUpQuestion(event, 'What did you learn?');
-      assert(ignored.ignored === true && ignored.reason === 'no-selected-story' && ignored.message, 'Next question must clear the follow-up anchor and explain the unavailable continuation');
-      session.child.close();
-    },
-  },
-  {
-    name: 'interview window: follow-up rechecks snapshot and retains answer on changed or unreadable evidence',
-    async run() {
-      let mode = 'valid';
-      const { owner, controller, args } = makeController({ loadSnapshot: async () => {
-        if (mode === 'failure') throw new Error('private-path-must-not-leak');
-        const value = profile();
-        if (mode === 'changed') value.profile.achievements[0].claim = 'Changed evidence';
-        return value;
-      } });
-      await controller.launch({ sender: owner.webContents }, args);
-      const session = [...controller.sessions.values()][0]; const event = { sender: session.child.webContents };
-      const before = JSON.stringify(controller.getBrief(event));
-      for (mode of ['failure', 'changed']) {
-        const error = await controller.followUpQuestion(event, 'What did you learn?').then(() => null, error => error);
-        assert(error?.message === 'Interview Window snapshot is unavailable.', 'full original anchor must be reverified with safe fixed error');
-        assert(JSON.stringify(controller.getBrief(event)) === before, 'failed grounding recheck must not replace usable evidence');
-      }
-      session.child.close();
-    },
-  },
-  {
-    name: 'interview window: Next, newer follow-up and closure fence pending continuation reads',
-    async run() {
-      let initial = true; const pending = [];
-      const { owner, controller, args } = makeController({ loadSnapshot: () => initial ? Promise.resolve(profile()) : new Promise(resolve => pending.push(resolve)) });
-      await controller.launch({ sender: owner.webContents }, args); initial = false;
-      const session = [...controller.sessions.values()][0]; const event = { sender: session.child.webContents };
-      const older = controller.followUpQuestion(event, 'What did you learn?');
-      const newer = controller.followUpQuestion(event, 'What was the result?');
-      pending[1](profile()); await newer;
-      pending[0](profile()); await older;
-      assert(controller.getBrief(event).plan.question.endsWith('What was the result?'), 'late older follow-up must not replace newer continuation');
-      const late = controller.followUpQuestion(event, 'What did you learn?');
-      controller.nextQuestion(event); pending[2](profile()); await late;
-      assert(controller.getBrief(event).plan === null, 'Next must fence a pending continuation');
-      initial = true; await controller.submitQuestion(event, 'How did you improve onboarding conversion?'); initial = false;
-      const closing = controller.followUpQuestion(event, 'What did you learn?');
-      session.child.close(); pending[3](profile()); await closing;
-      assert(controller.sessionCount() === 0, 'late continuation must not resurrect a closed child');
-    },
-  },
-  {
-    name: 'interview window: a pending parent brief cannot retarget the current follow-up example',
+    name: 'interview window: a pending parent brief cannot retarget a spoken follow-up, and a new question adopts it',
     async run() {
       const updatedSnapshot = 'b'.repeat(64); const original = brief();
       const updated = signBrief({ ...structuredClone(original), inputs: { ...original.inputs, careerSnapshotId: updatedSnapshot } });
-      const loaded = [];
-      const { owner, controller, args } = makeController({ storedBrief: original, loadPreparedBrief: memoryPreparedBriefs(original, updated), loadSnapshot: async ({ snapshotId }) => {
-        loaded.push(snapshotId); return { ...profile(), snapshotId };
-      } });
+      const { owner, controller, ask, args } = makeController({ storedBrief: original, loadPreparedBrief: memoryPreparedBriefs(original, updated), loadSnapshot: async ({ snapshotId }) => ({ ...profile(), snapshotId }) });
       await controller.launch({ sender: owner.webContents }, args);
-      const session = [...controller.sessions.values()][0]; const event = { sender: session.child.webContents };
+      const session = [...controller.sessions.values()][0];
       await controller.launch({ sender: owner.webContents }, { ...args, snapshotId: updatedSnapshot, brief: updated, briefRecordId: interviewPreparedBriefRecordId(updated), plan: null });
-      await controller.followUpQuestion(event, 'What did you learn?');
-      assert(loaded.at(-1) === SNAPSHOT && session.anchorPlan.snapshotId === SNAPSHOT, 'follow-up must keep the active pin despite a pending parent replacement');
-      controller.nextQuestion(event);
-      assert(session.snapshotId === updatedSnapshot && session.anchorPlan === null, 'explicit Next must adopt the replacement and clear the story anchor');
-      await controller.submitQuestion(event, 'How did you improve onboarding conversion?');
-      assert(session.anchorPlan.snapshotId === updatedSnapshot, 'new topic must use the newly adopted verified snapshot');
+      await ask('What did you learn?');
+      assert(session.snapshotId === SNAPSHOT && session.anchorPlan.snapshotId === SNAPSHOT, 'a spoken follow-up must keep the active pin despite a pending parent replacement');
+      await ask('How did you improve onboarding conversion?');
+      assert(session.snapshotId === updatedSnapshot && session.anchorPlan.snapshotId === updatedSnapshot, 'new topic must use the newly adopted verified snapshot');
       session.child.close();
     },
   },
@@ -448,28 +387,20 @@ export default [
     },
   },
   {
-    name: 'interview window: singleton sessions update, bind submit to child sender, and clean up with owner',
+    name: 'interview window: singleton sessions update, advance only from detected speech, and clean up with owner',
     async run() {
       const original = brief();
       const updatedBrief = structuredClone(original); updatedBrief.createdAt = '2026-10-08T01:00:00.000Z'; updatedBrief.role.title = 'Senior Product Manager'; signBrief(updatedBrief);
-      const { owner, controller, args } = makeController({ storedBrief: original, loadPreparedBrief: memoryPreparedBriefs(original, updatedBrief) });
+      const { owner, controller, ask, args } = makeController({ storedBrief: original, loadPreparedBrief: memoryPreparedBriefs(original, updatedBrief) });
       await controller.launch({ sender: owner.webContents }, args);
       const child = [...controller.sessions.values()][0].child;
       const updated = { ...structuredClone(args), brief: updatedBrief, briefRecordId: interviewPreparedBriefRecordId(updatedBrief) };
       const result = await controller.launch({ sender: owner.webContents }, updated);
       assert(result.reused && controller.sessionCount() === 1 && child.focused, 'later launch should focus the existing child');
       assert(child.webContents.sent.filter(item => item.channel === 'interview-window:brief-updated').length === 0, 'a parent relaunch must retain the supported child rail');
-      await controller.submitQuestion({ sender: owner.webContents }, 'How did you improve onboarding conversion?').then(() => { throw new Error('owner submit unexpectedly accepted'); }, () => undefined);
-      const locked = await controller.submitQuestion({ sender: child.webContents }, 'How did you improve onboarding conversion?');
-      assert(locked.plan.status === 'supported' && child.webContents.sent.filter(item => item.channel === 'interview-window:brief-updated').length === 1, 'an explicit child submission must replace the supported launch rail in one complete update');
-      assert(await controller.nextQuestion({ sender: owner.webContents }) === null, 'owner sender must not clear the child session');
-      const cleared = await controller.nextQuestion({ sender: child.webContents });
-      assert(cleared.plan === null && controller.getBrief({ sender: child.webContents }).plan === null, 'authenticated Next question must clear the main-owned plan for reload/getBrief');
-      updated.plan = null;
-      await controller.launch({ sender: owner.webContents }, updated);
-      const display = await controller.submitQuestion({ sender: child.webContents }, 'How did you improve onboarding conversion?');
-      assert(display.plan.status === 'supported' && child.webContents.sent.some(item => item.channel === 'interview-window:brief-updated'), 'only child sender can run its pinned deterministic question lookup');
-      assert(display.briefing.role.title === 'Senior Product Manager', 'reused session must retain the newest brief for later child submissions');
+      const locked = await ask('How did you improve onboarding conversion?');
+      assert(locked.plan.status === 'supported' && child.webContents.sent.filter(item => item.channel === 'interview-window:brief-updated').length === 1, 'a detected question must replace the supported launch rail in one complete update');
+      assert(locked.briefing.role.title === 'Senior Product Manager', 'the detected question adopts the newest brief from the parent relaunch');
       owner.close();
       assert(controller.sessionCount() === 0 && child.destroyed, 'owner close must close and remove the child session');
     },
@@ -507,21 +438,19 @@ export default [
     },
   },
   {
-    name: 'interview window: parent relaunch cannot replace a child-created locked rail',
+    name: 'interview window: parent relaunch cannot replace a locked rail created from a detected question',
     async run() {
-      const { owner, controller, args } = makeController();
+      const { owner, controller, ask, args } = makeController();
       args.plan = null;
       await controller.launch({ sender: owner.webContents }, args);
       const child = controller.sessions.get(owner.id).child;
-      const submitted = await controller.submitQuestion({ sender: child.webContents }, 'How did you improve onboarding conversion?');
+      const submitted = await ask('How did you improve onboarding conversion?');
       const lockedRail = stableJson(submitted);
       await controller.launch({ sender: owner.webContents }, args);
       const different = structuredClone(args);
       different.plan = buildInterviewPlan({ question: 'Tell me about improving onboarding conversion.', profile: profile(), snapshotId: SNAPSHOT });
       await controller.launch({ sender: owner.webContents }, different);
-      // get-brief additionally reports the main-owned pin; it is not part of the rail.
-      const { alwaysOnTop: pinned, ...shown } = controller.getBrief({ sender: child.webContents });
-      assert(pinned === true && stableJson(shown) === lockedRail, 'null or different parent relaunches must preserve a supported child-created rail until Next question');
+      assert(stableJson(controller.getBrief({ sender: child.webContents })) === lockedRail, 'null or different parent relaunches must preserve a supported rail created from a detected question until the next one');
     },
   },
   {
@@ -529,7 +458,7 @@ export default [
     async run() {
       const original = brief(); const changedBrief = structuredClone(original);
       changedBrief.createdAt = '2026-10-08T01:00:00.000Z'; changedBrief.role.title = 'Changed by parent'; signBrief(changedBrief);
-      const { owner, controller, args } = makeController({ storedBrief: original, loadPreparedBrief: memoryPreparedBriefs(original, changedBrief) });
+      const { owner, controller, unlock, args } = makeController({ storedBrief: original, loadPreparedBrief: memoryPreparedBriefs(original, changedBrief) });
       await controller.launch({ sender: owner.webContents }, args);
       const child = controller.sessions.get(owner.id).child;
       const lockedRail = stableJson(controller.getBrief({ sender: child.webContents }));
@@ -541,21 +470,21 @@ export default [
       const different = structuredClone(args);
       different.plan = buildInterviewPlan({ question: 'Tell me about improving onboarding conversion.', profile: profile(), snapshotId: SNAPSHOT });
       await controller.launch({ sender: owner.webContents }, different);
-      assert(stableJson(controller.getBrief({ sender: child.webContents })) === lockedRail, 'null or different parent relaunches must preserve a canvas-created supported rail until Next question');
-      await controller.nextQuestion({ sender: child.webContents });
+      assert(stableJson(controller.getBrief({ sender: child.webContents })) === lockedRail, 'null or different parent relaunches must preserve a canvas-created supported rail until the next question');
+      await unlock();
       await controller.launch({ sender: owner.webContents }, nullRelaunch);
-      assert(controller.getBrief({ sender: child.webContents }).plan === null && controller.getBrief({ sender: child.webContents }).briefing.role.title === 'Changed by parent', 'parent updates may apply after the authenticated child advances');
+      assert(controller.getBrief({ sender: child.webContents }).plan === null && controller.getBrief({ sender: child.webContents }).briefing.role.title === 'Changed by parent', 'parent updates may apply once the rail is unlocked');
     },
   },
   {
-    name: 'interview window: next question suppresses an exact stale canvas plan until it changes',
+    name: 'interview window: moving on suppresses an exact stale canvas plan until it changes',
     async run() {
-      const { owner, controller, args } = makeController();
+      const { owner, controller, unlock, args } = makeController();
       await controller.launch({ sender: owner.webContents }, args);
       const child = controller.sessions.get(owner.id).child;
-      await controller.nextQuestion({ sender: child.webContents });
+      await unlock();
       await controller.launch({ sender: owner.webContents }, args);
-      assert(controller.getBrief({ sender: child.webContents }).plan === null, 'the exact canvas plan dismissed by Next question must not resurrect on parent relaunch');
+      assert(controller.getBrief({ sender: child.webContents }).plan === null, 'the exact canvas plan retired by a later question must not resurrect on parent relaunch');
       const fresh = structuredClone(args);
       fresh.plan = buildInterviewPlan({ question: 'Tell me about improving onboarding conversion.', profile: profile(), snapshotId: SNAPSHOT });
       await controller.launch({ sender: owner.webContents }, fresh);
@@ -565,14 +494,13 @@ export default [
   {
     name: 'interview window: unsupported lookup remains unlocked for an immediate truthful retry',
     async run() {
-      const { owner, controller, args } = makeController();
+      const { owner, controller, ask, args } = makeController();
       args.plan = null;
       await controller.launch({ sender: owner.webContents }, args);
-      const child = [...controller.sessions.values()][0].child;
-      const unsupported = await controller.submitQuestion({ sender: child.webContents }, 'How do you negotiate a real-estate lease?');
+      const unsupported = await ask('How do you negotiate a real-estate lease?');
       assert(unsupported.plan.status === 'unsupported', 'no-fit lookup should display the truthful unsupported result');
-      const supported = await controller.submitQuestion({ sender: child.webContents }, 'How did you improve onboarding conversion?');
-      assert(supported.plan.status === 'supported', 'unsupported result must leave the authenticated child unlocked for another question');
+      const supported = await ask('How did you improve onboarding conversion?');
+      assert(supported.plan.status === 'supported', 'unsupported result must leave the rail unlocked for another question');
     },
   },
   {
@@ -647,36 +575,6 @@ export default [
       } finally {
         FakeWindow.loadURLHandler = null;
       }
-    },
-  },
-  {
-    name: 'interview window: later question submissions fence slower earlier snapshot reads',
-    async run() {
-      const owner = new FakeWindow();
-      const pending = [];
-      let initial = true;
-      const storedBrief = brief(); const briefRecordId = interviewPreparedBriefRecordId(storedBrief);
-      const controller = createInterviewWindowController({ BrowserWindow: FakeWindow, ipcMain: { handle() {} }, registerIpc: false,
-        isAuthorizedOwner: value => value === owner,
-        loadSnapshot: () => initial ? Promise.resolve(profile()) : new Promise(resolve => pending.push(resolve)),
-        loadBundle: async args => ({ artifactId: args.artifactId, applicationArtifactDigest: 'd'.repeat(64) }),
-        loadPreparedBrief: async args => args.briefRecordId === briefRecordId && stableJson(args.brief) === stableJson(storedBrief) ? storedBrief : null,
-        devServerUrl: 'http://localhost:5173/' });
-      const question = 'How did you improve onboarding conversion?';
-      await controller.launch({ sender: owner.webContents }, { nodeId: 'interview_node_1', snapshotId: SNAPSHOT, jobUrl: JOB_URL, briefRecordId, brief: storedBrief, plan: null, currentStep: 0 });
-      initial = false;
-      const child = [...controller.sessions.values()][0].child;
-      const early = controller.submitQuestion({ sender: child.webContents }, question);
-      const lateQuestion = 'Tell me about improving onboarding conversion.';
-      const late = controller.submitQuestion({ sender: child.webContents }, lateQuestion);
-      pending[1](profile()); await late;
-      pending[0](profile()); await early;
-      assert(controller.getBrief({ sender: child.webContents }).plan.question === 'Tell me about improving onboarding conversion', 'older delayed submit must not overwrite the latest question result');
-      const replacement = controller.submitQuestion({ sender: child.webContents }, question);
-      assert(pending.length === 3, 'an explicit new submission must be honoured even when an answer is locked');
-      pending[2](profile());
-      const replaced = await replacement;
-      assert(replaced.question === question && replaced.plan.status === 'supported', 'explicit replacement must resolve with the requested answer');
     },
   },
   {
@@ -758,7 +656,7 @@ export default [
   {
     name: 'interview window: another helper node cannot silently claim a locked rail',
     async run() {
-      const { owner, controller, args } = makeController();
+      const { owner, controller, unlock, args } = makeController();
       await controller.launch({ sender: owner.webContents }, args);
       const session = controller.sessions.get(owner.id);
       const child = session.child;
@@ -769,13 +667,13 @@ export default [
       assert(session.nodeId === 'interview_node_1' && stableJson(controller.getBrief({ sender: child.webContents })) === lockedRail && child.focused, 'the locked rail and its node identity must be preserved and surfaced');
       const same = await controller.launch({ sender: owner.webContents }, args);
       assert(same.ok && same.reused, 'a same-node relaunch over its own locked rail keeps the reuse contract');
-      await controller.nextQuestion({ sender: child.webContents });
+      await unlock();
       const retargeted = await controller.launch({ sender: owner.webContents }, secondArgs);
       assert(retargeted.reused && controller.sessions.get(owner.id).nodeId === 'interview_node_2', 'once unlocked, another node may retarget the companion');
     },
   },
   {
-    name: 'interview window: loader failures never cross IPC with local paths',
+    name: 'interview window: launch loader failures never cross IPC with local paths',
     async run() {
       const leak = "EACCES: permission denied, open '/Users/someone/Library/Application Support/app/store/x.json'";
       const failing = async () => { throw new Error(leak); };
@@ -790,14 +688,6 @@ export default [
         assert(error && error.message === expected && !leaks(error.message), `${label} loader failure must reject launch with a fixed message`);
         assert(controller.sessionCount() === 0, `${label} loader failure must not create a session`);
       }
-      let fail = false;
-      const { owner, controller, args } = makeController({ loadSnapshot: async () => { if (fail) throw new Error(leak); return profile(); } });
-      args.plan = null;
-      await controller.launch({ sender: owner.webContents }, args);
-      fail = true;
-      const child = controller.sessions.get(owner.id).child;
-      const submitError = await controller.submitQuestion({ sender: child.webContents }, 'How did you improve onboarding conversion?').then(() => null, value => value);
-      assert(submitError && submitError.message === 'Interview Window snapshot is unavailable.' && !leaks(submitError.message), 'a child submission must not receive raw snapshot reader errors');
     },
   },
   {
@@ -809,14 +699,14 @@ export default [
         value.profile.achievements[0].claim = `Improved onboarding conversion through a simpler set${softHyphen}up flow.`;
         return value;
       };
-      const { owner, controller, args } = makeController({ loadSnapshot: async () => withFormattedCue() });
+      const { owner, controller, ask, args } = makeController({ loadSnapshot: async () => withFormattedCue() });
       args.plan = null;
       await controller.launch({ sender: owner.webContents }, args);
       const child = controller.sessions.get(owner.id).child;
-      const display = await controller.submitQuestion({ sender: child.webContents }, 'How did you improve onboarding conversion?');
+      const display = await ask('How did you improve onboarding conversion?');
       assert(display.plan.status === 'unsupported' && /cannot display safely/u.test(display.plan.message) && display.plan.steps.length === 0, 'an undisplayable matching cue must produce a truthful unsupported state');
       assert(child.webContents.sent.at(-1)?.value === display, 'the child must be told about the unsupported state');
-      const retry = await controller.submitQuestion({ sender: child.webContents }, 'How did you improve onboarding conversion?');
+      const retry = await ask('How did you improve onboarding conversion?');
       assert(retry.plan.status === 'unsupported', 'the session must stay unlocked for another question');
     },
   },
@@ -877,13 +767,12 @@ export default [
     },
   },
   {
-    name: 'interview window: a same-node relaunch over a locked rail keeps the newer brief and snapshot for Next question',
+    name: 'interview window: a same-node relaunch over a locked rail keeps the newer brief and snapshot for the next detected question',
     async run() {
       const original = brief();
       const SNAPSHOT_B = 'b'.repeat(64);
       const updatedBrief = structuredClone(original); updatedBrief.createdAt = '2026-10-08T02:00:00.000Z'; updatedBrief.role.title = 'Senior Product Manager (re-prepared)'; updatedBrief.inputs.careerSnapshotId = SNAPSHOT_B; signBrief(updatedBrief);
-      const loaded = [];
-      const { owner, controller, args } = makeController({ storedBrief: original, loadPreparedBrief: memoryPreparedBriefs(original, updatedBrief), loadSnapshot: async ({ snapshotId }) => { loaded.push(snapshotId); const value = profile(); value.snapshotId = snapshotId; if (snapshotId === SNAPSHOT_B) value.profile.roles[0].title = 'Staff Product Manager'; return value; } });
+      const { owner, controller, ask, unlock, args } = makeController({ storedBrief: original, loadPreparedBrief: memoryPreparedBriefs(original, updatedBrief), loadSnapshot: async ({ snapshotId }) => { const value = profile(); value.snapshotId = snapshotId; if (snapshotId === SNAPSHOT_B) value.profile.roles[0].title = 'Staff Product Manager'; return value; } });
       await controller.launch({ sender: owner.webContents }, args);
       const child = [...controller.sessions.values()][0].child;
       assert(controller.getBrief({ sender: child.webContents }).plan?.status === 'supported', 'fixture must start with a locked canvas rail');
@@ -891,109 +780,31 @@ export default [
       const result = await controller.launch({ sender: owner.webContents }, relaunch);
       const shown = controller.getBrief({ sender: child.webContents });
       assert(result.reused && shown.plan?.status === 'supported' && shown.briefing.role.title === 'Product Manager', 'the locked rail and its brief stay in place until the child advances');
-      const advanced = await controller.nextQuestion({ sender: child.webContents });
-      assert(advanced.plan === null && advanced.briefing.role.title === 'Senior Product Manager (re-prepared)', `Next question must show the brief from the relaunch, got ${advanced.briefing.role.title}`);
-      await controller.submitQuestion({ sender: child.webContents }, 'How did you improve onboarding conversion?');
-      assert(loaded.at(-1) === SNAPSHOT_B, 'later questions must read the relaunched career snapshot');
+      const advanced = await unlock();
+      assert(advanced.briefing.role.title === 'Senior Product Manager (re-prepared)', `the next detected question must show the brief from the relaunch, got ${advanced.briefing.role.title}`);
+      await ask('How did you improve onboarding conversion?');
+      assert([...controller.sessions.values()][0].snapshotId === SNAPSHOT_B, 'later questions must use the relaunched career snapshot');
       // An unlocked relaunch clears any deferred parent state.
       const session = [...controller.sessions.values()][0];
-      await controller.nextQuestion({ sender: child.webContents });
+      await unlock();
       await controller.launch({ sender: owner.webContents }, relaunch);
       assert(session.pendingParent === null, 'an applied relaunch leaves nothing deferred');
     },
   },
   {
-    name: 'interview window: a parent relaunch onto a new snapshot supersedes an in-flight question instead of failing it',
-    async run() {
-      const SNAPSHOT_B = 'b'.repeat(64);
-      const original = brief();
-      const updatedBrief = structuredClone(original); updatedBrief.inputs.careerSnapshotId = SNAPSHOT_B; signBrief(updatedBrief);
-      const pending = [];
-      let gateReads = false;
-      const { owner, controller, args } = makeController({ storedBrief: original, loadPreparedBrief: memoryPreparedBriefs(original, updatedBrief), loadSnapshot: async ({ snapshotId }) => {
-        if (gateReads) await new Promise(resolve => pending.push(resolve));
-        const value = profile(); value.snapshotId = snapshotId; return value;
-      } });
-      await controller.launch({ sender: owner.webContents }, { ...args, plan: null });
-      const child = [...controller.sessions.values()][0].child;
-      gateReads = true;
-      const early = controller.submitQuestion({ sender: child.webContents }, 'How did you improve onboarding conversion?').then(display => ({ display }), error => ({ error }));
-      await new Promise(resolve => setImmediate(resolve));
-      gateReads = false;
-      await controller.launch({ sender: owner.webContents }, { ...structuredClone(args), plan: null, snapshotId: SNAPSHOT_B, brief: updatedBrief, briefRecordId: interviewPreparedBriefRecordId(updatedBrief) });
-      pending[0]();
-      const outcome = await early;
-      assert(!outcome.error && outcome.display.ignored === true && outcome.display.reason === 'superseded' && outcome.display.message,
-        `a superseded question must return an explicit ignored result, got ${outcome.error?.message}`);
-      // A genuine loader failure that is NOT superseded still surfaces.
-      let failReads = false;
-      const failing = makeController({ loadSnapshot: async () => { if (failReads) throw new Error('/Users/private/path: EACCES'); return profile(); } });
-      await failing.controller.launch({ sender: failing.owner.webContents }, { ...failing.args, plan: null });
-      failReads = true;
-      const failingChild = [...failing.controller.sessions.values()][0].child;
-      const rejected = await failing.controller.submitQuestion({ sender: failingChild.webContents }, 'How did you improve onboarding conversion?').then(() => null, error => error);
-      assert(rejected && rejected.message === 'Interview Window snapshot is unavailable.', 'an unsuperseded loader failure still reports the fixed message');
-    },
-  },
-  {
     name: 'interview window: a Next-question dismissal belongs to its node and never hides another helper’s genuine rail',
     async run() {
-      const { owner, controller, args } = makeController();
+      const { owner, controller, unlock, args } = makeController();
       await controller.launch({ sender: owner.webContents }, args);
       const child = [...controller.sessions.values()][0].child;
-      await controller.nextQuestion({ sender: child.webContents });
+      await unlock();
       const otherNode = { ...structuredClone(args), nodeId: 'interview_node_2' };
       const result = await controller.launch({ sender: owner.webContents }, otherNode);
       const shown = controller.getBrief({ sender: child.webContents });
       assert(result.reused && shown.plan?.status === 'supported' && [...controller.sessions.values()][0].nodeId === 'interview_node_2', 'the same question on another helper is a new rail, not a dismissed one');
-      await controller.nextQuestion({ sender: child.webContents });
+      await unlock();
       await controller.launch({ sender: owner.webContents }, otherNode);
       assert(controller.getBrief({ sender: child.webContents }).plan === null, 'the dismissal still holds for the node that dismissed it');
-    },
-  },
-  {
-    name: 'interview window: a submit with no session is not reported as an invalid question',
-    async run() {
-      const { owner, controller, args } = makeController();
-      args.plan = null;
-      await controller.launch({ sender: owner.webContents }, args);
-      const child = [...controller.sessions.values()][0].child;
-      const reason = (sender, value) => controller.submitQuestion({ sender }, value).then(() => null, error => error.message);
-      assert(await reason(child.webContents, '   ') === 'Interview question is invalid.' && await reason(child.webContents, '') === 'Interview question is invalid.'
-        && await reason(child.webContents, 'x'.repeat(2001)) === 'Interview question is invalid.' && await reason(child.webContents, 42) === 'Interview question is invalid.',
-      'blank, over-long and non-string questions keep the validation reason');
-      assert(await reason(owner.webContents, 'How did you improve onboarding conversion?') === 'Interview session is not available.', 'a sender with no session must get its own reason');
-      assert(await reason(null, '   ') === 'Interview session is not available.', 'a missing session is reported before the question is judged');
-      const accepted = await controller.submitQuestion({ sender: child.webContents }, 'a'.repeat(2000));
-      assert(typeof accepted.plan?.status === 'string', 'a question of exactly 2000 characters is still accepted');
-    },
-  },
-  {
-    name: 'interview window: the always-on-top pin is main-owned and only the get-brief read reports it',
-    async run() {
-      const { owner, controller, args } = makeController();
-      args.plan = null;
-      await controller.launch({ sender: owner.webContents }, args);
-      const child = [...controller.sessions.values()][0].child;
-      assert(controller.getBrief({ sender: child.webContents }).alwaysOnTop === true, 'a fresh companion opens pinned');
-      assert(controller.setAlwaysOnTop({ sender: owner.webContents }, true) === false && child.alwaysOnTop === true && controller.getBrief({ sender: child.webContents }).alwaysOnTop === true, 'only the child may change its own pin');
-      assert(controller.setAlwaysOnTop({ sender: child.webContents }, 'yes') === false && child.alwaysOnTop === true && controller.getBrief({ sender: child.webContents }).alwaysOnTop === true, 'only a boolean is accepted');
-      assert(controller.setAlwaysOnTop({ sender: child.webContents }, true) === true && child.alwaysOnTop === true && child.alwaysOnTopLevel === 'floating'
-        && child.visibleOnAllWorkspaces === true && child.visibleOnAllWorkspacesOptions?.visibleOnFullScreen === true, 're-pinning restores the floating level and all-workspace visibility');
-      // A reloaded page asks again and must see the native truth, whatever its React state was.
-      assert(controller.getBrief({ sender: child.webContents }).alwaysOnTop === true, 'get-brief must report the pin after a page reload');
-      const submitted = await controller.submitQuestion({ sender: child.webContents }, 'How did you improve onboarding conversion?');
-      assert(controller.getBrief({ sender: child.webContents }).alwaysOnTop === true, 'the pin survives a question submission');
-      const advanced = await controller.nextQuestion({ sender: child.webContents });
-      assert(controller.getBrief({ sender: child.webContents }).alwaysOnTop === true, 'the pin survives Next question');
-      assert(!('alwaysOnTop' in submitted) && !('alwaysOnTop' in advanced) && child.webContents.sent.every(item => !('alwaysOnTop' in item.value)), 'the pin is read on get-brief only, never added to submit, next or brief-updated payloads');
-      controller.setAlwaysOnTop({ sender: child.webContents }, false);
-      assert(controller.getBrief({ sender: child.webContents }).alwaysOnTop === false && child.alwaysOnTop === false && child.alwaysOnTopLevel === undefined
-        && child.visibleOnAllWorkspaces === false && child.contentProtection === true, 'unpinning drops always-on-top and workspace visibility while content protection stays on');
-      controller.setAlwaysOnTop({ sender: child.webContents }, true);
-      assert(child.alwaysOnTop === true && child.alwaysOnTopLevel === 'floating' && child.visibleOnAllWorkspaces === true
-        && child.visibleOnAllWorkspacesOptions?.visibleOnFullScreen === true && child.contentProtection === true, 'pinning again restores the floating overlay without ever relaxing content protection');
-      assert(controller.getBrief({ sender: owner.webContents }) === null, 'the canvas still cannot read the child display');
     },
   },
   {

@@ -1,6 +1,7 @@
 import { runInNewContext } from 'node:vm';
 import { assert, canonicalizeGeneratedUntrustedBoundaryNonces, RESEARCH_MIN_FIT_SCORE, compensationAssessmentCacheMatchesResearch, compensationCohortAssessmentFits, compensationCohortAssessmentMaxTokens, compensationResearchFingerprint, buildRoleFamilyBatchResearchPrompt, getRoleFamilyExperienceBandCache, packCompensationAssessmentBatches, packCompensationResearchBatches, parseCompensationResearchSections, planRoleFamilyAssessmentBatches, planRoleFamilyResearchBatches, roleFamilyAssessmentMaxTokens, saveRoleFamilyExperienceBandsBatch, tryGetStore, validateCompensationEvidenceBatchSubmission, validateRoleFamilyExperienceBandsBatchSubmission } from '../test-dependencies.js';
 import { readFileSync } from 'node:fs';
+import { readJobsSource } from './jobsSourceFixture.mjs';
 import { JOB_COMPENSATION_METHOD_VERSION } from '../../src/utils/jobCompensationVersion.js';
 import { buildCompensationAssessmentListings, buildCompensationPersonalSalaryEvidence, buildCompensationResearchPrompt, compensationContextForSalary, compensationPersonalizationSignature, compensationResearchCacheKey, COMPENSATION_RESEARCH_PROMPT_VERSION, researchCompensationAssessments, resolveCompensationCareerInputs } from '../../electron/ipc/jobs.js';
 import { createDependencyReadyQueue, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
@@ -258,7 +259,7 @@ export default [{
 }, {
   name: 'Missing or failed role-band evidence still reaches grounded listing-level salary research without inventing a ladder',
   run() {
-    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const source = readJobsSource('compensationResearch');
     const helperStart = source.indexOf('function unavailableExperienceBandsError(');
     const helperEnd = source.indexOf('async function runFreshRoleFamilyPipeline', helperStart);
     const unavailable = runInNewContext(`(function(){ ${source.slice(helperStart, helperEnd)} return unavailableExperienceBandsError; })()`);
@@ -365,7 +366,7 @@ export default [{
     };
     const roleAssessmentAt = await exercise('role-family', 11, 3);
     const compensationAssessmentAt = await exercise('compensation', 12, 2);
-    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const source = readJobsSource('compensationResearch');
     assert(source.includes('async function runFreshRoleFamilyPipeline')
       && source.includes('async function runFreshCompensationPipeline')
       && source.match(/queue\.add\(\{ kind: 'assessment', assessmentBatch \}, \{ front: true \}\)/g)?.length === 2,
@@ -468,7 +469,7 @@ export default [{
       }] }, requests, cohortSections);
       foreignSourceLinkAccepted = accepted.get(cohortId)?.[0]?.sourceLinks?.[0] === 'https://salary.example.test/design';
     } catch { foreignSourceLinkAccepted = false; }
-    const jobsSource = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const jobsSource = readJobsSource('compensationResearch');
     const normalizerStart = jobsSource.indexOf('function applyCompensationEvidenceToGroup(');
     const normalizerEnd = jobsSource.indexOf('\nasync function processCompensationCohortBatches(', normalizerStart);
     const normalizer = jobsSource.slice(normalizerStart, normalizerEnd);
@@ -630,7 +631,7 @@ export default [{
 }, {
   name: 'Compensation batching uses bounded multi-batch task IDs and no one-item task IDs remain',
   run: () => {
-    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const source = readJobsSource('compensationResearch');
     // Derived from the raw-research envelope (2,048 base; 1,800 per role family; 3,000 per cohort).
     assert(ROLE_FAMILY_HANDOFF_BATCH_SIZE === Math.floor((BATCH_OUTPUT_TOKEN_BUDGET - 2048) / 1800)
       && COMPENSATION_COHORT_HANDOFF_BATCH_SIZE === Math.floor((BATCH_OUTPUT_TOKEN_BUDGET - 2048) / 3000)
@@ -893,9 +894,10 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     });
     assert(aborted.size === 0 && abortedReads === 0 && interrupted.size === 0,
       'a cancelled salary pass neither starts nor commits career reads after cancellation');
-    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
-    const handlerStart = source.indexOf("handleSafe('research-job-compensation'");
-    const handler = source.slice(handlerStart, source.indexOf("handleSafe(", handlerStart + 1));
+    const source = readJobsSource('jobs');
+    const boardSource = readJobsSource('boardHandlers');
+    const handlerStart = boardSource.indexOf("handleSafe('research-job-compensation'");
+    const handler = boardSource.slice(handlerStart, boardSource.indexOf("handleSafe(", handlerStart + 1));
     assert(handlerStart >= 0 && handler.includes('await resolveBoardCompensationCareerInputs(jobs, { signal, salaryCareerSnapshotId })')
       && source.includes('dependencies.resolveCompensationCareerInputs || resolveCompensationCareerInputs')
       && handler.includes('signal, careerInputs, salaryCareerSnapshotId'),
@@ -984,7 +986,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
       && /Employer-advertised pay bands are always reported as published/u.test(prompt)
       && /Never compute, average, or invent percentiles/u.test(prompt),
     'the research prompt forbids extreme spreads, rewriting advertised bands and invented percentiles');
-    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const source = readJobsSource('compensationResearch');
     const extractionStart = source.indexOf('Extract comparable cash-salary evidence for every independent cohort below.');
     const extractionEnd = source.indexOf('${PERSONAL_SALARY_GUIDANCE_PROMPT}', extractionStart);
     const extractionPrompt = source.slice(extractionStart, extractionEnd);
@@ -1044,7 +1046,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
       compensationPersonalizationSignature(value) !== originalSignature)
       && compensationPersonalizationSignature(unrelated) === originalSignature,
     'career quotes, primary-record identity and listing evidence invalidate personal assessments; unrelated card state cannot do so');
-    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const source = readJobsSource('compensationResearch');
     const start = source.indexOf('function compensationResearchParametersForGroup(');
     const end = source.indexOf('function applyCompensationEvidenceToGroup(', start);
     const research = runInNewContext(`(function(){ ${source.slice(start, end)} return { parameters: compensationResearchParametersForGroup, prompt: buildCompensationResearchPrompt }; })()`, {
@@ -1075,7 +1077,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
       && listings[0].offeredAnnualMin === null && listings[1].offeredAnnualMax === 125000
       && !JSON.stringify(listings).includes('PRIVATE RAW CAREER') && !JSON.stringify(listings).includes('private'),
     'each exact listing index carries only the approved evidence packet and salary facts, never a renderer-supplied raw career record');
-    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const source = readJobsSource('compensationResearch');
     const start = source.indexOf('const assessBatch = async (batch, sections', source.indexOf('async function processCompensationCohortBatches('));
     const end = source.indexOf('let refreshRawBatch = null', start);
     const assessmentPrompt = source.slice(start, end);
@@ -1107,7 +1109,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
       index, comparableRanges: [range], justification: 'Comparable salary research.',
       ...(index < 2 ? { personalRecommendation: personal } : index === 4 ? { personalRecommendation: { ...personal, desiredSalary: 999999 } } : {}),
     }));
-    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const source = readJobsSource('compensationResearch');
     const start = source.indexOf('function applyCompensationEvidenceToGroup(');
     const end = source.indexOf('async function runFreshCompensationPipeline(', start);
     const apply = runInNewContext(`(function(){ ${source.slice(start, end)} return applyCompensationEvidenceToGroup; })()`, {
@@ -1150,7 +1152,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
 }, {
   name: 'Role-family experience-band lookup keeps grounded research separate from schema extraction',
   run: () => {
-    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const source = readJobsSource('compensationResearch');
     const start = source.indexOf('async function getExperienceBandsForRoleFamilies');
     const end = source.indexOf('\n/**\n * Research cash salary', start);
     const resolver = source.slice(start, end);
@@ -1566,7 +1568,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
 }, {
   name: 'Personal recommendation validation and the saved verdict share one uncapped evidence set',
   run: () => {
-    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const source = readJobsSource('compensationResearch');
     const uncappedSelections = source.match(/const comparable = selectComparableEvidence\(\s*sourcesPresentInGroundedResearch\((?:assessment|answer)\??\.comparableRanges \|\| \[\], (?:section|research)\),\s*undefined,\s*item\.marketCurrency,?\s*\);/g) || [];
     assert(uncappedSelections.length === 2 && !source.includes('item.locationSource ? 4 : 5'),
       `both the personal-recommendation validation and the verdict must select the same uncapped evidence set, got ${uncappedSelections.length}`);
@@ -1587,7 +1589,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     assert(snapshotSource.includes('Of the fit-qualified jobs, skipped before market research: ${rec(c.skippedNoLocation)} with no resolvable location, ${rec(c.skippedNoCurrency)} with no resolvable market currency')
       && snapshotSource.includes('${rec(c.preResearchCandidates)} passed to experience-band/cohort preparation'),
     'location/currency skips must be labeled as nested pre-research filters, so they are not added to the below-threshold count');
-    const jobsSource = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const jobsSource = readJobsSource('compensationResearch');
     assert(/scoredInput:\s*total,[\s\S]*?eligible,[\s\S]*?preResearchCandidates:\s*candidates\.length,/.test(jobsSource),
       'compensation telemetry must retain the reconciled input and post-salary/location candidate counts');
     return { stagedFunnel: true };
@@ -1734,7 +1736,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     assert(/whenever any useful source's currency differs from targetCurrency, also cite one current exchange-rate source for that currency pair/u.test(prompt)
       && /give the direct URL, the rate, a short verbatim quote, and its date/u.test(prompt),
     'the research prompt must require a dated exchange-rate source when a useful source publishes another currency');
-    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const source = readJobsSource('compensationResearch');
     const extractionStart = source.indexOf('Extract comparable cash-salary evidence for every independent cohort below.');
     const extractionEnd = source.indexOf('${PERSONAL_SALARY_GUIDANCE_PROMPT}', extractionStart);
     const extractionPrompt = source.slice(extractionStart, extractionEnd);

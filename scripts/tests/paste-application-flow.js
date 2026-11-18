@@ -3,7 +3,7 @@ import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, AR
 import { EMPTY_JOB_LISTING_BODY_NOTE, ORIGINAL_JOB_LISTING_BODY_HEADING } from '../../electron/ipc/applicationBundle.js';
 import { _resetPasteHandoffDiagnostics} from '../../electron/ipc/pasteHandoffDiagnostics.js';
 import { CAREER_DATA_ROLE_SECTION_RULE, CAREER_TERM_OVERLAP_RULE, MIN_SHARED_CAREER_TERMS,   NEUTRAL_SKILL_GROUP_LABELS, NEUTRAL_SKILL_GROUP_RULE, POSTING_NAMED_SKILLS_RULE,  SKILL_ITEM_FILTERABLE_RULE, SKILL_ITEM_GROUNDING_RULE, SKILLS_BLOCK_BUDGET_RULE, SKILLS_BLOCK_PRESENCE_RULE, STRUCTURED_RESUME_ID_PATTERN, STRUCTURED_RESUME_LIMITS } from '../../electron/ipc/structuredResume.js';
-import { ADJACENT_SENTENCE_SHAPE_RULE, LETTER_PROPORTION_RULE, MIN_STANDALONE_SENTENCE_PARAGRAPH_ALLOWANCE, ARGUMENT_CLAIM_SPAN_RULE, ARGUMENT_LATER_RELEVANCE_SPAN_RULE, EXPLICIT_CLAIM_BUDGET_RULE, EXPLICIT_RELEVANCE_BUDGET_RULE, EXPLICIT_TRANSFER_BUDGET_RULE, TRANSFER_BENEFIT_SUPPORT_RULE, ARGUMENT_MAPPING_REQUIRED_RULE, ARGUMENT_SPAN_ALIGNMENT_RULE, ARGUMENT_PROOF_SPAN_RULE, ARGUMENT_RELEVANCE_SPAN_RULE, COVER_LETTER_EQUIVALENCE_CARRIERS, COVER_LETTER_LOGISTICS_PROMISE_CLASSES, COVER_LETTER_SALIENT_ECHO_PHRASES, DURATION_CLAIM_SHAPE_RULE, MAX_LETTER_FIGURES, MAX_LETTER_OFF_POSTING_TOOLS, MAX_PARAGRAPH_OFF_POSTING_TOOLS, MAX_SENTENCE_WORDS, MIN_ANCHOR_RELEVANCE_CORPUS_WORDS, MIN_ROLE_THESIS_WORDS, MIN_SHARED_SHAPE_PARAGRAPHS, DANGLING_DEMONSTRATIVE_RULE, REPEATED_PHRASE_RULE, REPEATED_TRANSFER_CARRIER_RULE, SENTENCE_SHAPE_FRAME_WORDS, SHARED_SENTENCE_SHAPE_CEILING_RULE, PAST_PROOF_VERBS, REDUNDANCY_SHINGLE_WORDS } from '../../electron/ipc/coverLetterChecks.js';
+import { LETTER_PROPORTION_RULE, MIN_STANDALONE_SENTENCE_PARAGRAPH_ALLOWANCE, ARGUMENT_CLAIM_SPAN_RULE, ARGUMENT_LATER_RELEVANCE_SPAN_RULE, EXPLICIT_CLAIM_BUDGET_RULE, EXPLICIT_RELEVANCE_BUDGET_RULE, EXPLICIT_TRANSFER_BUDGET_RULE, TRANSFER_BENEFIT_SUPPORT_RULE, ARGUMENT_MAPPING_REQUIRED_RULE, ARGUMENT_SPAN_ALIGNMENT_RULE, ARGUMENT_PROOF_SPAN_RULE, ARGUMENT_RELEVANCE_SPAN_RULE, COVER_LETTER_EQUIVALENCE_CARRIERS, COVER_LETTER_LOGISTICS_PROMISE_CLASSES, DURATION_CLAIM_SHAPE_RULE, MAX_LETTER_FIGURES, MAX_LETTER_OFF_POSTING_TOOLS, MAX_PARAGRAPH_OFF_POSTING_TOOLS, MAX_SENTENCE_WORDS, MIN_ANCHOR_RELEVANCE_CORPUS_WORDS, MIN_ROLE_THESIS_WORDS, REPEATED_PHRASE_RULE, PAST_PROOF_VERBS, REDUNDANCY_SHINGLE_WORDS } from '../../electron/ipc/coverLetterChecks.js';
 import {  MAX_UNIT_CAREER_DATA_QUOTES } from '../../electron/ipc/pasteApplicationAssembly.js';
 import {  RESUME_BULLET_CHARACTER_BUDGET } from '../../electron/ipc/jobApplication.js';
 
@@ -239,78 +239,7 @@ const COVER_LETTER_DISCLOSURE_SCENARIOS = [
     control: [`${BATTERY_LEAD} ${batterySentenceOf(MAX_SENTENCE_WORDS)}`],
   },
   {
-    clause: 'an opening demonstrative with no referent in the paragraph before',
-    paragraphs: [
-      `${BATTERY_LEAD} ${BATTERY_BODY}`,
-      'That evaluation practice gave me the habit of checking a change before it reached the people who depend on it.',
-    ],
-    rejectedBy: 'opening-demonstrative',
-    control: [
-      `${BATTERY_LEAD} ${BATTERY_BODY}`,
-      'That deployment practice gave me the habit of checking a change before it reached the people who depend on it.',
-    ],
-  },
-  {
-    // A writer who reaches for the same stock transfer frame every time closes
-    // every paragraph on one shape. The relevance rule asks for no frame at all
-    // (the one paragraph that owes a sentence about the target words it as it
-    // likes), and the control here is the proof that the rules are satisfiable
-    // together: the repair drops the lead paragraph's frame and words the last
-    // paragraph's relevance in its own terms, which the transfer budget (at most
-    // one paragraph carries a stock frame) asks for as well.
-    clause: 'one closing shape repeated through the letter',
-    paragraphs: [
-      `${BATTERY_LEAD} ${BATTERY_BODY} I would apply that experience to the reliable system delivery this role needs.`,
-      'My delivery practice covers the deployment step itself. I scripted that step so a colleague could repeat it without me present during the change window. I would bring that practice to the reliable system delivery this role needs.',
-      'My delivery judgment covers the colleagues who depend on the service. I wrote the weekly runbook the rotation followed. I would apply that judgment to the reliable system delivery this role needs.',
-    ],
-    rejectedBy: 'repeated-sentence-shape',
-    control: [
-      `${BATTERY_LEAD} ${BATTERY_BODY}`,
-      'My delivery practice covers the deployment step itself. I scripted that step so a colleague could repeat it without me present during the change window. That practice would support reliable system delivery in the role you are filling.',
-      'My delivery judgment covers the colleagues who depend on the service. I wrote the weekly runbook the rotation followed. This role needs the same judgment for reliable system delivery.',
-    ],
-  },
-  {
-    // The same rule read away from the closings. The live letter of
-    // 2026-09-21 cleared the closing-only reading by rotating two closings
-    // and went on entering every paragraph's evidence with one frame, so the
-    // clause now says every sentence is read and this pair measures that
-    // through the real stage: the rejected letter and the repair differ only
-    // in the shape of two middle sentences, and every closing is identical
-    // across the two.
-    clause: 'one evidence-sentence shape repeated through the letter',
-    paragraphs: [
-      `${BATTERY_LEAD} ${BATTERY_BODY} I would apply that experience to the reliable system delivery this role needs.`,
-      'My delivery practice covers the deployment step itself. In my engineering role at Acme, I scripted that step so a colleague could repeat it without me present during the change window. That practice would support reliable system delivery in the role you are filling.',
-      'My delivery judgment covers the colleagues who depend on the service. In my engineering role at Acme, I wrote the weekly runbook the rotation followed. This role needs the same judgment for reliable system delivery.',
-    ],
-    rejectedBy: 'repeated-sentence-shape',
-    control: [
-      `${BATTERY_LEAD} ${BATTERY_BODY}`,
-      'My delivery practice covers the deployment step itself. I scripted that step so a colleague could repeat it without me present during the change window. That practice would support reliable system delivery in the role you are filling.',
-      'My delivery judgment covers the colleagues who depend on the service. I wrote the weekly runbook the rotation followed. This role needs the same judgment for reliable system delivery.',
-    ],
-  },
-  {
-    // No rule requires a stock transfer frame, so a writer who reaches for one
-    // form in the paragraph right after has complied with nothing. Both
-    // paragraphs below hand their proof over on one form, and the repair drops
-    // the first paragraph's carrier, which also leaves the letter inside the
-    // transfer budget (at most one paragraph carries a stock frame).
-    clause: 'one transfer carrier form in two consecutive paragraphs',
-    paragraphs: [
-      `${BATTERY_LEAD} ${BATTERY_BODY} That delivery experience would support reliable system delivery in the role you are filling.`,
-      'My delivery practice covers the deployment step itself. I scripted that step so a colleague could repeat it without me present during the change window. That practice would support reliable system delivery in the role you are filling.',
-    ],
-    rejectedBy: 'repeated-transfer-carrier',
-    control: [
-      `${BATTERY_LEAD} ${BATTERY_BODY}`,
-      'My delivery practice covers the deployment step itself. I scripted that step so a colleague could repeat it without me present during the change window. That practice would support reliable system delivery in the role you are filling.',
-    ],
-  },
-  {
-    // The shape checkDirectWelcomeClosing certifies: a one-line hook, two proofs
+    // The shape the retired direct-welcome-closing check certified: a one-line hook, two proofs
     // and a one-line direct welcome. Two of the four paragraphs are one
     // sentence and the paragraphs average 27 words, which the first proportion
     // limits (one standalone sentence, a mean of 30) refused; the contract now
@@ -336,24 +265,6 @@ const COVER_LETTER_DISCLOSURE_SCENARIOS = [
       'My review practice covers the changes that reach the service. I tested each release note with a reviewer before the service went out. The reviewer signed every note before the release window opened.',
     ],
     accepted: true,
-  },
-  {
-    // The same letter with a stock transfer frame in a second paragraph: two paragraphs carry one against a budget of one, and the repair
-    // is the letter above, which ends that paragraph on what the work did.
-    clause: 'a stock transfer frame in a second paragraph',
-    paragraphs: [
-      `${BATTERY_LEAD} ${BATTERY_BODY}`,
-      'My delivery judgment covers the colleagues who depend on the service. I wrote the weekly runbook the rotation followed. I would apply that judgment to the reliable system delivery this role needs.',
-      'My delivery practice covers the deployment step itself. I automated that step so a colleague could repeat it without me present during the change window. That practice would support reliable system delivery in the role you are filling.',
-      'My review practice covers the changes that reach the service. I tested each release note with a reviewer before the service went out. The reviewer signed every note before the release window opened.',
-    ],
-    rejectedBy: 'transfer-carrier-budget',
-    control: [
-      `${BATTERY_LEAD} ${BATTERY_BODY}`,
-      'My delivery judgment covers the colleagues who depend on the service. I wrote the weekly runbook the rotation followed. I would apply that judgment to the reliable system delivery this role needs.',
-      'My delivery practice covers the deployment step itself. I automated that step so a colleague could repeat it without me present during the change window. The colleague repeated it for the next release.',
-      'My review practice covers the changes that reach the service. I tested each release note with a reviewer before the service went out. The reviewer signed every note before the release window opened.',
-    ],
   },
   {
     // A transfer sentence may name a benefit of the work only when its paragraph's proof or the quotes it cites state it. Each paragraph
@@ -397,27 +308,6 @@ const COVER_LETTER_DISCLOSURE_SCENARIOS = [
       'My delivery practice covers the deployment step itself. I scripted that step so a colleague could repeat it without me present during the change window. That practice would support reliable system delivery in the role you are filling.',
       'My delivery judgment covers the colleagues who depend on the service. I wrote the weekly runbook the rotation followed. This role needs the same judgment for reliable system delivery.',
     ],
-  },
-  {
-    // The shipped sentence this clause was written from turned its proof toward
-    // the employer with a noun no earlier sentence of its paragraph had used.
-    // The repair the clause prescribes is the paragraph's own noun.
-    clause: 'a demonstrative opening a later sentence whose noun the paragraph never used',
-    paragraphs: [
-      `${BATTERY_LEAD} ${BATTERY_BODY} I would apply that experience to the reliable system delivery this role needs.`,
-      'My delivery practice covers the deployment step itself. I scripted that step so a colleague could repeat it without me present during the change window. That judgment would support reliable system delivery in the role you are filling.',
-    ],
-    rejectedBy: 'dangling-demonstrative',
-    control: [
-      `${BATTERY_LEAD} ${BATTERY_BODY}`,
-      'My delivery practice covers the deployment step itself. I scripted that step so a colleague could repeat it without me present during the change window. That practice would support reliable system delivery in the role you are filling.',
-    ],
-  },
-  {
-    clause: 'the infinitive after “My experience to”',
-    paragraphs: [`${BATTERY_LEAD} My experience to enforce dependable delivery practices comes from the reporting service I kept available.`],
-    rejectedBy: 'experience-infinitive-grammar',
-    control: [`${BATTERY_LEAD} My experience enforcing dependable delivery practices comes from the reporting service I kept available.`],
   },
   {
     clause: 'a named project used before it is introduced',
@@ -558,7 +448,7 @@ export default [
       // the pipeline dropped fails here rather than lingering as a rule no
       // message can reach.
       const reportable = pasteReportableCheckIds();
-      assert(reportable.length >= 45 && new Set(reportable).size === reportable.length,
+      assert(reportable.length >= 40 && new Set(reportable).size === reportable.length,
         `the enumeration reads the whole battery once (ids=${reportable.length})`);
       const unplaced = reportable.filter(id => !PASTE_CHECK_PROSE_UNITS[id]);
       assert(!unplaced.length,
@@ -571,12 +461,12 @@ export default [
         .map(([id]) => id);
       assert(!illegal.length, `each entry is the stage's prose unit or a field (illegal=${JSON.stringify(illegal)})`);
 
-      // The three that grade a field are the reason the table has two values
-      // at all: each names a mapping, a plan shape or the thesis, and none of
-      // them is repaired by rewriting a paragraph. A round carrying only those
+      // The two that grade a field are the reason the table has two values
+      // at all: each names a mapping or the thesis, and neither is repaired by
+      // rewriting a paragraph. A round carrying only those
       // prints no brief, which the thesis case below measures end to end.
       const fields = Object.entries(PASTE_CHECK_PROSE_UNITS).filter(([, unit]) => unit === 'field').map(([id]) => id).sort();
-      assert(JSON.stringify(fields) === JSON.stringify(['evidence-grounding', 'mapping-narrative-structure', 'role-thesis']),
+      assert(JSON.stringify(fields) === JSON.stringify(['evidence-grounding', 'role-thesis']),
         `the field-graded checks are the argument plan's own (fields=${JSON.stringify(fields)})`);
       return { reportable: reportable.length, fields: fields.length };
     },

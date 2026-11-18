@@ -72,7 +72,7 @@ async function controllerHarness() {
   const session = [...controller.sessions.values()][0];
   const event = { sender: session.child.webContents, senderFrame: session.child.webContents.mainFrame };
   return { fixture, owner, controller, session, event, handlers, decisions,
-    get reads() { return [snapshotReads, bankReads]; }, get active() { return active; },
+    get reads() { return [snapshotReads, bankReads]; }, get active() { return active; }, listeningState: () => state,
     endpoint(text, isCurrent = () => active) { return options.onQuestion({ text }, isCurrent, decision => decisions.push(decision)); },
   };
 }
@@ -169,8 +169,7 @@ export default [
           await assert.rejects(async () => handler(event), /session is not available/u);
         }
       }
-      assert.equal(h.controller.getListeningState(h.event).status, 'idle');
-      assert.equal(h.controller.startListening(h.event).status, 'listening');
+            assert.equal(h.controller.startListening(h.event).status, 'listening');
       assert.equal(h.active, true); h.controller.stopListening(h.event); assert.equal(h.active, false);
       assert(h.event.sender.sent.some(item => item.channel === 'interview-window:listening-updated'));
     } finally { h.controller.cleanupOwner(h.owner); }
@@ -188,11 +187,11 @@ export default [
       assert.deepEqual(h.reads, [1, 1]); assert.equal(h.session.locked, true);
       const anchor = h.session.anchorPlan; h.session.anchorPlan = null;
       await h.endpoint('What did you learn?'); assert.equal(h.session.display.answerCard.id, 'leadership');
-      assert.match(h.controller.getListeningState(h.event).message, /^No story to follow · type it$/u); h.session.anchorPlan = anchor;
+      assert.match(h.listeningState().message, /^No story to follow · type it$/u); h.session.anchorPlan = anchor;
       await h.endpoint('How do you prioritize your work?'); assert.equal(h.session.display.answerCard.id, 'priorities');
       assert.deepEqual(h.reads, [1, 1]);
       await h.endpoint('How do you prioritize your work? Tell me about leading a team.');
-      assert.equal(h.session.display.answerCard.id, 'priorities'); assert.match(h.controller.getListeningState(h.event).message, /^Multi-part · pick one$/u);
+      assert.equal(h.session.display.answerCard.id, 'priorities'); assert.match(h.listeningState().message, /^Multi-part · pick one$/u);
       await h.endpoint('How did you reduce Kafka consumer lag?');
       assert.equal(h.session.display.answerCard, null); assert.equal(h.session.display.plan.status, 'supported');
       const cues = h.session.display.plan.steps.map(step => step.cue);
@@ -202,8 +201,8 @@ export default [
       await h.endpoint('How do you prioritize your work?');
       h.controller.stopListening(h.event); await h.endpoint('Tell me about leading a team.', () => false);
       assert.equal(h.session.display.answerCard.id, 'priorities');
-      h.controller.startListening(h.event); await h.controller.useTranscriptQuestion(h.event);
-      assert.equal(h.session.display.answerCard.id, 'leadership'); assert.deepEqual(h.reads, [2, 2]);
+      h.controller.startListening(h.event); await h.endpoint('Tell me about leading a team.');
+      assert.equal(h.session.display.answerCard.id, 'leadership'); assert.deepEqual(h.reads, [1, 1]);
       h.session.child.webContents.emit('did-start-navigation', {}, 'file:///unused', false, true); assert.equal(h.active, false);
       h.controller.startListening(h.event); h.session.child.close(); assert.equal(h.active, false); assert.equal(h.controller.sessionCount(), 0);
     } finally { h.controller.cleanupOwner(h.owner); }

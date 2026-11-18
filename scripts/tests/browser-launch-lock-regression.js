@@ -1,4 +1,5 @@
 import { PLATFORM_AUTH_COOKIES, _resetLaunchCollisions, assert, clearAllSessionStatusCache, closeOwnedBrowserProcess, fs, generateMarkdown, getLaunchCollisions, getStatusCacheSync, path, recordLaunchCollision, reserveSharedProfile, toPuppeteerExtraAbortSignal, writeStatusCache } from '../test-dependencies.js';
+import { readJobsSources } from './jobsSourceFixture.mjs';
 import { EventEmitter } from 'node:events';
 import merge from 'deepmerge';
 import { formatAuthAttemptStatus } from '../../electron/ipc/bugReport.js';
@@ -24,8 +25,9 @@ import { formatAuthAttemptStatus } from '../../electron/ipc/bugReport.js';
 const stealthBrowserSource = fs.readFileSync(path.resolve('electron/ipc/stealthBrowser.js'), 'utf8');
 const accountsSource = fs.readFileSync(path.resolve('electron/ipc/accounts.js'), 'utf8');
 const mainSource = fs.readFileSync(path.resolve('electron/main.js'), 'utf8');
-const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+const jobsSource = readJobsSources('jobs', 'searchHandlers');
 const manualScraperSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
+const scrapeBrowserSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper/scrapeBrowser.js'), 'utf8');
 const backgroundScrapeSource = fs.readFileSync(path.resolve('electron/ipc/browser/backgroundScrapeBrowser.js'), 'utf8');
 const authWindowsSource = fs.readFileSync(path.resolve('electron/ipc/browser/authWindows.js'), 'utf8');
 
@@ -115,10 +117,10 @@ export default [
   {
     name: 'manual platform browsers use the profile-lock retry helper, suppress startup about:blank handoffs, and downgrade launch failure per source',
     run: () => {
-      const launchStart = manualScraperSource.indexOf('async function launchScrapePlatformBrowser');
-      const launchEnd = manualScraperSource.indexOf('// Clears the per-run browser diagnostic buffers', launchStart);
-      assert(launchStart >= 0 && launchEnd > launchStart, 'manual platform launcher must be bounded before telemetry reset helpers');
-      const launcher = manualScraperSource.slice(launchStart, launchEnd);
+      // The launcher is the last declaration in scrapeBrowser.js, so it runs to the end of the file.
+      const launchStart = scrapeBrowserSource.indexOf('async function launchScrapePlatformBrowser');
+      assert(launchStart >= 0, 'manual platform launcher must exist in scrapeBrowser.js');
+      const launcher = scrapeBrowserSource.slice(launchStart);
       assert(/launchWithProfileLockRetry\(prepareBackgroundScrapeLaunchOptions\(/.test(launcher),
         'manual platform launch must use the shared retry/diagnostic helper instead of raw puppeteer.launch');
       assert(!/puppeteer\.launch\(/.test(launcher), 'manual platform launcher must not bypass profile-lock retry with a raw Puppeteer launch');

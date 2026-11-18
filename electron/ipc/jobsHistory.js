@@ -22,10 +22,10 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import { logger } from '../logger.js';
 import { dedupKeysFor } from '../../src/utils/jobListingIdentity.js';
 import { createKeyedLock } from './asyncMutex.js';
+import { atomicWriteFile } from '../utils/atomicWrite.js';
 export { dedupKeysFor } from '../../src/utils/jobListingIdentity.js';
 
 // "Already seen" retention window for suppressing re-shown jobs. Deliberately a
@@ -317,13 +317,7 @@ export async function finalizeDisplayedJobsHistory(canvasFilePath, hubId, { excl
  * following such a path. Always remove a temp after a failed rename/write.
  */
 async function atomicWriteHistory(filePath, content) {
-  const temporary = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${crypto.randomUUID()}.tmp`);
-  try {
-    await fs.promises.writeFile(temporary, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-    await fs.promises.rename(temporary, filePath);
-  } finally {
-    await fs.promises.unlink(temporary).catch(() => {});
-  }
+  await atomicWriteFile(filePath, content);
 }
 
 /**
@@ -443,6 +437,30 @@ async function appendJobsHistoryLocked(canvasFilePath, filePath, jobs) {
     logger.warn('[JobsHistory] Append failed:', err?.message || String(err));
     return { written: 0, pruned: 0, error: err?.message || String(err) };
   }
+}
+
+/**
+ * A test for "this listing was already shown on an earlier run", using the
+ * same rule as `dedupAgainstHistory`. The browser scrapers ask it before
+ * opening a listing's description: a listing the history step is going to drop
+ * anyway is not worth a detail request.
+ */
+export function createSeenListingMatcher(historyRows) {
+  const rows = Array.isArray(historyRows) ? historyRows : [];
+  if (rows.length === 0) return () => false;
+  const historyByKey = new Map();
+  for (const row of rows) {
+    for (const key of dedupKeysFor(row)) {
+      const matches = historyByKey.get(key) || [];
+      matches.push(row);
+      historyByKey.set(key, matches);
+    }
+  }
+  return job => dedupKeysFor(job).some((key) => {
+    const matches = historyByKey.get(key);
+    if (!matches?.length) return false;
+    return !key.startsWith('u:') || matches.some(row => appearsToBeSameListing(row, job));
+  });
 }
 
 export function dedupAgainstHistory(jobs, historyRows) {

@@ -31,7 +31,7 @@ class Window extends EventEmitter {
 async function harness({ launchQuestion = null, initialResponses = [], poolSize = 1, createTalkingPoints = null } = {}) {
   const fixture = createInterviewWindowE2EFixture();
   const owner = new Window(); const handlers = new Map(); const transports = []; const queue = [...initialResponses];
-  let time = 0; let bank = fixture.bank; let failPlan = false; let audioInput; let active = false; let transcript = ''; let endpointId = 0;
+  let time = 0; let bank = fixture.bank; let failPlan = false; let audioInput; let audioState; let active = false; let endpointId = 0;
   const controller = createInterviewWindowController({ BrowserWindow: Window,
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
     appInstance: { isPackaged: false, getPath: () => '/tmp/synthetic-interview-ai-unused' },
@@ -58,10 +58,10 @@ async function harness({ launchQuestion = null, initialResponses = [], poolSize 
     },
     createAudioService: input => {
       audioInput = input;
-      const state = { status: 'idle', transcript: '', question: '', errorCode: null, message: '' };
+      const state = audioState = { status: 'idle', transcript: '', question: '', errorCode: null, message: '' };
       return { start() { active = true; state.status = 'listening'; input.onState(state); return state; },
         stop() { active = false; state.status = 'idle'; input.onState(state); return state; },
-        getState: () => state, getQuestion: () => transcript, notice: message => { state.message = message; } };
+        notice: message => { state.message = message; } };
     },
     devServerUrl: 'http://127.0.0.1:41739/',
   });
@@ -72,12 +72,20 @@ async function harness({ launchQuestion = null, initialResponses = [], poolSize 
   const session = [...controller.sessions.values()][0];
   const event = { sender: session.child.webContents, senderFrame: session.child.webContents.mainFrame };
   const updates = () => event.sender.sent.filter(item => item.channel === 'interview-window:brief-updated');
-  return { fixture, owner, controller, session, event, handlers, transports, queue, updates,
+  // Puts a prepared answer on screen the way the running app does: a detected
+  // question that the AI maps to the card. The call counters are then zeroed so
+  // the test measures only what it does next.
+  const lock = async cardId => {
+    const card = fixture.bank.cards.find(item => item.id === cardId);
+    controller.startListening(event); queue.push({ result: pick(cardId) });
+    await audioInput.onQuestion({ text: card.question, id: 'prime' }, () => active);
+    for (const record of transports) record.matches.length = 0;
+  };
+  return { fixture, owner, controller, session, event, handlers, transports, queue, updates, lock, listeningState: () => audioState,
     setBank: value => { bank = value; }, failPlan: value => { failPlan = value; },
     launchQuestion: question => controller.launch({ sender: owner.webContents }, argsFor(question)),
-    endpoint: (text, isCurrent = () => active, id = ++endpointId) => { transcript = text; return audioInput.onQuestion({ text, id }, isCurrent); },
-    partial: (text, turnId = endpointId + 1) => { transcript = text; return audioInput.onPartial({ text, turnId }); },
-    setTranscript: text => { transcript = text; },
+    endpoint: (text, isCurrent = () => active, id = ++endpointId) => audioInput.onQuestion({ text, id }, isCurrent),
+    partial: (text, turnId = endpointId + 1) => audioInput.onPartial({ text, turnId }),
     cleanup: () => controller.cleanupOwner(owner) };
 }
 
@@ -134,7 +142,7 @@ export default [
       for (const withPreview of [false, true]) {
         const h = await harness({ poolSize: 2 }); const pending = deferred(); const started = deferred();
         try {
-          await h.controller.selectPreparedCard(h.event, 'priorities'); h.controller.startListening(h.event);
+          await h.lock('priorities'); h.controller.startListening(h.event);
           const answer = h.session.display.answerCard; const anchor = h.session.anchorPlan;
           if (withPreview) {
             h.queue.push({ result: pick('leadership') }); h.partial('Tell me about leading');
@@ -155,27 +163,6 @@ export default [
           assert.equal(h.updates().at(-1).value, h.session.display);
         } finally { pending.resolve(pick('leadership')); h.cleanup(); }
       }
-    },
-  },
-  {
-    name: 'interview AI window: a typed question wins while an identical speculative endpoint is awaiting its reply',
-    async run() {
-      const h = await harness({ poolSize: 2 }); const pending = deferred(); const started = deferred();
-      try {
-        await h.controller.selectPreparedCard(h.event, 'leadership'); h.controller.startListening(h.event);
-        h.queue.push({ pending, started }); h.partial('Tell me about leading teams'); await started.promise;
-        const lookup = h.endpoint('Tell me about leading teams.');
-        assert.equal(h.session.questionOrigin, 'audio');
-        h.queue.push({ result: pick('priorities') });
-        const display = await h.controller.submitQuestion(h.event, 'How do you prioritize work?');
-        assert.equal(display.answerCard.id, 'priorities'); assert.equal(display.question, 'How do you prioritize work?');
-        assert.equal(display.matching.source, 'ai'); assert.equal(h.session.display, display);
-        const updateCount = h.updates().length;
-        pending.resolve(pick('leadership')); await lookup;
-        assert.equal(h.session.display, display, 'late speculative selection cannot replace the explicit answer');
-        assert.equal(h.updates().length, updateCount); assert.equal(h.session.locked, true);
-        assert.deepEqual(h.transports.map(transport => transport.matches.length), [1, 1], 'only the speculative call and deliberate typed call are sent');
-      } finally { pending.resolve(pick('leadership')); h.cleanup(); }
     },
   },
   {
@@ -202,7 +189,7 @@ export default [
     async run() {
       const h = await harness({ poolSize: 2 });
       try {
-        await h.controller.selectPreparedCard(h.event, 'priorities');
+        await h.lock('priorities');
         const locked = h.session.display.answerCard; const anchor = h.session.anchorPlan;
         h.controller.startListening(h.event);
         const before = h.updates().length;
@@ -233,7 +220,7 @@ export default [
     async run() {
       const h = await harness({ poolSize: 2 });
       try {
-        await h.controller.selectPreparedCard(h.event, 'priorities'); h.controller.startListening(h.event);
+        await h.lock('priorities'); h.controller.startListening(h.event);
         const answer = h.session.display.answerCard; const anchor = h.session.anchorPlan;
         h.queue.push({ result: pick('leadership') }); h.partial('Tell me about leading');
         await new Promise(resolve => setImmediate(resolve)); assert.equal(h.session.display.preview.cardId, 'leadership');
@@ -251,101 +238,19 @@ export default [
       for (const action of ['stop', 'close']) {
         const h = await harness({ poolSize: 3 });
         try {
-          await h.controller.selectPreparedCard(h.event, 'priorities'); h.controller.startListening(h.event);
+          await h.lock('priorities'); h.controller.startListening(h.event);
           h.queue.push({ result: pick('leadership') }); h.partial('Tell me about leading'); await new Promise(resolve => setImmediate(resolve));
           const pending = deferred(); const started = deferred();
           h.queue.push({ pending, started }); h.partial('Tell me about leading teams'); await started.promise;
           assert.notEqual(h.session.display.preview, null);
           const answer = h.session.display.answerCard;
-          if (action === 'stop') h.controller.stopListening(h.event); else h.controller.close(h.event);
+          if (action === 'stop') h.controller.stopListening(h.event); else h.session.child.close();
           assert.equal(h.session.display.preview, null);
           pending.resolve(pick('leadership')); await new Promise(resolve => setImmediate(resolve));
           assert.equal(h.session.display.preview, null); assert.equal(h.session.display.answerCard, answer);
           assert.equal(h.transports.every(transport => action === 'close' || transport.closes === 0), true, 'Stop detaches without killing warm sessions');
         } finally { h.cleanup(); }
       }
-    },
-  },
-  {
-    name: 'interview AI window: explicit typed, follow-up, transcript and prepared choices outrank speculation',
-    async run() {
-      for (const action of ['typed', 'follow-up', 'transcript', 'prepared']) {
-        const h = await harness({ poolSize: 2 });
-        try {
-          await h.controller.selectPreparedCard(h.event, 'priorities'); h.controller.startListening(h.event);
-          h.queue.push({ result: pick('leadership') }); h.partial('Tell me about leading'); await new Promise(resolve => setImmediate(resolve));
-          const pending = deferred(); const started = deferred();
-          h.queue.push({ pending, started }); h.partial('Tell me about leading teams'); await started.promise;
-          if (action !== 'prepared') h.queue.push({ result: pick('priorities', action === 'follow-up') });
-          const display = action === 'typed' ? await h.controller.submitQuestion(h.event, 'How do you prioritize work?')
-            : action === 'follow-up' ? await h.controller.followUpQuestion(h.event, 'What happened next?')
-            : action === 'transcript' ? await h.controller.useTranscriptQuestion(h.event)
-            : await h.controller.selectPreparedCard(h.event, 'priorities');
-          assert.equal(display.preview, null); assert.equal(display.answerCard.id, 'priorities');
-          pending.resolve(pick('leadership')); await new Promise(resolve => setImmediate(resolve));
-          h.partial('Tell me about leading teams every day'); await new Promise(resolve => setImmediate(resolve));
-          assert.equal(h.session.display, display, 'late or continued speculative text cannot overwrite explicit choices');
-          assert.equal(h.transports[1].closes, 0);
-          assert.equal(h.transports[0].matches.length, action === 'prepared' ? 0 : 1);
-        } finally { h.cleanup(); }
-      }
-    },
-  },
-  {
-    name: 'interview AI window: explicit typed questions override not-question and replace the prior answer honestly',
-    async run() {
-      const h = await harness();
-      try {
-        await h.controller.selectPreparedCard(h.event, 'priorities');
-        const before = h.session.display;
-        const question = 'Tell me about leading a team.';
-        h.queue.push({ result: { kind: 'not-question', cardId: 'none', confidence: 0.99 } });
-        const display = await h.controller.submitQuestion(h.event, question);
-        assert.notEqual(display, before); assert.equal(display.question, question);
-        assert.equal(display.answerCard, null, 'an explicit override cannot manufacture or select an unapproved spoken answer');
-        assert.equal(display.plan.status, 'supported'); assert.equal(display.matching.kind, 'question');
-        assert.equal(h.session.audio, null, 'the explicit result is visible even without a Listen notice');
-        h.queue.push({ result: { kind: 'not-question', cardId: 'none', confidence: 0.99 } });
-        const unsupported = await h.controller.submitQuestion(h.event, 'Which telescope aperture photographs Jupiter best?');
-        assert.equal(unsupported.plan.status, 'unsupported'); assert.equal(unsupported.answerCard, null);
-        assert(unsupported.plan.message, 'a genuine lack of saved evidence produces a visible explanation');
-      } finally { h.cleanup(); }
-    },
-  },
-  {
-    name: 'interview AI window: typed follow-ups override not-question and low-confidence classification',
-    async run() {
-      for (const result of [{ kind: 'not-question', cardId: 'none', confidence: 0.99 }, { ...pick('leadership', true), confidence: 0.1 }]) {
-        const h = await harness();
-        try {
-          await h.controller.selectPreparedCard(h.event, 'leadership');
-          h.queue.push({ result });
-          const display = await h.controller.followUpQuestion(h.event, 'What did you learn?');
-          assert.equal(display.question, 'What did you learn?'); assert.equal(display.answerCard.id, 'leadership');
-          assert.equal(display.matching.kind, 'follow-up'); assert.equal(h.session.locked, true);
-          assert.equal(h.updates().at(-1).value, display);
-        } finally { h.cleanup(); }
-      }
-    },
-  },
-  {
-    name: 'interview AI window: Use this question breaks the not-question notice loop and displays the requested text',
-    async run() {
-      const h = await harness();
-      try {
-        h.controller.startListening(h.event);
-        const question = "Alright, thanks for that. Can you walk me through a project you're really proud of?";
-        const declined = { kind: 'not-question', cardId: 'none', confidence: 0.99 };
-        h.queue.push({ result: declined }); await h.endpoint(question);
-        const before = h.session.display;
-        assert.match(h.controller.getListeningState(h.event).message, /^Not matched · Use to match$/u);
-        h.queue.push({ result: declined });
-        const display = await h.controller.useTranscriptQuestion(h.event);
-        assert.notEqual(display, before); assert.equal(display.question, question);
-        assert.equal(display.matching.kind, 'question'); assert.equal(display.answerCard, null);
-        assert(display.plan?.message, 'saved cues or a visible unsupported explanation must resolve the explicit choice');
-        assert.equal(h.updates().at(-1).value, display); assert.equal(h.transports[0].matches.length, 2);
-      } finally { h.cleanup(); }
     },
   },
   {
@@ -371,54 +276,6 @@ export default [
         assert.equal(h.transports.length, 1, 'valid follow-up/none cannot burn a cold fallback or reset the session');
         assert.equal(h.transports[0].matches.length, 3);
       } finally { h.cleanup(); }
-    },
-  },
-  {
-    name: 'interview AI window: audio never cancels typed questions, follow-ups or Use this question requests',
-    async run() {
-      for (const action of ['typed', 'follow-up', 'transcript']) {
-        const h = await harness(); const pending = deferred(); const started = deferred();
-        try {
-          h.controller.startListening(h.event);
-          if (action === 'follow-up') await h.controller.selectPreparedCard(h.event, 'leadership');
-          const question = action === 'follow-up' ? 'What did you learn?' : SEMANTIC_QUESTION;
-          h.setTranscript(question); h.queue.push({ pending, started });
-          const request = action === 'typed' ? h.controller.submitQuestion(h.event, question)
-            : action === 'follow-up' ? h.controller.followUpQuestion(h.event, question)
-            : h.controller.useTranscriptQuestion(h.event);
-          await started.promise;
-          const signal = h.transports[0].matches.at(-1).signal; const sequence = h.session.questionSequence;
-          // Both a semantic non-question and a new real question remain only
-          // transcripts until the deliberate user request has completed.
-          await h.endpoint("Great. So a bit about the team: we're about twelve engineers.");
-          await h.endpoint('How do you prioritize your work?');
-          assert.equal(signal.aborted, false, action); assert.equal(h.session.questionSequence, sequence);
-          assert.equal(h.transports[0].matches.length, 1, 'background audio cannot even queue a competing selection');
-          h.controller.stopListening(h.event);
-          assert.equal(signal.aborted, false, 'Stop listening cannot cancel a user text lookup');
-          pending.resolve(pick('leadership', action === 'follow-up'));
-          const display = await request;
-          assert.equal(display.ignored, undefined); assert.equal(display.question, question); assert.equal(display.answerCard.id, 'leadership');
-          assert.equal(h.session.display, display); assert.equal(h.session.questionOrigin, null);
-        } finally { pending.resolve(pick('leadership')); h.cleanup(); }
-      }
-    },
-  },
-  {
-    name: 'interview AI window: superseded user submissions return an explicit ignored result',
-    async run() {
-      const h = await harness(); const pending = deferred(); const started = deferred();
-      try {
-        h.queue.push({ pending, started });
-        const request = h.controller.submitQuestion(h.event, SEMANTIC_QUESTION); await started.promise;
-        h.controller.nextQuestion(h.event);
-        const result = await request;
-        assert.deepEqual(Object.keys(result).sort(), ['ignored', 'message', 'reason']);
-        assert.equal(result.ignored, true); assert.equal(result.reason, 'superseded'); assert(result.message);
-        assert.notEqual(result, h.session.display, 'the renderer cannot mistake cancellation for a successful old display');
-        pending.resolve(pick('leadership')); await Promise.resolve();
-        assert.equal(h.session.display.answerCard, null);
-      } finally { pending.resolve(pick('leadership')); h.cleanup(); }
     },
   },
   {
@@ -455,7 +312,7 @@ export default [
       const h = await harness();
       try {
         h.setBank(null);
-        await h.controller.submitQuestion(h.event, 'Tell me about leading a team.');
+        await h.launchQuestion('Tell me about leading a team.');
         assert.equal(h.session.display.answerCard, null); assert.equal(h.session.display.plan.status, 'supported');
         const anchor = h.session.anchorPlan;
         assert(anchor);
@@ -533,7 +390,7 @@ export default [
         assert.equal(h.session.display, before); assert.equal(h.session.anchorPlan, anchor); assert.equal(h.session.locked, true);
         assert.equal(h.updates().length, updateCount, 'a non-question never projects or publishes a replacement');
         assert.equal(h.transports[0].matches.at(-1).question, question);
-        assert.match(h.controller.getListeningState(h.event).message, /^Not matched · Use to match$/u);
+        assert.match(h.listeningState().message, /^Not matched · Use to match$/u);
       } finally { h.cleanup(); }
     },
   },
@@ -603,117 +460,44 @@ export default [
     },
   },
   {
-    name: 'interview AI window: semantic paraphrases and exact typed questions invoke AI before displaying the selected card',
+    name: 'interview AI window: semantic paraphrases and exact prepared questions invoke AI before displaying the selected card',
     async run() {
       const h = await harness();
       try {
         assert.equal(matchInterviewAnswerCard(SEMANTIC_QUESTION, h.fixture.bank), null, 'the synthetic paraphrase cannot pass the lexical fallback');
+        h.controller.startListening(h.event);
         h.queue.push({ result: pick('leadership') });
-        const first = await h.controller.submitQuestion(h.event, SEMANTIC_QUESTION);
+        await h.endpoint(SEMANTIC_QUESTION); const first = h.session.display;
         assert.equal(first.answerCard.id, 'leadership'); assert.equal(first.matching.source, 'ai'); assert.equal(first.matching.approximate, false);
         assert.equal(h.transports[0].matches[0].question, SEMANTIC_QUESTION);
-        h.controller.nextQuestion(h.event);
         const preparedQuestion = h.fixture.bank.cards.find(card => card.id === 'priorities').question;
         h.queue.push({ result: pick('priorities') });
-        const typed = await h.controller.submitQuestion(h.event, preparedQuestion);
-        assert.equal(typed.answerCard.id, 'priorities'); assert.equal(h.transports[0].matches.length, 2, 'an exact typed question still uses semantic AI selection');
+        await h.endpoint(preparedQuestion); const typed = h.session.display;
+        assert.equal(typed.answerCard.id, 'priorities'); assert.equal(h.transports[0].matches.length, 2, 'an exact prepared question still uses semantic AI selection');
         assert.equal(h.updates().at(-1).value, h.session.display, 'main and renderer receive the same committed answer');
       } finally { h.cleanup(); }
     },
   },
   {
-    name: 'interview AI window: explicit choices expose every card ID and open the selected prepared answer without AI',
+    name: 'interview AI window: the opening display lists every prepared card ID and question',
     async run() {
       const h = await harness();
       try {
         const cards = h.fixture.bank.cards;
         assert.deepEqual(h.session.display.briefing.preparedCards, cards.map(({ id, question }) => ({ id, question })));
         assert.deepEqual(h.session.display.briefing.preparedQuestions, cards.map(card => card.question), 'the existing string projection remains compatible');
-        const select = h.controller.selectPreparedCard;
-        for (const card of cards) {
-          const display = await select(h.event, card.id);
-          assert.equal(display.answerCard.id, card.id); assert.equal(display.question, card.question);
-          assert.equal(display.answerCard.headline, card.headline.text);
-          assert.equal(display.matching.method, 'manual'); assert.equal(display.matching.source, 'manual');
-          assert.equal(display.matching.label, 'Prepared answer selected'); assert.equal(display.matching.approximate, false);
-          assert.equal(h.session.locked, true); assert.equal(h.session.anchorPlan, null);
-          assert.equal(h.updates().at(-1).value, display);
-        }
-        assert.equal(h.transports.flatMap(item => item.matches).length, 0, 'manual selection makes no AI calls, including when no provider result exists');
       } finally { h.cleanup(); }
     },
   },
   {
-    name: 'interview AI window: explicit card choice immediately supersedes a pending AI turn and fences its late reply',
-    async run() {
-      const h = await harness();
-      const pending = deferred(); const started = deferred(); let timer;
-      try {
-        h.queue.push({ pending, started });
-        const older = h.controller.submitQuestion(h.event, SEMANTIC_QUESTION);
-        await started.promise;
-        const display = await Promise.race([h.controller.selectPreparedCard(h.event, 'priorities'), new Promise((resolve, reject) => {
-          timer = setTimeout(() => reject(new Error('Explicit card selection waited for AI.')), 1000);
-        })]);
-        clearTimeout(timer);
-        assert.equal(display.answerCard.id, 'priorities'); assert.equal(display.matching.method, 'manual');
-        assert.equal(h.transports.flatMap(item => item.matches).length, 1, 'the card click cannot start another matching call');
-        const updateCount = h.updates().length;
-        pending.resolve(pick('leadership')); await older; await Promise.resolve(); await Promise.resolve();
-        assert.equal(h.session.display, display); assert.equal(h.updates().length, updateCount, 'the late semantic selection cannot overwrite the explicit choice');
-      } finally { clearTimeout(timer); pending.resolve(pick('leadership')); h.cleanup(); }
-    },
-  },
-  {
-    name: 'interview AI window: manual card choice replaces supported evidence and unsupported responses in one update',
-    async run() {
-      const h = await harness();
-      try {
-        for (const [question, status] of [['How did you reduce Kafka consumer lag?', 'supported'], ['What telescope aperture would you choose for photographing Jupiter?', 'unsupported']]) {
-          h.controller.nextQuestion(h.event); h.queue.push({ result: pick('none') });
-          const before = await h.controller.submitQuestion(h.event, question);
-          assert.equal(before.answerCard, null); assert.equal(before.plan.status, status);
-          const updateCount = h.updates().length;
-          const selected = await h.controller.selectPreparedCard(h.event, 'leadership');
-          assert.equal(selected.answerCard.id, 'leadership'); assert.equal(selected.plan, null);
-          assert.equal(h.updates().length, updateCount + 1, 'replacement publishes a single complete card without an intervening empty response');
-        }
-        assert.equal(h.transports.flatMap(item => item.matches).length, 2, 'only the original free-text questions invoke AI');
-      } finally { h.cleanup(); }
-    },
-  },
-  {
-    name: 'interview AI window: direct card IPC rejects foreign frames, invalid IDs and stale banks while retaining the prior answer',
-    async run() {
-      const h = await harness();
-      try {
-        await h.controller.selectPreparedCard(h.event, 'leadership');
-        const before = h.session.display; const updateCount = h.updates().length;
-        const select = h.controller.selectPreparedCard;
-        for (const event of [{ sender: h.owner.webContents }, { sender: h.event.sender, senderFrame: {} }, { sender: { id: h.event.sender.id }, senderFrame: h.event.sender.mainFrame }]) {
-          await assert.rejects(() => select(event, 'priorities'), /prepared answer is unavailable/u);
-        }
-        for (const cardId of [null, { cardId: 'priorities' }, '', 'x'.repeat(65), '../priorities', 'unsaved-card']) {
-          await assert.rejects(() => select(h.event, cardId), /prepared answer is unavailable/u);
-        }
-        for (const bank of [null, { ...h.fixture.bank, inputs: { ...h.fixture.bank.inputs, careerSnapshotId: 'b'.repeat(64) } }]) {
-          h.setBank(bank);
-          await assert.rejects(() => select(h.event, 'priorities'), /prepared answer is unavailable/u);
-        }
-        assert.equal(h.session.display, before); assert.equal(h.session.locked, true); assert.equal(h.updates().length, updateCount);
-        assert.equal(h.transports.flatMap(item => item.matches).length, 0, 'rejected direct choices cannot fall through to AI');
-      } finally { h.cleanup(); }
-    },
-  },
-  {
-    name: 'interview AI window: an explicit AI none never selects a deterministic prepared card',
+    name: 'interview AI window: an AI none never selects a deterministic prepared card',
     async run() {
       const h = await harness();
       try {
         const question = 'Tell me about leading a team.';
         assert.equal(matchInterviewAnswerCard(question, h.fixture.bank)?.id, 'leadership');
-        h.queue.push({ result: pick('none') });
-        const display = await h.controller.submitQuestion(h.event, question);
+        h.controller.startListening(h.event); h.queue.push({ result: pick('none') });
+        await h.endpoint(question); const display = h.session.display;
         assert.equal(display.answerCard, null, 'AI abstention cannot silently become a lexical spoken answer');
         assert.equal(display.matching.source, 'ai');
         if (display.plan?.status === 'supported') {
@@ -727,11 +511,11 @@ export default [
     async run() {
       const h = await harness();
       try {
-        h.queue.push({ result: pick('leadership') });
-        await h.controller.submitQuestion(h.event, SEMANTIC_QUESTION);
+        h.controller.startListening(h.event); h.queue.push({ result: pick('leadership') });
+        await h.endpoint(SEMANTIC_QUESTION);
         assert.equal(h.session.anchorPlan, null, 'semantic selection does not manufacture an exact career rail');
         h.queue.push({ result: pick('leadership', true) });
-        const display = await h.controller.followUpQuestion(h.event, 'What did you learn?');
+        await h.endpoint('What did you learn?'); const display = h.session.display;
         const request = h.transports[0].matches.at(-1);
         assert.equal(request.previousCardId, 'leadership'); assert.equal(request.previousQuestion, SEMANTIC_QUESTION);
         assert.equal(display.answerCard.id, 'leadership'); assert.equal(display.matching.kind, 'follow-up');
@@ -740,7 +524,7 @@ export default [
     },
   },
   {
-    name: 'interview AI window: opening warms context once, Next reuses it, changed banks reset it and close releases it',
+    name: 'interview AI window: opening warms context once, a later question reuses it, changed banks reset it and close releases it',
     async run() {
       const h = await harness();
       try {
@@ -751,18 +535,17 @@ export default [
         for (const points of Object.values(initial.extensions)) for (const point of points) {
           assert.deepEqual(Object.keys(point).sort(), ['exampleHook', 'id', 'text'], 'warm extension context contains compact approved points and hooks, without raw source quotes or evidence bindings');
         }
-        h.queue.push({ result: pick('leadership') }); await h.controller.submitQuestion(h.event, SEMANTIC_QUESTION);
+        h.controller.startListening(h.event); h.queue.push({ result: pick('leadership') }); await h.endpoint(SEMANTIC_QUESTION);
         const projected = h.session.display.answerCard;
         assert.equal(projected.optionalExtension.length, 2);
         for (const point of projected.optionalExtension) {
           assert(point.exampleHook && point.evidenceIds.every(id => projected.evidence.some(source => source.id === id)), 'each optional point exposes its tiny example hook and additional exact evidence');
         }
-        h.controller.nextQuestion(h.event);
         assert.equal(h.transports.length, 1); assert.equal(h.transports[0].starts.length, 1); assert.equal(h.transports[0].closes, 0);
         const revised = structuredClone(h.fixture.bank);
         revised.cards.find(card => card.id === 'leadership').id = 'leadership-revised';
-        h.setBank(revised); h.queue.push({ result: pick('leadership-revised') });
-        const display = await h.controller.submitQuestion(h.event, SEMANTIC_QUESTION);
+        h.setBank(revised); await h.launchQuestion(null); h.queue.push({ result: pick('leadership-revised') });
+        await h.endpoint(SEMANTIC_QUESTION); const display = h.session.display;
         assert.equal(display.answerCard.id, 'leadership-revised'); assert.equal(h.transports.length, 2);
         assert.equal(h.transports[0].closes, 1); assert.equal(h.transports[1].starts.length, 1);
         h.session.child.close(); assert.equal(h.transports[1].closes, 1); assert.equal(h.controller.sessionCount(), 0);
@@ -792,42 +575,19 @@ export default [
     },
   },
   {
-    name: 'interview AI window: explicit paraphrased follow-ups reach AI with previous prepared-card context beyond the deterministic grammar',
+    name: 'interview AI window: the measured p50 of detected questions picks the automatic layout',
     async run() {
       const h = await harness();
       try {
-        h.queue.push({ result: pick('leadership') }); await h.controller.submitQuestion(h.event, SEMANTIC_QUESTION);
-        const question = 'On that same situation, which takeaway changed your next attempt?';
-        assert.equal(isDependentInterviewFollowUp(question), false, 'the test wording deliberately falls outside the old dependent-follow-up grammar');
-        h.queue.push({ result: pick('leadership', true) });
-        const display = await h.controller.followUpQuestion(h.event, question);
-        const request = h.transports[0].matches.at(-1);
-        assert.equal(request.question, question); assert.equal(request.previousCardId, 'leadership'); assert.equal(request.previousQuestion, SEMANTIC_QUESTION);
-        assert.equal(display.answerCard.id, 'leadership'); assert.equal(display.matching.kind, 'follow-up');
-      } finally { h.cleanup(); }
-    },
-  },
-  {
-    name: 'interview AI window: measured p50 switches layouts automatically and only the real child main frame can override it',
-    async run() {
-      const h = await harness();
-      try {
+        h.controller.startListening(h.event);
         h.queue.push({ result: pick('leadership'), latencyMs: 3000 });
-        const slow = await h.controller.submitQuestion(h.event, SEMANTIC_QUESTION);
+        await h.endpoint(SEMANTIC_QUESTION); const slow = h.session.display;
         assert.equal(slow.matching.p50Ms, 3000); assert.equal(slow.matching.mode, 'auto'); assert.equal(slow.matching.effectiveMode, 'continuation');
-        const mode = h.controller.setLatencyMode;
-        assert.equal(mode(h.event, 'recall').matching.effectiveMode, 'recall', 'manual recall overrides measured latency');
-        assert.throws(() => mode(h.event, 'continuation'), /display mode is invalid/u, 'Keep going can only follow measured latency');
-        assert.equal(mode(h.event, 'auto').matching.effectiveMode, 'continuation');
-        for (const event of [{ sender: h.owner.webContents }, { sender: h.event.sender, senderFrame: {} }, { sender: { id: h.event.sender.id }, senderFrame: h.event.sender.mainFrame }]) {
-          assert.throws(() => mode(event, 'recall'), /display mode is invalid/u);
-        }
-        assert.throws(() => mode(h.event, 'arbitrary'), /display mode is invalid/u);
-        h.controller.nextQuestion(h.event); h.queue.push({ result: pick('priorities'), latencyMs: 100 });
-        const quick = await h.controller.submitQuestion(h.event, 'How do you prioritize your work?');
+        h.queue.push({ result: pick('priorities'), latencyMs: 100 });
+        await h.endpoint('How do you prioritize your work?'); const quick = h.session.display;
         assert.equal(quick.matching.p50Ms, 1550); assert.equal(quick.matching.effectiveMode, 'recall', 'automatic layout follows measured median, using the same prepared data');
       } finally { h.cleanup(); }
-    },
+    }
   },
   {
     name: 'interview AI window: call-audio projection failure atomically retains the visible old card and its main-process lock',

@@ -1,6 +1,7 @@
 // Board-closed handling: a job board's "gone" verdict flags the row instead of
 // dropping it, the official-posting resolver sees it, and the most official
 // source decides. Synthetic names only (Northwind Labs, Acme Talent Partners ...).
+import { readAllJobsSources, readJobsSource, readJobsSources } from './jobsSourceFixture.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -282,7 +283,8 @@ const pureTests = [
       assert.equal(composeDetailBlockReprobeResult({ jobs: [], boardClosedDetailKept: 0 }, null, [], 'description-rate-limited').boardClosedDetailKept, 0);
 
       const scraper = read('electron/ipc/browser/manualScraper.js');
-      const branch = scraper.slice(scraper.indexOf('if (isUnavailableDetailPage(pageInfo) && !otherHostNotFound'), scraper.indexOf('const isExternalZipDetail'));
+      const navigation = read('electron/ipc/browser/manualScraper/expandByNavigation.js');
+      const branch = navigation.slice(navigation.indexOf('if (isUnavailableDetailPage(pageInfo) && !otherHostNotFound'), navigation.indexOf('const isExternalZipDetail'));
       assert.match(branch, /unavailableDetailDisposition\(\{/u);
       assert.ok(branch.indexOf('boardClosedDetailKept += 1;') < branch.indexOf('if (enhanced[i] != null) unavailableDetailDropped += 1;'));
       assert.ok(scraper.includes('boardClosedDetailKept: sourceBoardClosedDetailKept,'));
@@ -851,8 +853,10 @@ const pureTests = [
   {
     name: 'board-closed pipeline wiring: every score-safe path hands set-aside rows to the scrape-settlement boundary',
     run() {
-      const source = read('electron/ipc/jobs.js');
+      const source = readJobsSources('jobs', 'searchHandlers');
       const block = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
+      const recoverySource = readJobsSource('recoveryHandlers');
+      const recoveryBlock = (start, end) => recoverySource.slice(recoverySource.indexOf(start), recoverySource.indexOf(end, recoverySource.indexOf(start)));
       const main = block("handleSafe('search-jobs',", "handleSafe('peek-job-run',");
       assert.ok(main.indexOf('const boardClosedAside = boardClosedSetAside(descriptionEvidence);') > main.indexOf('const descriptionEvidence = filterJobsByDescriptionEvidence(kept);'));
       assert.ok(main.indexOf('const preferredLivenessOrder = preferOpenRows(livenessOrderInput);') < main.indexOf('const finalDeduped = dedupByTitleCompany(kept'));
@@ -862,18 +866,18 @@ const pureTests = [
         'a paired liveness change makes the final search checkpoint dirty');
       assert.match(main, /finalDeduped\[index\]\?\.boardClosed, finalDeduped\[index\]\?\.listingLiveness/u);
       assert.ok(main.indexOf('const finalDeduped = dedupByTitleCompany(kept') < main.indexOf('await settleScrapedRowsForScoring(kept,'));
-      assert.equal(source.includes('resolveScoreSafePostings'), false, 'the research-before-scoring resolver is gone');
+      assert.equal(readAllJobsSources().includes('resolveScoreSafePostings'), false, 'the research-before-scoring resolver is gone');
       assert.match(main, /dedupByTitleCompany\(preferOpenRows\(platformCap\.jobs\)/u, 'the admission dedup also prefers open rows');
       assert.match(main, /\? \{ boardClosedSetAside: boardClosedAside\.length, boardClosedDropped \}/u);
-      const single = block("handleSafe('search-jobs-single-source',", "handleSafe('prepare-board-jobs-history',");
+      const single = block("handleSafe('search-jobs-single-source',", 'registerRecoveryHandlers(ctx);');
       assert.match(single, /kept = scoreSafeRowsWithBoardClosed\(descriptionEvidence\);/u);
       assert.match(single, /await settleScrapedRowsForScoring\(kept,/u);
-      const linked = block('const isLinkedInReEnrich =', "// Use the source's ordinary list extractor");
+      const linked = recoveryBlock('const isLinkedInReEnrich =', "// Use the source's ordinary list extractor");
       assert.match(linked, /settleScrapedRowsForScoring\(\s*scoreSafeRowsWithBoardClosed\(filterJobsByDescriptionEvidence\(overlayResolvedRecoveryRows\(rows, snapshotRecoveryJobs\)\)\)/u);
-      const generic = block('const runGenericResolve = async () =>', "checkpointContinuationBeforeReply('resolve-job-source')");
+      const generic = recoveryBlock('const runGenericResolve = async () =>', "checkpointContinuationBeforeReply('resolve-job-source')");
       assert.equal([...generic.matchAll(/scoreSafeRowsWithBoardClosed\(/gu)].length, 2, 'snapshot persistence and the final reply');
       assert.match(generic, /descriptionEvidence\.dropped\.filter\(job => listingStateRank\(job\) < 3\)/u, 'terminal rows never read as "still lack a description"');
-      const indeed = block("handleSafe('resume-job-source',", "checkpointContinuationBeforeReply('resume-job-source')");
+      const indeed = recoveryBlock("handleSafe('resume-job-source',", "checkpointContinuationBeforeReply('resume-job-source')");
       assert.equal([...indeed.matchAll(/await settleScrapedRowsForScoring\(scoreSafeRowsWithBoardClosed\(descriptionEvidence\),/gu)].length, 2, 'retry-descriptions and native resume');
       assert.match(indeed, /\]\.filter\(key => key && !boardClosedOutcome\.keptKeys\.has\(key\) && !boardClosedOutcome\.deferredKeys\.has\(key\)\)\)\]/u);
       // The scrape-settlement boundary settles every board-closed row from what is known now,
@@ -886,15 +890,16 @@ const pureTests = [
         assert.equal(boundary.includes(forbidden), false, `the scrape-settlement boundary never calls ${forbidden}`);
       }
       // Board research settles only what is at or above the fit threshold, then reports closed rows.
-      const research = block("handleSafe('settle-board-research',", "handleSafe('confirm-job-location-consolidations',");
+      const boardSource = readJobsSource('boardHandlers');
+      const research = boardSource.slice(boardSource.indexOf("handleSafe('settle-board-research',"), boardSource.indexOf("handleSafe('confirm-job-location-consolidations',"));
       assert.match(research, /recheckPendingListings\(/u);
       assert.match(research, /officialPostingDedup\(/u);
       assert.match(research, /settleBoardClosedRowsForHandler\(eligibleIndexes\(\)\.map\(index => rows\[index\]\), \{\s*requireSemantic: true, researchDeferred: true,/u);
       assert.match(research, /rescoreMaterialOfficialText\(/u);
       assert.match(research, /researchDeferredJobPreferences\(/u);
       // Description-recovery bookkeeping treats a board-closed row as terminal.
-      assert.match(source, /emptyRows: evidence\.dropped\.filter\(job => job\?\.source === sourceId && listingStateRank\(job\) < 3\)/u);
-      assert.match(source, /filterJobsByDescriptionEvidence\(sourceRecovery\)\.dropped\.filter\(job => listingStateRank\(job\) < 3\)/u);
+      assert.match(readJobsSource('sourceRules'), /emptyRows: evidence\.dropped\.filter\(job => job\?\.source === sourceId && listingStateRank\(job\) < 3\)/u);
+      assert.match(readJobsSource('sourceRules'), /filterJobsByDescriptionEvidence\(sourceRecovery\)\.dropped\.filter\(job => listingStateRank\(job\) < 3\)/u);
     },
   },
 ];

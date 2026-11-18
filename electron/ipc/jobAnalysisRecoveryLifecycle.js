@@ -7,6 +7,7 @@
  */
 import crypto from 'crypto';
 import fs from 'fs';
+import { atomicWriteFile } from '../utils/atomicWrite.js';
 import path from 'path';
 
 export const JOB_ANALYSIS_RECOVERY_LIFECYCLE_SCHEMA = 1;
@@ -115,27 +116,16 @@ function normalizeJournal(value) {
 
 async function writeAtomically(filePath, journal) {
   await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  try {
-    // The journal is the only explanation left after an explicit clear moves
-    // the snapshots to Trash. Flush the file before publication, then flush
-    // the directory after rename so an immediate app quit cannot acknowledge
-    // a receipt that only existed in the OS cache.
-    const handle = await fs.promises.open(tempPath, 'w', 0o600);
-    try {
-      await handle.writeFile(`${JSON.stringify(journal)}\n`, 'utf8');
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await fs.promises.rename(tempPath, filePath);
-    const directory = await fs.promises.open(path.dirname(filePath), 'r').catch(() => null);
-    if (directory) {
-      try { await directory.sync(); } finally { await directory.close(); }
-    }
-  } finally {
-    await fs.promises.unlink(tempPath).catch(() => {});
-  }
+  // The journal is the only explanation left after an explicit clear moves
+  // the snapshots to Trash. Flush the file before publication, then flush
+  // the directory after rename so an immediate app quit cannot acknowledge
+  // a receipt that only existed in the OS cache.
+  await atomicWriteFile(filePath, `${JSON.stringify(journal)}\n`, {
+    syncFile: true,
+    openFlags: 'w',
+    syncDirectory: 'strict',
+    tempPath: () => `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`,
+  });
 }
 
 async function readJournal(filePath) {

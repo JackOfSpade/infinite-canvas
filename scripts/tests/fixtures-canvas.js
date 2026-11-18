@@ -1,4 +1,6 @@
 import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, migrateRetiredBatchScoringState, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GLASSDOOR_EXTRACTOR, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JOBBOARD_TRANSIENT_KEYS, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, hasActiveExternalRunState, isCompSourceEnabledInScope, isPlaceholderIndeedJobKey, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableEdgesFromLive, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateInterruptedJobHubResults, migrateJobHubPageCeiling, migrateJobHubTitleSourceSingleMode, migrateLegacyJobHubResults, migrateMergedTargetRoleIntoBrief, migrateStaleJobHubInputLock, migrateMarketplaceCardCreatedAt, nextSearchMatchIndex, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, persistenceContentFingerprint, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, browserClosedWarning, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
+import { readJobsSource, readJobsSources } from './jobsSourceFixture.mjs';
+import { readManualScraperSources } from './manualScraperSourceFixture.mjs';
 import { getRecentLogs } from '../../electron/logger.js';
 import { BATCH_OUTPUT_TOKEN_BUDGET } from '../../electron/ipc/resultCaps.js';
 import { selectIndeedResumePlan } from '../test-dependencies.js';
@@ -103,7 +105,7 @@ export default [
     run: async () => {
       const [driver, handler] = await Promise.all([
         fs.promises.readFile(path.resolve('electron/extractors/indeedBrowser.js'), 'utf8'),
-        fs.promises.readFile(path.resolve('electron/ipc/jobs.js'), 'utf8'),
+        readJobsSource('recoveryHandlers'),
       ]);
       assert(driver.includes('queryIndexes: queryIndexes.slice(manualChallenge.qi)')
         && driver.includes('queryIndexes: queryIndexes.slice(challengedQi)')
@@ -541,7 +543,7 @@ export default [
 {
     name: 'Glassdoor repeated descriptions require a matching active detail title and stop on the exact panel 429 endpoint',
     run: () => {
-      const source = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
+      const source = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper/expandByPanel.js'), 'utf8');
       const sameDescription = 'Shared employer description. '.repeat(20).trim();
       const verifiedRepeat = assessDescriptionPanelUpdate({
         sourceId: 'glassdoor',
@@ -614,13 +616,14 @@ export default [
     name: 'a source-wide detail block cools down and re-probes instead of lasting the whole source',
     run: () => {
       const source = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
-      const numeric = (name) => Number((source.match(new RegExp(`const ${name}\\s*=\\s*(\\d+)`)) || [])[1]);
+      const rules = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper/walkRules.js'), 'utf8');
+      const numeric = (name) => Number((rules.match(new RegExp(`const ${name}\\s*=\\s*(\\d+)`)) || [])[1]);
       const DETAIL_BLOCK_PROBE_CARDS_VALUE = numeric('DETAIL_BLOCK_PROBE_CARDS');
       const DESC_STALE_THRESHOLD_VALUE = numeric('DESC_STALE_THRESHOLD');
       assert(Number.isFinite(DETAIL_BLOCK_PROBE_CARDS_VALUE) && Number.isFinite(DESC_STALE_THRESHOLD_VALUE),
         'both the probe size and the stale-timeout threshold are readable constants');
-      assert(source.includes('const DETAIL_BLOCK_COOLDOWNS_MS = Object.freeze([120_000, 300_000, 600_000]);')
-        && source.includes('const DETAIL_BLOCK_MAX_REPROBES = 3;')
+      assert(rules.includes('const DETAIL_BLOCK_COOLDOWNS_MS = Object.freeze([120_000, 300_000, 600_000]);')
+        && rules.includes('const DETAIL_BLOCK_MAX_REPROBES = 3;')
         && source.includes('sourceDetailReprobes < DETAIL_BLOCK_MAX_REPROBES'),
       'the detail block is time-bounded with a capped number of re-probes rather than latching for the rest of the source');
 
@@ -629,7 +632,7 @@ export default [
       // would be dead code. The walk must spend that time waiting instead.
       assert(source.includes('const cooldownRemainingMs = detailBlockCooldownMs(Math.max(sourceDetailReprobes, sourceDetailPartialCycles)) - (Date.now() - sourceDetailBlockAt);')
         && source.includes('await sleepUnlessAborted(cooldownRemainingMs, signal);')
-        && source.includes('function sleepUnlessAborted(ms, signal)'),
+        && rules.includes('function sleepUnlessAborted(ms, signal)'),
       'a blocked walk waits out the remaining cooldown before the next page instead of racing to the end collecting unusable rows');
 
       // An opportunistic re-probe must never leave the run worse than the skip
@@ -642,7 +645,7 @@ export default [
       // "Recovered" must mean the throttle actually lifted, and a recovery must
       // hand a later, unrelated block a fresh budget.
       assert(source.includes('if (didDetailBlockReprobeRecover(detailResult)) {')
-        && source.includes('return (expanded > 0 || unavailable > 0) && !result.descError && !reBlocked;')
+        && rules.includes('return (expanded > 0 || unavailable > 0) && !result.descError && !reBlocked;')
         && source.includes('sourceDetailReprobes = 0;')
         && source.includes('sourceDetailBlockPage = null;'),
       'only a genuinely cleared throttle counts as recovered (including confirmed unavailable rows), and it resets the re-probe budget and the reported block page');
@@ -654,15 +657,15 @@ export default [
       // out, and DESC_STALE_THRESHOLD of those trips abortWithError. Probing a
       // whole page would both hammer the throttled endpoint and manufacture a
       // "stale selectors" error out of an external rate limit.
-      assert(source.includes('const DETAIL_BLOCK_PROBE_CARDS = 2;')
+      assert(rules.includes('const DETAIL_BLOCK_PROBE_CARDS = 2;')
         && source.includes('const probeJobs = jobsToExpand.slice(0, DETAIL_BLOCK_PROBE_CARDS);')
         && source.includes('composeDetailBlockReprobeResult(probeResult, null, restJobs, reprobeOfCode)')
-        && source.includes('descriptionDeferredReason: reprobeOfCode,'),
+        && rules.includes('descriptionDeferredReason: reprobeOfCode,'),
       'a cooldown re-probe touches only a couple of cards and leaves the remainder deferred, instead of walking a whole page against a throttled endpoint');
       assert(DETAIL_BLOCK_PROBE_CARDS_VALUE < DESC_STALE_THRESHOLD_VALUE,
         `the probe size (${DETAIL_BLOCK_PROBE_CARDS_VALUE}) must stay below the consecutive-timeout abort threshold (${DESC_STALE_THRESHOLD_VALUE})`);
       assert(source.includes("phase: partialRecovery ? 'detail-block-reprobe-partial' : 'detail-block-reprobe-failed'")
-        && source.includes("'detail-block-reprobe', 'detail-block-reprobe-partial', 'detail-block-reprobe-failed', 'detail-block-cleared'")
+        && fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper/scrapeTelemetry.js'), 'utf8').includes("'detail-block-reprobe', 'detail-block-reprobe-partial', 'detail-block-reprobe-failed', 'detail-block-cleared'")
         && source.includes('attempted: probeAttempted,')
         && source.includes('sourceDetailPartialCycles < DETAIL_BLOCK_MAX_REPROBES')
         && source.includes('if (probeAttempted > 0) {'),
@@ -1080,10 +1083,10 @@ export default [
         'hostile entity-encoded title text is compared as inert text, never inserted into a DOM parser');
       assert(stillMismatched.selectionMismatch && !stillMismatched.selectionVerified,
         'entity decoding must not stop a genuinely different heading from being a mismatch');
-      const scraperSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
-      assert(!scraperSource.includes('DOMParser')
-        && scraperSource.includes('inertDescriptionText')
-        && scraperSource.includes('matchingDetailTitle'),
+      const detailParsingSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper/detailParsing.js'), 'utf8');
+      assert(!readManualScraperSources().includes('DOMParser')
+        && detailParsingSource.includes('inertDescriptionText')
+        && detailParsingSource.includes('matchingDetailTitle'),
       'raw JSON-LD/Next-data and headings must cross into the inert main-process normalizers, never a detached HTML parser');
       return { numeric: numeric.selectionVerified, doubled: doubled.selectionVerified, hostile: hostileMatch.selectionVerified };
     },
@@ -5666,7 +5669,7 @@ export default [
     name: 'Job workflow omits applied-state tracking while preserving bundle generation and seen-history',
     run: () => {
       const cardSource = fs.readFileSync(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
-      const searchSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const searchSource = readJobsSources('jobs', 'searchHandlers');
       const preloadSource = fs.readFileSync(path.resolve('electron/preload.js'), 'utf8');
       const mainSource = fs.readFileSync(path.resolve('electron/main.js'), 'utf8');
       assert(cardSource.includes('const generateApplication = useCallback')
@@ -5805,7 +5808,7 @@ export default [
         source.indexOf('const recordCollectionCompletion = useCallback'),
         source.indexOf('const retryTerminalFinalization', source.indexOf('const recordCollectionCompletion = useCallback')),
       );
-      const collectionBackendSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const collectionBackendSource = readJobsSources('jobs', 'searchHandlers');
       assert(completionWriter.includes("terminalStatus === 'completed'")
         && completionWriter.includes('pendingCompletion?.runId === runId')
         && completionWriter.includes('patch.lastCompletedRunAt = normalizeCompletionTimestamp(pendingCompletion.collectionCompletedAt)')
@@ -5935,7 +5938,8 @@ export default [
         && !source.includes('Economy scoring')
         && !source.includes("hubState === 'scoring-batch'"),
       'batch scoring (the async Batch API opt-in) is retired entirely; no hub state or control for it may remain');
-      const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobsSource = readJobsSources('jobs', 'searchHandlers');
+      const analysisStoreSource = fs.readFileSync(path.resolve('electron/ipc/jobs/analysisStore.js'), 'utf8');
       assert(!jobsSource.includes('deleteJobBatchSidecar')
         && !jobsSource.includes('expectedBatchId'),
       'the Batch API sidecar/finalizer machinery must not linger now that there is no async batch transport to reconcile');
@@ -5944,9 +5948,9 @@ export default [
       const gatheredTimestampAt = jobsSource.indexOf('const gatheredStageUpdatedAt = Date.now();', finalAuthorityCheckAt);
       assert(jobsSource.includes('const throwIfSearchAborted = async () =>')
         && jobsSource.includes('if (shouldDiscardJobRunAfterAbort(reason) && activeRunId)')
-        && jobsSource.includes("const CHECKPOINT_PRESERVING_ABORT_CAUSES = new Set([")
-        && jobsSource.includes("'job-source-card-removed'")
-        && jobsSource.includes('!CHECKPOINT_PRESERVING_ABORT_CAUSES.has(reason?.cancelCause)')
+        && analysisStoreSource.includes("const CHECKPOINT_PRESERVING_ABORT_CAUSES = new Set([")
+        && analysisStoreSource.includes("'job-source-card-removed'")
+        && analysisStoreSource.includes('!CHECKPOINT_PRESERVING_ABORT_CAUSES.has(reason?.cancelCause)')
         && jobsSource.includes("phase: 'aborted'")
         && finalAbortCheckAt >= 0
         && finalAuthorityCheckAt > finalAbortCheckAt
@@ -6423,15 +6427,17 @@ export default [
       assert(resolveManualSourceStopReason({ hitProviderTotalShortfall: true, hitEmptyPage: true }) === 'provider-total-shortfall',
         'an empty ZipRecruiter page below its verified advertised total must not report lossless exhaustion');
       const manualScraperSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
-      assert(manualScraperSource.includes("ziprecruiter: 'a[title=\"Next Page\"]'")
-        && manualScraperSource.includes("const SCROLL_SOURCES = new Set(['google']);")
+      const walkRulesSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper/walkRules.js'), 'utf8');
+      assert(walkRulesSource.includes("ziprecruiter: 'a[title=\"Next Page\"]'")
+        && walkRulesSource.includes("const SCROLL_SOURCES = new Set(['google']);")
         && manualScraperSource.includes("phase: 'direct-page-probe'")
         && manualScraperSource.includes('shouldTryZipRecruiterDirectContinuation({')
         && manualScraperSource.includes("phase: 'provider-total-shortfall'"),
       'ZipRecruiter uses its verified Next Page anchor, then a bounded direct-page probe when the board hides that anchor early');
-      assert(manualScraperSource.includes("description-card-unavailable")
-        && manualScraperSource.includes("googlePanelRateLimit")
-        && manualScraperSource.includes("page.off('response', googlePanelResponseListener)"),
+      const expandByPanelSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper/expandByPanel.js'), 'utf8');
+      assert(expandByPanelSource.includes("description-card-unavailable")
+        && expandByPanelSource.includes("googlePanelRateLimit")
+        && expandByPanelSource.includes("page.off('response', googlePanelResponseListener)"),
       'Google virtual-card misses and callback throttles must stop only description enrichment, not masquerade as user completion or leak a response listener');
       // Data-driven stops outrank the page ceiling: now that pages defaults to
       // "All", a walk that ends because the DATA said stop must never be

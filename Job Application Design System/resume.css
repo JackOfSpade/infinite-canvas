@@ -307,7 +307,7 @@
 
 /* Subsection head — quieter, second-tier divider for groupings
    *inside* a section ("Open Source" under Experience, "Talks"
-   under Selected Systems). Italic sans, no uppercase, no tracked +0.14em.
+   under Selected Systems). Italic sans, no uppercase, no tracking.
    --vr-1 above keeps it on the baseline grid one line-box below
    the previous block. Render with:
      <div class="subsection-head">

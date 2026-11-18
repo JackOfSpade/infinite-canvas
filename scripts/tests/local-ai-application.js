@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import nodeAssert from 'node:assert/strict';
 import electronPkg from 'electron';
 import { getRecentLogs } from '../../electron/logger.js';
-import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, pasteAttributionScopeErrors, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, checkResumeRoleBulletBudget, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, renderStructuredApplicationResume, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, RESUME_ROLE_BULLET_CEILING, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, STRUCTURED_RESUME_SCHEMA_VERSION, validateStructuredApplicationResume, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, getApplicationTelemetry, getLocalApplicationHandoff, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, openAuthorityLedgerStore, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus,   queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerLocalAiApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, failedOrphanRetireDecision, LOCAL_AI_FAILED_ORPHAN_RETIRE_MS, submitLocalApplicationHandoff, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim, __setAuthorityLedgerStoreFaultHookForTests } from '../test-dependencies.js';
+import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, pasteAttributionScopeErrors, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkGenericPhrases, checkTargetCompanyBinding, checkPriorEmployerOpening, checkResumeBulletLength, checkResumeRoleBulletBudget, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, renderStructuredApplicationResume, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, RESUME_ROLE_BULLET_CEILING, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, STRUCTURED_RESUME_SCHEMA_VERSION, validateStructuredApplicationResume, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, getApplicationTelemetry, getLocalApplicationHandoff, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, openAuthorityLedgerStore, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus,   queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerLocalAiApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, failedOrphanRetireDecision, LOCAL_AI_FAILED_ORPHAN_RETIRE_MS, submitLocalApplicationHandoff, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim, __setAuthorityLedgerStoreFaultHookForTests } from '../test-dependencies.js';
 import { localAiSkillsCoverageTelemetry, subscribeLocalApplicationDiscards, APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, LOCAL_AI_GENERATION_AUDIT_VERSION, MAX_CORRECTION_STAGE_PROMPT_SHARE, MAX_SOURCE_GROUNDING_QUOTE_CHARS, MIN_SHARED_SOURCE_TERMS, __assertAuthorityStateGraphForTests, __authorityReviewConvergenceValidationForTests, __currentAuthorityFinalResumeArtifactErrorsForTests, __relinkListingQuoteToExactSliceForTests, __selectedSourceRolesForTests, __snapshotCareerSkillEvidenceForTests, __localAiApplicationOutputTelemetryForTests, __localAiCoverLetterTelemetryForTests, __setAuthorityLedgerPersistenceFaultHookForTests, __setLegacyAuthorityLedgerAccessHookForTests, __setLocalAiRenderPdfForTests, __holdWriteVerifyRenderForTests, _resetPasteCorrectionsForTests, _resetPasteRejectionStreakForTests, boundedRejectionError, localAiHandoffEvent, pasteCorrectionPrompt, pasteRejectionCheckIds, pasteRejectionChangeDocuments, pasteRejectionReason, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
 import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC, APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION, APPLICATION_PDF_RECONCILE_REVISION, APPLICATION_PDF_VARIANT_REVISION, checkResumeBulletOpeningVariety } from '../../electron/ipc/jobApplication.js';
 import { __requirementsJobCarryPathForTests, __resignRequirementsJobCarryForTests, __setRequirementsJobCarryMethodSaltForTests, __recordWriteVerifyRoundDiagnosticsForTests, __reserveNextLocalApplicationJobIdForAcceptanceHarness, __setApplicationV2PagePngForTests, __setApplicationV2RendererVersionForTests, PASTE_APPLICATION_STAGES, queueLocalApplicationJob as queueCurrentLocalApplicationJob } from '../../electron/ipc/localAiApplication.js';
@@ -2323,21 +2323,8 @@ export default [
         'the standalone-bullet guard permits a concrete referent introduced earlier in the same bullet');
       for (const [label, paragraph, expected] of [
         ['abrupt prior-employer opener', 'At Acme, I evaluated third-party products before adoption.', 'prior-employer-opening'],
-        ['broad industry label', 'My aviation work extends this evidence with software design.', 'vague-domain-work-label'],
-        ['noun-to-gerund cover-letter range', 'I evaluated products from the intake request through presenting findings.', 'parallel-structure'],
-        ['stewardship process range', 'I ran the evaluations, carrying each one from the intake request through the closing review for management.', 'parallel-structure'],
-        ['prose span ending in through', 'I owned that work from the first scoping call through the final handoff.', 'parallel-structure'],
-        ['entailed setup premise', 'Before those vendors were purchased, the district had to select them, and I ran the pilots.', 'entailed-premise'],
-        ['ambiguous data consumer', 'Data arrived late, so I rebuilt their loader.', 'reference-clarity'],
-        ['missing workplace-introduction comma', 'At the district I delivered software through manual and automated workflows.', 'introductory-workplace-comma'],
-        ['metaphorically ambiguous UI pointing', 'An agent walking someone through an on-screen task cannot point at the control it means.', 'visual-reference-precision'],
-        ['conditionally deferential closing', 'I would welcome the chance to talk about that work.', 'direct-welcome-closing'],
-        ['opaque responsibility pivot', 'Keeping the district data consistent across its tools was a different problem. I solved it with Python integration jobs.', 'responsibility-transition'],
-        ['same-job responsibility opener', 'The same job also included assessing software before adoption.', 'responsibility-transition'],
-        ['detached relevance tail', "As a software engineer for Maple Ridge School District, I moved operational data and workflows from internal systems to third-party platforms, work relevant to this role's legacy modernization and cross-program integration responsibilities.", 'detached-relevance-claim'],
         ['present-tense prospective contribution', "That migration experience helps me contribute to this role's legacy-modernization responsibilities.", 'prospective-contribution-tense'],
         ['past-readiness prospective contribution', "That project prepared me to contribute to this role's legacy-modernization and cross-program integration responsibilities.", 'prospective-contribution-tense'],
-        ['employer-choice closing', 'I welcome a conversation about whether the voice assistant or browser agent should be the first prototype.', 'direct-welcome-closing'],
         ['literalized decision frame', 'Task delegation and a purchased platform are two answers to one build-or-buy call.', 'claimed-equivalence'],
       ]) {
         let editorialRejected = false;
@@ -6736,56 +6723,6 @@ export default [
     },
   },
   {
-    name: 'Local AI cover letter: the closing check accepts every documented shape and says what would pass',
-    async run() {
-      const shouldPass = [
-        'I welcome a conversation about how my release-workflow experience could support the team’s deployment process.',
-        'I welcome a conversation about applying my event-routing service experience to the agent integrations this role owns.',
-        'I welcome a conversation about bringing my Python integration work to the data pipelines your agents draw on.',
-        'I welcome a conversation about where the connector work I built at Maple Ridge would fit the systems this team already runs.',
-        'I welcome a conversation about how the event-routing service I built could shorten the path to your first production agent.',
-        'I welcome a conversation about how my pipeline experience supports your ingestion backlog.',
-        // An anchored demonstrative names the asset; only a bare one does not.
-        'I welcome a conversation about using that event-routing service experience to connect agents with client systems.',
-        // A hyphenated head modifier is a real descriptor, not a filler.
-        'I welcome a conversation about how that same-day pipeline experience could support your backlog.',
-      ];
-      for (const paragraph of shouldPass) {
-        const result = checkDirectWelcomeClosing([paragraph]);
-        assert(result.passed, `a closing that names a candidate asset and its target work must pass: ${paragraph}`);
-      }
-      const shouldFail = [
-        ['I welcome a conversation about applying that work.', 'a bare demonstrative is not a candidate asset'],
-        ['I welcome a conversation about applying the engineering practice this team uses.', 'an employer-facing “the” phrase is not a candidate asset'],
-        ['I welcome a conversation about connecting the data pipelines those agents draw on.', 'an employer artifact is not a candidate asset'],
-        ['I welcome a conversation about using my experience.', 'an asset and a verb with no employer-facing target point nowhere'],
-        ['I welcome a discussion about compensation, benefits, and how my experience applies to my salary expectations.', 'a candidate-facing target is not the target work'],
-        ['I welcome a conversation about that kind of work and bringing more of it into my life.', 'a filler descriptor is still a bare demonstrative'],
-        // The floor is on the HEAD modifier, not the first token: "broader"
-        // does not rescue "kind of work", and a light-noun frame always puts
-        // `of` or a light noun next to the asset noun.
-        ['I welcome a conversation about how that broader kind of work could support your backlog.', 'a leading adjective does not rescue a light-noun frame'],
-        ['I welcome a conversation about how that same work could support your backlog.', 'a light modifier names nothing'],
-        ['I look forward to discussing this next phase of work and using it to grow.', 'a filler descriptor plus inward intent must not pass'],
-        ['I would welcome a conversation about how that combination could support the WAVES rebuild.', 'conditional register'],
-        ['I welcome a conversation about whether the voice assistant or browser agent should be the first prototype.', 'employer-choice close'],
-        ['I look forward to learning more about the team.', 'inward-facing close'],
-      ];
-      for (const [paragraph, why] of shouldFail) {
-        assert(!checkDirectWelcomeClosing([paragraph]).passed, `${why} must still be rejected: ${paragraph}`);
-      }
-      // The observation has to be executable: the same check failed twice in a
-      // row on a real handoff because the message described the goal but never
-      // the construction, so the revision missed it again.
-      const detail = checkDirectWelcomeClosing(['I welcome a conversation about applying that work.']).detail;
-      assert(detail.includes('possessive, an authorship clause, or a demonstrative that carries its own descriptor')
-        && detail.includes('the <artifact> I built')
-        && detail.includes('never a bare demonstrative'),
-      `the rejection must name the accepted construction, got ${JSON.stringify(detail)}`);
-      return { passing: shouldPass.length, rejecting: shouldFail.length };
-    },
-  },
-  {
     name: 'Local AI résumé: the 180-character bullet budget is enforced by the app, not only by an unreachable design-system script',
     async run() {
       const role = (li) => `<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights">${li}</ul></article></main>`;
@@ -8185,13 +8122,14 @@ Personal Projects`;
     name: 'pasteRejectionReason: a rejection whose items name a known check id is VALIDATION_FAILED, not the residual SCHEMA_INVALID bucket',
     run() {
       // THE INCIDENT this answers for: 16 consecutive rejections, all reason
-      // SCHEMA_INVALID, all naming check id "direct-welcome-closing" by exact
-      // id — the residual code assigned even though the failing rule was
-      // known by name. pasteRejectionCheckIds is the same computation the app
-      // already ran; this only asks whether the reason now consults it.
-      const namedItems = ['direct-welcome-closing: the opening restates a welcome instead of the job-specific connection.'];
+      // SCHEMA_INVALID, all naming one check id by exact id (that check is
+      // retired; this fixture names a live one) — the residual code assigned
+      // even though the failing rule was known by name. pasteRejectionCheckIds
+      // is the same computation the app already ran; this only asks whether
+      // the reason now consults it.
+      const namedItems = ['redundancy: paragraph 1 repeats a run of words the résumé already states.'];
       const { checkIds: namedIds } = pasteRejectionCheckIds(namedItems);
-      assert(namedIds.length === 1 && namedIds[0] === 'direct-welcome-closing',
+      assert(namedIds.length === 1 && namedIds[0] === 'redundancy',
         `fixture sanity: pasteRejectionCheckIds must still name the check (ids=${JSON.stringify(namedIds)})`);
       assert(pasteRejectionReason({ envelopeMismatch: false, validationErrors: namedItems, checkIds: namedIds }) === 'VALIDATION_FAILED',
         'a rejection whose items name a known check takes VALIDATION_FAILED');
@@ -8221,59 +8159,53 @@ Personal Projects`;
     run() {
       // THE NEXT RUNG of THE INCIDENT (see the streak test above and
       // PASTE_REJECTION_ESCALATION_STREAK's own header): every one of 16
-      // rejected rounds named check id "direct-welcome-closing" by exact id,
-      // but checkDirectWelcomeClosing has FOUR structurally different failure
-      // branches with four different repairs, and the id alone cannot say
-      // which one fired or whether it changed mid-streak. These four
-      // sentences are the exact fixtures the "documented shape" test above
-      // already uses for these four branches (conditional register,
-      // employer-choice close, inward-facing close, direct-conversation
-      // close), reused here rather than invented so this test tracks the
-      // real check if its wording or regexes ever change.
-      const conditional = checkDirectWelcomeClosing(['I would welcome a conversation about how that combination could support the WAVES rebuild.']);
-      const employerChoice = checkDirectWelcomeClosing(['I welcome a conversation about whether the voice assistant or browser agent should be the first prototype.']);
-      const selfDirected = checkDirectWelcomeClosing(['I look forward to learning more about the team.']);
-      const directNoContribution = checkDirectWelcomeClosing(['I welcome a conversation about using my experience.']);
-      for (const observation of [conditional, employerChoice, selfDirected, directNoContribution]) {
-        assert(!observation.passed && observation.id === 'direct-welcome-closing',
-          `fixture sanity: all four must fail the same check id (got ${JSON.stringify(observation)})`);
+      // rejected rounds named one check id by exact id, but that check had
+      // several structurally different failure branches with different
+      // repairs, and the id alone cannot say which one fired or whether it
+      // changed mid-streak. The branches below are the three of the generic
+      // phrase check (an opener, a stock phrase and a stock pattern), which
+      // is live and has the same shape of problem.
+      const opener = checkGenericPhrases(['I am writing to apply for the Developer role at Acme.']);
+      const stockPhrase = checkGenericPhrases(['I am a team player.']);
+      const stockPattern = checkGenericPhrases(['Delivered a proven track record on migrations.']);
+      for (const observation of [opener, stockPhrase, stockPattern]) {
+        assert(!observation.passed && observation.id === 'generic-phrases',
+          `fixture sanity: all three must fail the same check id (got ${JSON.stringify(observation)})`);
       }
       const fingerprintOf = observation => pasteRejectionCheckIds([`${observation.id}: ${observation.detail}`]).checkFingerprints[observation.id];
-      const fpConditional = fingerprintOf(conditional);
-      const fpEmployerChoice = fingerprintOf(employerChoice);
-      const fpSelfDirected = fingerprintOf(selfDirected);
-      const fpDirectNoContribution = fingerprintOf(directNoContribution);
+      const fpOpener = fingerprintOf(opener);
+      const fpStockPhrase = fingerprintOf(stockPhrase);
+      const fpStockPattern = fingerprintOf(stockPattern);
       const fingerprintHex = /^[0-9a-f]{8}$/;
-      for (const fp of [fpConditional, fpEmployerChoice, fpSelfDirected, fpDirectNoContribution]) {
+      for (const fp of [fpOpener, fpStockPhrase, fpStockPattern]) {
         assert(fingerprintHex.test(fp), `a fingerprint is an 8-char lowercase hex digest, got ${JSON.stringify(fp)}`);
       }
-      assert(new Set([fpConditional, fpEmployerChoice, fpSelfDirected, fpDirectNoContribution]).size === 4,
-        `four different branches of one check must fingerprint differently, got ${JSON.stringify({ fpConditional, fpEmployerChoice, fpSelfDirected, fpDirectNoContribution })}`);
+      assert(new Set([fpOpener, fpStockPhrase, fpStockPattern]).size === 3,
+        `three different branches of one check must fingerprint differently, got ${JSON.stringify({ fpOpener, fpStockPhrase, fpStockPattern })}`);
 
-      // Same branch (the inward-facing "look forward"/"want to" close),
-      // different letter text: the quoted evidence span differs every round
-      // even when the rule is stuck on the identical branch, so a fingerprint
-      // that did not strip it would never repeat and this feature would be
-      // useless for exactly the case it exists for.
-      const selfDirectedAgain = checkDirectWelcomeClosing(['I look forward to exploring the engineering roadmap in far more depth than we have covered so far.']);
-      assert(!selfDirectedAgain.passed && selfDirectedAgain.detail !== selfDirected.detail,
+      // Same branch, different quoted text: the quoted span differs every
+      // round even when the rule is stuck on the identical branch, so a
+      // fingerprint that did not strip it would never repeat and this feature
+      // would be useless for exactly the case it exists for.
+      const stockPhraseAgain = checkGenericPhrases(['I am passionate about the work.']);
+      assert(!stockPhraseAgain.passed && stockPhraseAgain.detail !== stockPhrase.detail,
         'fixture sanity: the second letter must trip the same branch with genuinely different quoted text');
-      assert(fingerprintOf(selfDirectedAgain) === fpSelfDirected,
-        'the same branch on different letter text must fingerprint identically');
+      assert(fingerprintOf(stockPhraseAgain) === fpStockPhrase,
+        'the same branch on different quoted text must fingerprint identically');
 
       // Same branch, different paragraph ordinal: an earlier paragraph being
-      // rewritten in a later revision can shift which paragraph is last
-      // without changing which rule fires or why.
-      const selfDirectedLaterParagraph = checkDirectWelcomeClosing([
+      // rewritten in a later revision can shift which paragraph carries the
+      // defect without changing which rule fires or why.
+      const stockPhraseLaterParagraph = checkGenericPhrases([
         'This filler paragraph stands in for an earlier one that changed between revisions.',
-        'I look forward to learning more about the team.',
+        'I am a team player.',
       ]);
-      assert(!selfDirectedLaterParagraph.passed && selfDirectedLaterParagraph.detail.includes('paragraph 2')
-        && selfDirected.detail.includes('paragraph 1'),
-      `fixture sanity: the two must differ only by paragraph ordinal, got ${JSON.stringify({ one: selfDirected.detail, two: selfDirectedLaterParagraph.detail })}`);
-      assert(fingerprintOf(selfDirectedLaterParagraph) === fpSelfDirected,
+      assert(!stockPhraseLaterParagraph.passed && stockPhraseLaterParagraph.detail.includes('paragraph 2')
+        && stockPhrase.detail.includes('paragraph 1'),
+      `fixture sanity: the two must differ only by paragraph ordinal, got ${JSON.stringify({ one: stockPhrase.detail, two: stockPhraseLaterParagraph.detail })}`);
+      assert(fingerprintOf(stockPhraseLaterParagraph) === fpStockPhrase,
         'the same branch firing on a different paragraph ordinal must fingerprint identically');
-      return { fpConditional, fpEmployerChoice, fpSelfDirected, fpDirectNoContribution };
+      return { fpOpener, fpStockPhrase, fpStockPattern };
     },
   },
   {
@@ -8281,30 +8213,29 @@ Personal Projects`;
     run() {
       _resetPasteHandoffDiagnostics();
       try {
-        // Unlike the other three branches, the employer-choice close's own
-        // regex (EMPLOYER_CHOICE_CLOSE) quotes a bounded span of whatever the
-        // letter wrote between "whether" and "or"/"versus" verbatim — real
-        // letter content, not fixed check vocabulary — so this fixture is the
-        // one that actually exercises the curly-quote strip end to end
-        // instead of only ever quoting the check's own constant wording.
+        // The target-company binding quotes a bounded span of whatever
+        // company the letter wrote verbatim — real letter content, not fixed
+        // check vocabulary — so this fixture is the one that actually
+        // exercises the curly-quote strip end to end instead of only ever
+        // quoting the check's own constant wording.
         const marker = 'UNIQUEWORD08';
-        const observation = checkDirectWelcomeClosing([`I welcome a conversation about whether the ${marker} prototype or the browser agent should be the first priority.`]);
+        const observation = checkTargetCompanyBinding([`I would bring my delivery practice to ${marker} Company's platform team.`], 'Northstar Labs, Inc.', ['Acme']);
         assert(!observation.passed && observation.detail.includes(marker),
-          `fixture sanity: the employer-choice close must fail and quote the letter's own marker word (detail=${JSON.stringify(observation.detail)})`);
+          `fixture sanity: the copied target must fail and quote the letter's own marker word (detail=${JSON.stringify(observation.detail)})`);
         const { checkIds, checkFingerprints } = pasteRejectionCheckIds([`${observation.id}: ${observation.detail}`]);
         recordPasteHandoffDiagnostic({
           stage: 'cover-letter', outcome: 'rejected', reason: 'VALIDATION_FAILED',
           responseChars: 4302, revision: 2, logCount: 2,
           errorCount: 1, checkIds, checkFingerprints,
         });
-        const fp = checkFingerprints['direct-welcome-closing'];
+        const fp = checkFingerprints['target-company-binding'];
         assert(/^[0-9a-f]{8}$/.test(fp) && !fp.includes(marker), `the fingerprint itself is opaque hex, got ${JSON.stringify(fp)}`);
         const snapshot = getPasteHandoffDiagnosticsSnapshot();
         const stored = snapshot.receipts.at(-1);
         assert(JSON.stringify(stored).includes(fp) && !JSON.stringify(stored).includes(marker),
           `the stored receipt fields must carry the fingerprint but never the letter's marker word, got ${JSON.stringify(stored)}`);
         const markdown = buildPasteHandoffDiagnosticsMarkdown();
-        assert(markdown.includes(`failed checks direct-welcome-closing (${fp})`),
+        assert(markdown.includes(`failed checks target-company-binding (${fp})`),
           `the receipt line must attach the fingerprint to its check id, got ${markdown}`);
         assert(!markdown.includes(marker) && !markdown.includes(observation.detail),
           `the rendered receipt must never carry the letter's own quoted text, got ${markdown}`);

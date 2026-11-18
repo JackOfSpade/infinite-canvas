@@ -1,8 +1,10 @@
 import { assert } from './testHelpers.js';
-import { pasteRejectionCheckIds } from '../../electron/ipc/localAiApplication.js';
+import { __localizedCoverLetterCorrectiveGuidanceForTests, PASTE_CHECK_PROSE_UNITS, pasteRejectionCheckIds, pasteReportableCheckIds } from '../../electron/ipc/localAiApplication.js';
+import { locateGateFindings } from '../../electron/ipc/applicationGateFindings.js';
+import { cleanRuleTally, summarizeRuleTally } from '../../electron/ipc/applicationRuleTally.js';
 import {
   CHECK_CLASSES, CHECK_DISPOSITIONS, CHECK_DISPOSITION_VALUES,
-  checkDisposition, checkEvidenceGrounding, checkMappingNarrativeStructure,
+  checkDisposition, checkEvidenceGrounding,
   checkParagraphArgumentLinks, checkRoleThesis, evaluateCoverLetterChecks,
   partitionCheckResults,
 } from '../../electron/ipc/coverLetterChecks.js';
@@ -17,15 +19,14 @@ export default [
   {
     name: 'Letter disposition table covers every emitted id, has no stray active key, and fails closed',
     run() {
-      assert(JSON.stringify(CHECK_DISPOSITION_VALUES) === JSON.stringify(['gate', 'advisory', 'off']), 'the disposition vocabulary stays closed');
+      assert(JSON.stringify(CHECK_DISPOSITION_VALUES) === JSON.stringify(['gate', 'advisory']), 'the disposition vocabulary stays closed');
       const emitted = new Set([
         ...evaluateCoverLetterChecks().map(row => row.id),
         checkRoleThesis({}).id,
-        checkMappingNarrativeStructure({}).id,
         checkEvidenceGrounding({}, {}).id,
         checkParagraphArgumentLinks({}).id,
         'role-thesis-shape', 'figure-count', 'letter-paragraph-ceiling',
-        'paragraph-argument-shape', 'paragraph-argument-span-gaps', 'unsupported-experience-span',
+        'paragraph-argument-shape', 'unsupported-experience-span',
       ]);
       for (const row of evaluateCoverLetterChecks()) {
         for (const part of row.parts || [row]) emitted.add(part.id);
@@ -68,17 +69,35 @@ export default [
     },
   },
   {
-    name: 'Production letter evaluation skips off checks while the full audit still enumerates them',
+    name: 'Retired cover-letter checks are gone from the table and the battery, and every reader of a stored retired id tolerates it',
     run() {
-      for (const career of careers) {
-        const paragraph = `I ${career.work}.`;
-        const input = { paragraphs: [paragraph], jobText: `We need ${career.need}.` };
-        const full = evaluateCoverLetterChecks(input);
-        const active = evaluateCoverLetterChecks({ ...input, activeOnly: true });
-        assert(full.length > active.length, `${career.work}: audit enumerates more checks than production`);
-        assert(active.every(row => checkDisposition(row.id) !== 'off'), `${career.work}: no off result was executed`);
-        assert(active.every(row => full.some(other => other.id === row.id)), `${career.work}: active rows are a subset`);
+      // Ids that were once judged 'off' and then deleted. Stored rule tallies, edit logs and archived runs may still name them.
+      const retired = ['salient-phrase-echo', 'experience-infinitive-grammar', 'company-specificity', 'vague-domain-work-label', 'migration-object-clarity',
+        'detached-relevance-claim', 'additive-seam', 'responsibility-transition', 'tool-calls-garden-path', 'low-information-tool-build',
+        'dangling-paragraph-transition', 'plain-register', 'introductory-workplace-comma', 'visual-reference-precision', 'direct-welcome-closing',
+        'opening-demonstrative', 'opening-employer-shorthand', 'adjacent-employer-repetition', 'entailed-premise', 'repeated-sentence-shape',
+        'repeated-transfer-carrier', 'dangling-demonstrative', 'transfer-carrier-budget', 'mapping-narrative-structure', 'paragraph-argument-span-gaps'];
+      const emitted = new Set(pasteReportableCheckIds());
+      for (const id of retired) {
+        assert(!Object.hasOwn(CHECK_DISPOSITIONS, id) && !emitted.has(id) && !Object.hasOwn(PASTE_CHECK_PROSE_UNITS, id), `${id}: a retired check is in no table and no battery`);
+        // A stored id this build no longer knows is read as unknown, never as a throw.
+        assert(checkDisposition(id) === 'gate', `${id}: an unlisted id fails closed in the disposition lookup`);
+        const receipt = pasteRejectionCheckIds([`${id}: stored detail`]);
+        assert(Array.isArray(receipt.checkIds) && receipt.uncodedErrors === 0, `${id}: the rejection receipt reads it without throwing`);
+        const guidance = __localizedCoverLetterCorrectiveGuidanceForTests([{ id, passed: false, detail: 'stored' }]);
+        assert(typeof guidance === 'string' && guidance.length > 0, `${id}: the correction guidance reads it without throwing`);
+        const findings = locateGateFindings({ errors: [`${id}: stored detail`], documents: {}, registry: { rows: [], errors: [] } });
+        assert(findings.length === 1 && findings[0].checkId === id && findings[0].scope === 'document', `${id}: the gate-finding locator keeps it as a document-scope finding`);
+        const sha = 'a'.repeat(64);
+        const tally = cleanRuleTally({ version: 1, steps: [{ family: 'write', subject: 'cover-letter', lastRejectedSha256: sha, runs: { [id]: 2 }, rules: [{ key: id, id, n: 2 }] }] });
+        const summary = summarizeRuleTally(tally);
+        assert(summary.length === 1 && summary[0].ruleId === id && summary[0].count === 2, `${id}: a stored rule tally still summarizes it`);
       }
+      // A retired id in a result row is an unattributable failure, so it blocks rather than being waved through.
+      assert(partitionCheckResults([{ id: 'direct-welcome-closing', passed: false, detail: 'x' }]).blocking.length === 1, 'an unlisted failed row still blocks');
+      // Production evaluation runs every battery row: nothing is filtered by disposition any more.
+      const rows = evaluateCoverLetterChecks({ paragraphs: ['I maintained orchard routes for seasonal deliveries.'], jobText: 'We need seasonal deliveries.' });
+      assert(rows.length > 0 && rows.every(row => Object.hasOwn(CHECK_DISPOSITIONS, row.id) || (row.parts || []).every(part => Object.hasOwn(CHECK_DISPOSITIONS, part.id))), 'every evaluated row is classified');
     },
   },
   {

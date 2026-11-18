@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readJobsSource } from './jobsSourceFixture.mjs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -89,9 +90,10 @@ export default [
   {
     name: 'listing liveness capture: ZipRecruiter detail keeps its one navigation and removes text-only closure',
     async run() {
-      const source = await fs.readFile(new URL('electron/ipc/browser/manualScraper.js', SOURCE_ROOT), 'utf8');
-      const detail = between(source, 'async function expandDescriptions(', 'export async function enrichResolvedJobDescriptions(');
-      const capture = between(source, 'export async function captureZipRecruiterListingLiveness(', '/** Convert a Retry-After header');
+      const source = await fs.readFile(new URL('electron/ipc/browser/manualScraper/expandByNavigation.js', SOURCE_ROOT), 'utf8');
+      const detail = source.slice(source.indexOf('async function expandDescriptionsByNavigation('));
+      const detailParsingSource = await fs.readFile(new URL('electron/ipc/browser/manualScraper/detailParsing.js', SOURCE_ROOT), 'utf8');
+      const capture = between(detailParsingSource, 'export async function captureZipRecruiterListingLiveness(', '/** Convert a Retry-After header');
       assert.match(capture, /if \(result\.verdict === 'unknown'\) return row;/u,
         'an unknown visit never enters the stamping branch');
       oneDetailNavigation(detail);
@@ -396,11 +398,14 @@ export default [
   {
     name: 'listing liveness capture: every production capture handler installs the rule snapshot',
     async run() {
-      const source = await fs.readFile(new URL('electron/ipc/jobs.js', SOURCE_ROOT), 'utf8');
-      const handlers = ['search-jobs', 'search-jobs-single-source', 'score-jobs', 'resolve-job-source', 'resume-job-source'];
-      for (const [index, channel] of handlers.entries()) {
-        const next = handlers[index + 1];
-        const section = between(source, `handleSafe('${channel}',`, next ? `handleSafe('${next}',` : "ipcMain.handle('record-resolve-merge',");
+      const entry = readJobsSource('searchHandlers');
+      const board = await fs.readFile(new URL('electron/ipc/jobs/boardHandlers.js', SOURCE_ROOT), 'utf8');
+      const recovery = await fs.readFile(new URL('electron/ipc/jobs/recoveryHandlers.js', SOURCE_ROOT), 'utf8');
+      // score-jobs lives in the board handler module, Solve and Continue in the recovery module; search in the search module.
+      const handlers = [['search-jobs', entry, "handleSafe('search-jobs-single-source',"], ['search-jobs-single-source', entry, '\n}\n'],
+        ['score-jobs', board, "handleSafe('research-job-compensation',"], ['resolve-job-source', recovery, "handleSafe('resume-job-source',"], ['resume-job-source', recovery, "ipcMain.handle('record-resolve-merge',"]];
+      for (const [channel, source, nextMarker] of handlers) {
+        const section = between(source, `handleSafe('${channel}',`, nextMarker);
         assert.match(section, /captureListingLiveness: true/u, `${channel} snapshots calibrated rules`);
       }
     },
@@ -433,8 +438,8 @@ export default [
       assert.equal(wall, row, 'a transient error shell preserves the prior pair');
       assert.deepEqual(wall.boardClosed, prior.boardClosed);
       assert.deepEqual(wall.listingLiveness, prior.listingLiveness);
-      const source = await fs.readFile(new URL('electron/ipc/browser/manualScraper.js', SOURCE_ROOT), 'utf8');
-      const detail = between(source, 'async function expandDescriptions(', 'export async function enrichResolvedJobDescriptions(');
+      const source = await fs.readFile(new URL('electron/ipc/browser/manualScraper/expandByNavigation.js', SOURCE_ROOT), 'utf8');
+      const detail = source.slice(source.indexOf('async function expandDescriptionsByNavigation('));
       assert.match(detail, /const otherHostNotFound = \[404, 410\]\.includes\(Number\(navigationStatus\)\)\s*&& detailFinalHostClass === 'other'/u);
       assert.match(detail, /wall: detailErrorShellSeen \? 'ziprecruiter-error-shell' : null/u);
       assert.match(detail, /descriptionText: text,\s*descriptionCapture,/u);
@@ -488,7 +493,7 @@ export default [
   {
     name: 'listing liveness capture: ZipRecruiter expansion keeps other-host 404, treats error shell as wall and forwards same-visit text',
     async run() {
-      const source = await fs.readFile(new URL('electron/ipc/browser/manualScraper.js', SOURCE_ROOT), 'utf8');
+      const source = await fs.readFile(new URL('electron/ipc/browser/manualScraper/expandByNavigation.js', SOURCE_ROOT), 'utf8');
       assert.match(source, /runtime\?\.delay/u, 'the shell retry uses an injected delay in the fake-page test');
       const requestedUrl = 'https://www.ziprecruiter.com/jobs/synthetic123';
       const prior = {

@@ -376,7 +376,24 @@ export function linkedInPacingWaitMs(pacing = {}) {
 
 // Public endpoint: linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search
 // Returns HTML snippets of job cards — no auth, no page rendering needed.
-// Paginates in increments of 25 via the `start` parameter.
+// `start` is a ROW offset and a page holds however many cards the endpoint
+// chooses to send (10 when measured live on 2026-11-18, 25 before that). The
+// walk therefore advances by the cards each page actually returned; a fixed
+// step of 25 over 10-row pages silently skipped 15 of every 25 postings.
+
+/**
+ * Waits before asking again for a page LinkedIn answered with HTTP 429. The
+ * guest search throttles single requests at random (a cold first request was
+ * seen to get a 429 and the next one a 200), so one 429 is not proof of a
+ * block. Only a page still refused after every wait ends the platform's walk.
+ */
+export const LINKEDIN_THROTTLE_RETRY_WAITS_MS = Object.freeze([45000, 90000, 180000]);
+
+/** Row offset of the page after one that returned `cardCount` cards. */
+export function linkedInNextStart(start, cardCount) {
+  const count = Math.floor(Number(cardCount) || 0);
+  return start + (count > 0 ? count : 25);
+}
 
 /**
  * Fetch jobs from LinkedIn's public API endpoint (no login needed).
@@ -390,7 +407,9 @@ export function linkedInPacingWaitMs(pacing = {}) {
  *   nothing until the whole function resolves — a false "hung" read downstream
  *   (see fetchHttpSources). Never throws into the scrape.
  */
-export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = null, location = '', onProgress = null) {
+export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = null, location = '', onProgress = null, {
+  throttleRetryWaitsMs = LINKEDIN_THROTTLE_RETRY_WAITS_MS,
+} = {}) {
   const locParam = String(location || '').trim();
   const queryList = Array.isArray(queries) ? queries : [queries];
   const seenUrls = new Set();
@@ -449,8 +468,10 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     // No user page/row cap is plumbed into this source, so this walk is always
     // "unlimited" and the trickle counter is its repeating-page guard.
     const trickle = makeTrickleCounter();
-    for (let start = 0; ; start += 25) {
+    let pageIndex = -1;
+    for (let start = 0; ;) {
       if (signal?.aborted) break;
+      pageIndex++;
       const pacing = linkedInApiRequestPacing({ requestsIssued: apiRequestsIssued });
       if (pacing.delayDue) {
         if (pacing.checkpointDue) {
@@ -478,7 +499,7 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
       // Count at dispatch, so a timeout/429 is still reflected in the next
       // decision if the caller keeps this result for diagnostics.
       apiRequestsIssued++;
-      const r = await safeApiFetch(`https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?${params}`, {
+      const requestPage = () => safeApiFetch(`https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?${params}`, {
         headers: {
           'Accept': 'text/html',
           'User-Agent': DESKTOP_CHROME_UA,
@@ -486,18 +507,29 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
         },
         signal: createTimeoutSignal(signal, apiTimeout('linkedin-api')),
       }, 'linkedin');
+      let r = await requestPage();
+      // A 429 is retried on the SAME page after a long wait, never at once.
+      const retryWaits = Array.isArray(throttleRetryWaitsMs) ? throttleRetryWaitsMs : [];
+      for (let attempt = 0; attempt < retryWaits.length && r.status === 429 && !signal?.aborted; attempt++) {
+        logger.warn(`[LinkedIn API] Query ${qi + 1}/${queryList.length} page ${pageIndex} returned 429; waiting ${Math.ceil(retryWaits[attempt] / 1000)}s before retry ${attempt + 1}/${retryWaits.length}`);
+        await sleepUnlessAborted(retryWaits[attempt], signal);
+        if (signal?.aborted) break;
+        apiRequestsIssued++;
+        r = await requestPage();
+      }
+      if (signal?.aborted && r.status === 429) { stopReason = 'aborted'; break; }
 
       // First detected warning wins — the rest of the loop bails. LinkedIn is
       // a heavy anti-bot source so if page 0 is blocked, page 1 will be too.
       if (r.warning && !warning) warning = r.warning;
       if (abortedDuringFetch(signal, r)) { stopReason = 'aborted'; break; }
       if (isLinkedInGuestPageLimit(r, start)) {
-        logger.info(`[LinkedIn API] Query ${qi + 1}/${queryList.length} reached the guest page limit at page ${start / 25}`);
+        logger.info(`[LinkedIn API] Query ${qi + 1}/${queryList.length} reached the guest page limit at page ${pageIndex}`);
         stopReason = 'provider-page-limit';
         break;
       }
       if (!r.ok) {
-        logger.warn(`[LinkedIn API] Query ${qi + 1}/${queryList.length} page ${start / 25} returned ${r.status}${r.warning ? ` (${r.warning.code})` : ''}`);
+        logger.warn(`[LinkedIn API] Query ${qi + 1}/${queryList.length} page ${pageIndex} returned ${r.status}${r.warning ? ` (${r.warning.code})` : ''}`);
         stopReason = 'blocked';
         break;
       }
@@ -592,12 +624,12 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
 
       // Log URL extraction misses so we can diagnose degraded card HTML.
       if (pageUrlMisses > 0) {
-        logger.warn(`[LinkedIn API] Query ${qi + 1} page ${start / 25}: ${pageUrlMisses} card(s) had no extractable URL`);
+        logger.warn(`[LinkedIn API] Query ${qi + 1} page ${pageIndex}: ${pageUrlMisses} card(s) had no extractable URL`);
       }
 
       // Page-boundary heartbeat — see onProgress doc above.
       try {
-        onProgress?.({ completed: qi, total: queryList.length, count: allJobs.length, detail: `q${qi + 1}/${queryList.length} · p${start / 25 + 1}` });
+        onProgress?.({ completed: qi, total: queryList.length, count: allJobs.length, detail: `q${qi + 1}/${queryList.length} · p${pageIndex + 1}` });
       } catch {
         // Progress callback is diagnostics-only — never let it break the scrape.
       }
@@ -618,7 +650,7 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
         cardsOnPage,
         newToThisQuery,
         unproductiveStreak,
-        nextStart: start + 25,
+        nextStart: linkedInNextStart(start, cards.length),
         maxResults: Infinity,
       });
       if (pageStop) {
@@ -635,6 +667,7 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
         logger.warn(`[LinkedIn API] Query ${qi + 1}/${queryList.length}: ${trickleGuard.detail}`);
         break;
       }
+      start = linkedInNextStart(start, cards.length);
     }
     if (stopReason) queryStopReasons.push({ query, stopReason });
     if (!signal?.aborted && warning === warningBeforeQuery && !firstPageUnanswered

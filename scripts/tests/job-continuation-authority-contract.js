@@ -1,5 +1,6 @@
 /** Focused adversarial contract: a continuation lease is never authority. */
 import assert from 'node:assert/strict';
+import { readJobsSource } from './jobsSourceFixture.mjs';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -141,7 +142,7 @@ export async function runJobContinuationAuthorityContract() {
 }
 
 export async function runSourceRecoveryPublicationContract() {
-  const source = await fs.readFile(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+  const source = readJobsSource('recoveryHandlers');
   for (const marker of ['const persistRecoveryPool = async', 'const persistSourceRecoveryJobs = async']) {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ic-source-publication-'));
     const canvasFilePath = path.join(dir, 'canvas.json');

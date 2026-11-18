@@ -23,19 +23,22 @@ Shared helpers that now exist once:
 | Modal focus trap | `src/components/useModalFocusTrap.js` |
 | Marketplace recovery peek | `src/hooks/useMarketplaceRecoveryPeek.js` |
 
-## Left on purpose
+## Third pass, same day
 
-These need an owner decision or are not worth the risk.
+The items first left on purpose were then done at the owner's request.
 
-- **Cue-card controller methods with no channel.** `electron/interviewWindow.js` still has `submitQuestion`, `followUpQuestion`, `selectPreparedCard`, `nextQuestion`, `useTranscriptQuestion`, `setAlwaysOnTop`, `setLatencyMode`, `close` and `getListeningState`. The window can no longer call them, but many tests drive the live matching logic through them.
-- **Cover-letter checks set to `off`.** They run only in tests. Stored check ids still name them, so none was deleted.
-- **Peer-boilerplate estimator (Amendment 3).** Built and tested but not wired in. Wire it or drop it.
-- **Atomic file writes.** Three copies differ in temp name, file mode, sync and cancel handling. Merging them could change what lands on disk.
-- **Large files.** `electron/ipc/jobs.js` and `electron/ipc/browser/manualScraper.js` were not split, because tests assert their source text.
-- **Glassdoor and Google page helpers in `manualScraper.js`.** Reachable only from tests, but they are the only fixture coverage of that page logic.
-- **Renderer imports from `electron/ipc`.** About 20 files share pure modules this way; moving two of them would not change that.
-- **Test fixture `mountComponent.js`.** It bundles react-dom before the page globals exist, so `onChange` may not fire in tests that use it directly. Fixing it touches about 10 test files.
-- **Tone notes.** Nothing ever wrote them, so the review prompt section and the replay markers that read them were removed instead of inventing a writer.
+- **Cue-card controller.** The methods the window could no longer call are gone. Tests now drive answer matching the way the app does, through the listening path.
+- **Cover-letter checks set to `off`.** All 29 deleted. Readers of stored data tolerate the retired ids.
+- **Peer-boilerplate estimator.** Removed. Scores are unchanged, because it never ran with data.
+- **Atomic file writes.** Nine copies now use `atomicWriteFile` in `electron/utils/atomicWrite.js`, with options that keep each caller's temp name, mode and sync behaviour.
+- **Large files split.** `electron/ipc/jobs.js` (19,317 lines) is now an entry file plus 12 modules in `electron/ipc/jobs/`. `electron/ipc/browser/manualScraper.js` (9,418 lines) is an entry file plus 12 modules in `electron/ipc/browser/manualScraper/`. Shared state lives in `jobs/state.js` and `manualScraper/scrapeState.js`. Source-text tests read the split files through `scripts/tests/jobsSourceFixture.mjs` and `manualScraperSourceFixture.mjs`.
+- **Design System folder.** Reviewed; little to remove. One duplicate upload image deleted and `ENGINEERING.md` corrected. `STYLE.md` and `CONTENT_RULES.md` now say section headings are untracked, which is what `resume.css` has always rendered; the AI reads both files when generating.
+
+## Still left
+
+- **Glassdoor and Google page helpers.** Reachable only from tests, but they are the only fixture coverage of that page logic.
+- **Renderer imports from `electron/ipc`.** About 20 files share pure modules this way.
+- **Test fixture `mountComponent.js`.** It bundles react-dom before the page globals exist, so `onChange` may not fire in tests that use it directly.
 
 ## Behaviour changes worth knowing
 

@@ -71,10 +71,11 @@ function rowsRepeatingAnotherEmployersDescription(list) {
  *   searched that returned nothing and gave no warning of their own, per-site counts of responses a fetcher could not
  *   read at all, per-site counts of dated rows the collection window dropped (they had a posted date), and sites whose
  *   description walk never ran this run (a local-only continuation), where a missing description is by design rather
- *   than a broken site; only the description check is exempted for those, every other check still applies
+ *   than a broken site; only the description check is exempted for those, every other check still applies; and
+ *   `measuredEarlierBySource`, per-site counts of cards an earlier blocked run read and this run left unopened
  * @returns {Array<{ source: string, field: string, rows: number, missing: number, share: number, limit: number }>}
  */
-export function assessSourceHealth(rows, { silentlyEmptySourceIds = [], pageShapeFailures = {}, datedOutsideWindowBySource = {}, descriptionNotFetchedSourceIds = [] } = {}) {
+export function assessSourceHealth(rows, { silentlyEmptySourceIds = [], pageShapeFailures = {}, datedOutsideWindowBySource = {}, descriptionNotFetchedSourceIds = [], measuredEarlierBySource = {} } = {}) {
   const bySource = new Map();
   for (const row of Array.isArray(rows) ? rows : []) {
     const source = text(row?.source).toLowerCase();
@@ -86,6 +87,14 @@ export function assessSourceHealth(rows, { silentlyEmptySourceIds = [], pageShap
   const datedOutsideWindow = source => {
     const count = Number(datedOutsideWindowBySource?.[source]);
     return Number.isFinite(count) && count > 0 ? count : 0;
+  };
+  // Cards an earlier blocked run of the same site read and this run left
+  // unopened. That run measured every field on them, so they widen each field
+  // check's denominator as complete rows. They never count toward the minimum
+  // sample: a check still needs enough rows opened in THIS run to say anything.
+  const measuredEarlier = source => {
+    const count = Number(measuredEarlierBySource?.[source]);
+    return Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
   };
   const failures = [];
   // A local-only continuation never runs the description walk, so those rows
@@ -106,7 +115,7 @@ export function assessSourceHealth(rows, { silentlyEmptySourceIds = [], pageShap
       const limit = check.maxMissingShareBySource?.[source] ?? check.maxMissingShare ?? DEFAULT_MAX_MISSING_SHARE;
       // Rows the window dropped measured a date, so only the posted check may
       // widen its denominator with them.
-      const measured = check.field === 'posted' ? list.length + datedOutsideWindow(source) : list.length;
+      const measured = list.length + measuredEarlier(source) + (check.field === 'posted' ? datedOutsideWindow(source) : 0);
       const share = missing / measured;
       if (share > limit) failures.push({ source, field: check.field, rows: measured, missing, share, limit });
     }

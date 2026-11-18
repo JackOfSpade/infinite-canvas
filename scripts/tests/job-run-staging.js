@@ -1,6 +1,7 @@
 import { __getJobsTelemetryForReportForTests, __queryFanOutForTests, __resetJobsTelemetryForTests, __runWithIpcRequestContextForTests, activateRunForResume, assert, appendJobsHistory, blankJobPreferencePlan, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, careerInputFingerprint, careerProfileFingerprint, clearRun, clearRunWithResult, completeRunWithReceipt, createModuleRunQueue, evaluateJobPreferences, fs, getJobsTelemetry, ipcMain, isJobRunAutomaticRecoveryEligible, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, markProviderGathered, markSourceStatus, normalizeJobPreferencePlan, normalizeJobRunProfileFingerprint, os, path, pauseRunForManualResume, readLastRunReceipt, readRunState, readStagedJobs, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordSourcePage, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, setStage, startRun, validateExactResumeRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, writeLastRunReceipt } from '../test-dependencies.js';
 import { createDurableBoardPauseControl, pauseBoardOwnedSearch, jobBoardSavedPauseOutcome } from '../../src/utils/jobBoardSavedPause.js';
 import { runInNewContext } from 'node:vm';
+import { readJobsSource, readJobsSources } from './jobsSourceFixture.mjs';
 import { TRANSIENT_PROCESSING_HUB_STATES } from '../../src/utils/persistenceTransientState.js';
 // The bug-report builders under test. test-dependencies.js already re-exports
 // all three; they are imported on their own line so the shared bundle import
@@ -831,7 +832,7 @@ export default [
   {
     name: 'crash resume: one logged-out provider blocks only itself while staged and eligible sources continue',
     run: () => {
-      const jobs = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobs = readJobsSources('jobs', 'searchHandlers');
       const search = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
       const card = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
       const paused = fs.readFileSync(path.resolve('src/nodes/jobsearch/JobSearchSourcesReadyState.jsx'), 'utf8');
@@ -896,7 +897,7 @@ export default [
         && shouldDiscardJobRunAfterAbort(unrelatedFailure) === false,
       'Stop or removal of an active source card keeps its exact staged run; Reset/delete retain their token-scoped cleanup policy');
 
-      const jobs = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobs = readJobsSources('jobs', 'searchHandlers');
       const abortStart = jobs.indexOf('const throwIfSearchAborted = async () => {');
       const abortEnd = jobs.indexOf('// ── Browser sources', abortStart);
       const abortPolicy = jobs.slice(abortStart, abortEnd);
@@ -911,7 +912,7 @@ export default [
       assert(abortStart >= 0 && abortEnd > abortStart
         && abortPolicy.includes('shouldDiscardJobRunAfterAbort(reason)')
         && abortPolicy.includes("CANCEL_CAUSE_LABELS[reason?.cancelCause]")
-        && jobs.includes("'job-source-card-removed'")
+        && readJobsSource('analysisStore').includes("'job-source-card-removed'")
         && jobs.includes('CHECKPOINT_PRESERVING_ABORT_CAUSES.has(reason?.cancelCause)')
         && preserveStart >= 0 && preserveEnd > preserveStart
         && savedStop.includes('pauseJobRunAndCancel({')
@@ -1008,7 +1009,7 @@ export default [
         'an exact Resume must re-arm automatic recovery before continued work');
 
         const search = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
-        const jobs = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+        const jobs = `${readJobsSource('jobs')}\n${readJobsSource('searchHandlers')}\n${readJobsSource('coreHandlers')}`;
         const preload = fs.readFileSync(path.resolve('electron/preload.js'), 'utf8');
         const effectStart = search.indexOf('// Unexpected app/window interruption resumes without another click.');
         const effectEnd = search.indexOf('const handleFinishWithSavedListings', effectStart);
@@ -3094,7 +3095,7 @@ export default [
     run: async () => {
       const [preload, jobs] = await Promise.all([
         fs.promises.readFile(path.resolve('electron/preload.js'), 'utf8'),
-        fs.promises.readFile(path.resolve('electron/ipc/jobs.js'), 'utf8'),
+        fs.promises.readFile(path.resolve('electron/ipc/jobs/coreHandlers.js'), 'utf8'),
       ]);
       for (const [rendererMethod, channel] of [
         ['interpretJobPreferences', 'interpret-job-preferences'],
@@ -4055,7 +4056,7 @@ export default [
         await fs.promises.rm(mismatchRoot, { recursive: true, force: true });
       }
 
-      const jobsSource = await fs.promises.readFile(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobsSource = readJobsSources('jobs', 'searchHandlers');
       const handlerStart = jobsSource.indexOf("handleSafe('search-jobs'");
       const priorReadAt = jobsSource.indexOf("readRunState(canvasFilePath, Date.now(), { nodeId })", handlerStart);
       const exactGuardAt = jobsSource.indexOf('const exactResumeFailure = validateExactResumeRun(', priorReadAt);
@@ -4215,7 +4216,7 @@ export default [
   {
     name: 'job run staging: saved-canvas start failure fails closed before source collection',
     run: async () => {
-      const jobsSource = await fs.promises.readFile(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobsSource = readJobsSources('jobs', 'searchHandlers');
       assert(
         jobsSource.includes('if (canvasFilePath && !startedRun)')
           && jobsSource.includes('No job sources were queried and existing results were left unchanged.')
@@ -5218,13 +5219,14 @@ export default [
   {
     name: 'job run staging: API fan-out preserves pagination and finite-cap diagnostics',
     run: () => {
-      const source = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
-      const fanOutStart = source.indexOf('async function queryFanOut(');
-      const fanOutEnd = source.indexOf('\nasync function fetchHttpSources(', fanOutStart);
-      const fanOut = source.slice(fanOutStart, fanOutEnd);
+      const source = readJobsSources('jobs', 'searchHandlers');
+      const collectionSource = readJobsSource('collection');
+      const fanOutStart = collectionSource.indexOf('async function queryFanOut(');
+      const fanOutEnd = collectionSource.indexOf('\nexport async function fetchHttpSources(', fanOutStart);
+      const fanOut = collectionSource.slice(fanOutStart, fanOutEnd);
       const httpStart = fanOutEnd;
-      const httpEnd = source.indexOf('\n/**\n * Resolve only the board location.', httpStart);
-      const http = source.slice(httpStart, httpEnd);
+      const httpEnd = collectionSource.indexOf('\n/**\n * Resolve only the board location.', httpStart);
+      const http = collectionSource.slice(httpStart, httpEnd);
       const apiMergeStart = source.indexOf('for (const res of apiResults)');
       const apiMergeEnd = source.indexOf('// Each API fetcher now returns', apiMergeStart);
       const apiMerge = source.slice(apiMergeStart, apiMergeEnd);
@@ -5364,7 +5366,7 @@ export default [
   {
     name: 'job run staging: interrupted role-band work is not a market-cohort failure',
     run: () => {
-      const source = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const source = readJobsSource('compensationResearch');
       const partitionStart = source.indexOf('for (const roleCandidates of candidatesByRole.values())');
       const lookupStart = source.indexOf('let roleBands;', partitionStart);
       const preLookup = source.slice(partitionStart, lookupStart);
@@ -5391,7 +5393,7 @@ export default [
       // FULL `deduped` list afterward so previously-screened rows pass
       // through untouched instead of being replaced by (or re-judged into)
       // the fresh screen's output.
-      const source = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const source = readJobsSources('jobs', 'searchHandlers');
       const stageStart = source.indexOf('const roleScreenTitles = Array.isArray(activeJobPreferencePlan?.titles)');
       const stageEnd = source.indexOf('// Drop anything we\'ve already shown the user on a previous run.', stageStart);
       const stage = source.slice(stageStart, stageEnd);
@@ -5495,7 +5497,7 @@ export default [
     name: 'job run staging: renderer advances the completion anchor only after the matching successful terminal receipt',
     run: async () => {
       const source = await fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
-      const backend = await fs.promises.readFile(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const backend = readJobsSources('jobs', 'searchHandlers');
 
       const completionStart = source.indexOf('const completeJobRun = useCallback');
       const stagingStart = source.indexOf('const recordCollectionCompletion = useCallback', completionStart);
@@ -6444,7 +6446,7 @@ export default [
   {
     name: 'job run staging: interrupted source results never become terminal',
     run: () => {
-      const jobs = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobs = readJobsSources('jobs', 'searchHandlers');
       const terminalStart = jobs.indexOf('const markGatheredSourceTerminal = async');
       const terminalSlice = jobs.slice(terminalStart, jobs.indexOf('const runBrowserSourcesInOrder', terminalStart));
       assert(terminalSlice.includes("if (combinedSignal.aborted || rows.some(row => row?.cancelled === true || row?.stopReason === 'aborted')) return;")
@@ -6456,7 +6458,7 @@ export default [
   {
     name: 'job run staging: saved-source checkpoints fail closed while unsaved canvases stay sidecar-free',
     run: () => {
-      const jobs = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobs = readJobsSources('jobs', 'searchHandlers');
       const stageOnPage = jobs.slice(jobs.indexOf('const stageOnPage = async'), jobs.indexOf('const runBrowserSourcesInOrder'));
       const stageHttp = jobs.slice(jobs.indexOf('const stageHttpSource = async'), jobs.indexOf('jobsTelemetry.pipeline = {', jobs.indexOf('const stageHttpSource = async')));
       assert(stageOnPage.includes('const saved = await recordSourcePage(canvasFilePath')
@@ -6470,12 +6472,13 @@ export default [
   {
     name: 'job run staging: fatal gather branch aborts and drains its sibling, including clean HTTP zeros',
     run: () => {
-      const jobs = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobs = readJobsSources('jobs', 'searchHandlers');
       const gatherStart = jobs.indexOf('let gatherBranches = null;');
       const gatherCatch = jobs.indexOf('} catch (error) {', gatherStart);
       const gatherSlice = jobs.slice(gatherStart, jobs.indexOf('jobsTelemetry.pipeline = {', gatherCatch));
-      const httpStart = jobs.indexOf('// Flush this source to crash-recovery staging');
-      const httpSlice = jobs.slice(httpStart, jobs.indexOf('return { sourceId, jobs, warning', httpStart));
+      const collectionSrc = readJobsSource('collection');
+      const httpStart = collectionSrc.indexOf('// Flush this source to crash-recovery staging');
+      const httpSlice = collectionSrc.slice(httpStart, collectionSrc.indexOf('return { sourceId, jobs, warning', httpStart));
       const terminalStart = jobs.indexOf('const markGatheredSourceTerminal = async');
       const terminalSlice = jobs.slice(terminalStart, jobs.indexOf('const runBrowserSourcesInOrder', terminalStart));
       assert(gatherSlice.includes('gatherBranches = [')
@@ -6528,7 +6531,7 @@ export default [
 
         const search = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
         const card = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
-        const jobs = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+        const jobs = readJobsSource('coreHandlers');
         assert(search.includes('pauseJobRunAndCancel({')
           && search.includes('runId: jobRunIdRef.current || null')
           && !search.includes('runId: jobRunIdRef.current || resetData.jobRunId')

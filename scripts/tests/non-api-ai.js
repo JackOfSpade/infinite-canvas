@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { readAllJobsSources, readJobsSource } from './jobsSourceFixture.mjs';
 import { __allowDurableTaskIdsForTests } from '../../electron/ipc/nonApiAi.js';
 import { EventEmitter } from 'node:events';
 import nodeAssert, { rejects } from 'node:assert/strict';
@@ -481,7 +482,7 @@ export default [
       const scheduler = readFileSync(new URL('../../src/utils/handoffScheduler.js', import.meta.url), 'utf8');
       const sources = {
         preferences: readFileSync(new URL('../../electron/ipc/jobPreferences.js', import.meta.url), 'utf8'),
-        jobs: readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8'),
+        jobs: readAllJobsSources(),
         taxonomy: readFileSync(new URL('../../electron/ipc/jobTaxonomy.js', import.meta.url), 'utf8'),
         marketplace: readFileSync(new URL('../../electron/ipc/marketplace.js', import.meta.url), 'utf8'),
       };
@@ -813,10 +814,9 @@ export default [
       // failure must tear its siblings down rather than leave prompts on screen
       // that nothing can cancel once the IPC layer drops the controller.
       const prefSource = readFileSync(new URL('../../electron/ipc/jobPreferences.js', import.meta.url), 'utf8');
-      const jobsIpcSource = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
-      assert(jobsIpcSource.includes('durableRunHasAnyTask(manualAiRunId')
-        && jobsIpcSource.includes('companyResearchPipelineEligible: !(await hasPackedCompanyAssessment)')
-        && !jobsIpcSource.includes('legacyResearchMigrationNeeded')
+      assert(readJobsSource('coreHandlers').includes('durableRunHasAnyTask(manualAiRunId')
+        && readJobsSource('coreHandlers').includes('companyResearchPipelineEligible: !(await hasPackedCompanyAssessment)')
+        && !readAllJobsSources().includes('legacyResearchMigrationNeeded')
         && !prefSource.includes('legacyResearchStepProbe')
         && !prefSource.includes('useLegacyIndividualResearch')
         && !prefSource.includes('researchCompanyCriterion'),
@@ -1378,7 +1378,7 @@ export default [
   {
     name: 'non-API AI: scoring batches stay stable and a complete taxonomy plan avoids a redundant handoff',
     run: async () => {
-      const jobsSource = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      const jobsSource = readJobsSource('boardHandlers');
       const scoringStart = jobsSource.indexOf('const scoreBatch = async');
       const scoringEnd = jobsSource.indexOf('\n    // Live per-batch scoring progress', scoringStart);
       const scoring = jobsSource.slice(scoringStart, scoringEnd);
@@ -1426,7 +1426,7 @@ export default [
         && JSON.stringify(taxonomyMeta.fallbacks?.map(fallback => fallback.stage)) === JSON.stringify(['plan'])
         && taxonomyMeta.fallback?.stage === 'plan',
       'planner-only completion preserves its model diagnostics without fabricating a classifier stage');
-      assert(jobsSource.includes("from '../../src/utils/handoffScheduler.js';")
+      assert(jobsSource.includes("from '../../../src/utils/handoffScheduler.js';")
         && jobsSource.includes('await mapAutomaticHandoffs(scoringBatches, HANDOFF_CONCURRENCY, async (batch, batchIndex) =>')
         && jobsSource.includes('completedScoringJobCount')
         && jobsSource.includes('scored: signal?.aborted ? completedScoringJobCount : scoredJobs.length'),
@@ -4354,7 +4354,7 @@ export default [
       // and requestNonApiAi sends its IPC synchronously — so inside the single
       // Promise.all dispatch pass the singleton skipped a microtask turn and
       // jumped the queue. A historical 61-job run presented as 5, 1, 2, 3, 4.
-      const jobsSource = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      const jobsSource = readJobsSource('boardHandlers');
       const scoreBatchBody = jobsSource.slice(
         jobsSource.indexOf('const scoreBatch = async (batch, context = {}) => {'),
         jobsSource.indexOf('const batchMeta = {};'),

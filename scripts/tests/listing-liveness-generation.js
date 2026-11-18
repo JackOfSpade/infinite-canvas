@@ -77,8 +77,8 @@ export default [
   {
     name: 'Capture navigation pin keeps the ZipRecruiter liveness stamp reachable',
     run() {
-      const source = fs.readFileSync(new URL('../../electron/ipc/browser/manualScraper.js', import.meta.url), 'utf8');
-      const expansionStart = source.indexOf('async function expandDescriptions(');
+      const source = fs.readFileSync(new URL('../../electron/ipc/browser/manualScraper/expandByNavigation.js', import.meta.url), 'utf8');
+      const expansionStart = source.indexOf('async function expandDescriptionsByNavigation(');
       const mergeStart = source.indexOf('enhanced[i] = mergeExpandedJobDetail(job, {', expansionStart);
       const continuation = source.indexOf('if (text) expandedCount++', mergeStart);
       assert.ok(expansionStart >= 0 && mergeStart > expansionStart && continuation > mergeStart);

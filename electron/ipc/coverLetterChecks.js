@@ -21,14 +21,10 @@ const MAX_GENERIC_OBSERVATIONS = 12;
 export const MAX_LOGISTICS_CONTAINMENT_OBSERVATIONS = 8;
 export const MAX_HYPHENATION_OBSERVATIONS = 8;
 const MAX_ANCHOR_RELEVANCE_OBSERVATIONS = 8;
-const MAX_ADDITIVE_SEAM_OBSERVATIONS = 4;
-const MAX_RESPONSIBILITY_TRANSITION_OBSERVATIONS = 4;
 const MAX_POSTING_REFERENCE_OBSERVATIONS = 4;
 const MAX_CLAIMED_EQUIVALENCE_OBSERVATIONS = 4;
 const MAX_SENTENCE_LENGTH_OBSERVATIONS = 5;
 const MAX_PUNCTUATION_OBSERVATIONS = 8;
-const MAX_PLAIN_REGISTER_OBSERVATIONS = 4;
-const MAX_OPENING_DEMONSTRATIVE_OBSERVATIONS = 4;
 const MAX_PARAGRAPH_OPENER_OBSERVATIONS = 4;
 // The body-point cap states its count once, so it needs at most one
 // observation; the constant keeps the shared observationResult tail in use.
@@ -57,26 +53,6 @@ export const MIN_ANCHOR_RELEVANCE_CORPUS_WORDS = 60;
 // so the cover-letter contract prints the floor the thesis gate applies
 // rather than a hand-copied number beside it.
 export const MIN_ROLE_THESIS_WORDS = 6;
-// How much of a sentence is compared as a shape. Five skeleton elements is
-// what separated a template from parallelism on the measured corpus: four
-// elements admitted frames too short to be distinctive, and six stopped
-// judging sentences whose whole skeleton is shorter than that, which is most
-// short sentences. Exported so the letter contract prints the window this
-// check actually reads.
-export const SENTENCE_SHAPE_FRAME_WORDS = 5;
-// A window that is mostly wildcard carries no shape worth comparing, so a
-// frame needs this many literal function words among its elements before two
-// paragraphs sharing it means anything.
-const MIN_SENTENCE_SHAPE_FUNCTION_WORDS = 3;
-// Below this many paragraphs, a shared sentence shape is the whole letter
-// speaking with one voice rather than a template, and there is no repair to
-// ask for. Exported for the same reason as the window above.
-export const MIN_SHARED_SHAPE_PARAGRAPHS = 3;
-// The most repeated shapes one rejection names. Every shape over the ceiling
-// is the same defect class, so the message carries them together and one round
-// can clear them; the cap only bounds a letter templated at more positions
-// than a message can usefully list, and that letter is told more remain.
-const MAX_REPEATED_SHAPE_OBSERVATIONS = 4;
 // How long a verbatim run has to be before the letter is restating itself.
 // Two floors, because the distance between the two occurrences is what decides
 // when an echo reads as restatement: inside one paragraph the first statement
@@ -176,22 +152,6 @@ const BANNED_OPENERS = Object.freeze([
   'i am excited to apply',
   'i believe i would be a great fit',
 ]);
-
-// This is deliberately a small, explicit lexicon rather than an attempted
-// part-of-speech tagger. `My experience to date` is grammatical, while the
-// high-frequency cover-letter verbs below are not grammatical after "My
-// experience to". Keeping the set narrow prevents a prose-quality check from
-// turning defensible constructions into revision work.
-const EXPERIENCE_TO_GERUNDS = Object.freeze({
-  analyze: 'analyzing', apply: 'applying', assess: 'assessing', build: 'building',
-  communicate: 'communicating', conduct: 'conducting', coordinate: 'coordinating',
-  create: 'creating', deliver: 'delivering', develop: 'developing', enforce: 'enforcing',
-  ensure: 'ensuring', handle: 'handling', implement: 'implementing', improve: 'improving',
-  investigate: 'investigating', lead: 'leading', maintain: 'maintaining', manage: 'managing',
-  monitor: 'monitoring', operate: 'operating', patrol: 'patrolling', perform: 'performing',
-  protect: 'protecting', resolve: 'resolving', respond: 'responding', secure: 'securing',
-  supervise: 'supervising', support: 'supporting', train: 'training', work: 'working',
-});
 
 function text(value) {
   // Normalize typographic variants before every comparison.  The model and the
@@ -650,36 +610,6 @@ export function checkRoleThesis(plan = {}) {
   return split(true, '', 'roleThesis is one non-generic controlling claim');
 }
 
-const SECONDARY_NARRATIVE_ROLES = new Set(['foundation', 'corroborates', 'deepens', 'extends', 'qualifies']);
-
-/**
- * The schema makes the relationship visible to the provider; this gate keeps
- * a malformed or partial response from quietly restoring a two-proof résumé
- * tour. The first mapping establishes the argument, and any second mapping
- * must state why it follows rather than becoming another primary claim.
- */
-export function checkMappingNarrativeStructure(plan = {}) {
-  const mappings = Array.isArray(plan?.mappings) ? plan.mappings : [];
-  if (!mappings.length) return result('mapping-narrative-structure', false, 'plan has no primary mapping');
-  const primary = mappings[0] || {};
-  if (text(primary.narrativeRole) !== 'primary') {
-    return result('mapping-narrative-structure', false, 'first mapping must use narrativeRole “primary”');
-  }
-  if (!text(primary.relationToPrevious)) {
-    return result('mapping-narrative-structure', false, 'primary mapping must state how it establishes the roleThesis');
-  }
-  if (mappings.length < 2) return result('mapping-narrative-structure', true, 'one primary mapping supplies the minimum sufficient evidence');
-  const secondary = mappings[1] || {};
-  const role = text(secondary.narrativeRole);
-  if (!SECONDARY_NARRATIVE_ROLES.has(role)) {
-    return result('mapping-narrative-structure', false, 'second mapping must provide foundation, corroboration, deepening, extension, or qualification—not another primary argument');
-  }
-  if (!text(secondary.relationToPrevious)) {
-    return result('mapping-narrative-structure', false, 'second mapping must state its relationToPrevious');
-  }
-  return result('mapping-narrative-structure', true, `second mapping explicitly uses “${role}” to support the primary proof`);
-}
-
 export function checkEvidenceGrounding(plan = {}, evidence = {}) {
   const mappings = Array.isArray(plan?.mappings) ? plan.mappings : [];
   const bullets = bulletTexts(evidence);
@@ -727,11 +657,9 @@ export function checkEvidenceGrounding(plan = {}, evidence = {}) {
 // shapes (“I would apply that X to Y” and its few siblings) are not how a
 // relevance span is recognised and nothing requires one: they are the sentences
 // independent reviewers flagged as formulaic round after round, so the host
-// counts them (checkTransferCarrierBudget), refuses to let one form repeat in
-// neighbouring paragraphs (checkRepeatedTransferCarrier), refuses one as a
-// capability claim, and keeps their words out of the repeat comparison because
-// those two checks already police them. The nouns each shape accepts are arrays
-// so the demonstrative check reads the SAME lists the detector is built from.
+// refuses one as a capability claim and keeps their words out of the repeat
+// comparison. The nouns each shape accepts are arrays so every reader uses the
+// SAME lists the detector is built from.
 // The verb-object shape takes a singular noun; the noun-phrase-subject shape
 // also takes plurals.
 const TRANSFER_CUE_OBJECT_NOUNS = Object.freeze(['experience', 'work', 'capability', 'practice', 'approach', 'judgment']);
@@ -758,9 +686,7 @@ const FORMULAIC_TRANSFER_FRAME = new RegExp(String.raw`\b(?:i\s+would\s+(?:apply
 // not information, and the other proofs earn their place by what they show. The
 // first proof-bearing paragraph owes that sentence (explicitTransferOwed),
 // written in any wording that names the responsibility the paragraph answers
-// (checkParagraphArgumentLinks), and a letter may carry a stock transfer frame
-// in at most that many paragraphs (checkTransferCarrierBudget). One number is
-// both counts, so the two can never disagree.
+// (checkParagraphArgumentLinks).
 export const MAX_EXPLICIT_TRANSFER_PARAGRAPHS = 1;
 // How many proof-bearing paragraphs of ONE letter owe a claim span.
 //
@@ -927,10 +853,8 @@ export function paragraphHasCandidatePastProof(paragraph = '') {
  * Which paragraphs of a letter owe a sentence of their own about the target:
  * the first MAX_EXPLICIT_TRANSFER_PARAGRAPHS proof-bearing ones, counted in
  * letter order by the same boundary that decides which paragraphs owe an
- * argumentMapping at all. One function answers it for the completion gate, for
- * the drafting-stage span reporter and for the carrier budget, which is what
- * keeps the reporter a subset of the gate: they read the same paragraphs
- * through the same count. Returns one boolean per paragraph, in order.
+ * argumentMapping at all. The completion gate reads this one function.
+ * Returns one boolean per paragraph, in order.
  */
 export function explicitTransferOwed(paragraphs = []) {
   return firstProofBearingParagraphs(paragraphs, MAX_EXPLICIT_TRANSFER_PARAGRAPHS);
@@ -940,9 +864,8 @@ export function explicitTransferOwed(paragraphs = []) {
  * Which paragraphs of a letter owe a claim span: the first
  * MAX_EXPLICIT_CLAIM_PARAGRAPHS proof-bearing ones, counted in letter order by
  * the same boundary as explicitTransferOwed and for the same reason, read by the
- * same two consumers: the completion gate (checkParagraphArgumentLinks) and the
- * drafting-stage span reporter (paragraphArgumentSpanGaps). Returns one boolean
- * per paragraph, in order.
+ * completion gate (checkParagraphArgumentLinks). Returns one boolean per
+ * paragraph, in order.
  */
 export function explicitClaimOwed(paragraphs = []) {
   return firstProofBearingParagraphs(paragraphs, MAX_EXPLICIT_CLAIM_PARAGRAPHS);
@@ -952,9 +875,8 @@ export function explicitClaimOwed(paragraphs = []) {
  * Which paragraphs of a letter owe a relevance span: the first
  * MAX_EXPLICIT_RELEVANCE_PARAGRAPHS proof-bearing ones, counted in letter order
  * by the same boundary as explicitTransferOwed and explicitClaimOwed (one helper,
- * no second count) and read by the same two consumers: the completion gate
- * (checkParagraphArgumentLinks) and the drafting-stage span reporter
- * (paragraphArgumentSpanGaps). A paragraph past it owes its proof span and its
+ * no second count) and read by the completion gate
+ * (checkParagraphArgumentLinks). A paragraph past it owes its proof span and its
  * jobNeedQuote and nothing else; a relevance span it records is graded as ever.
  * Returns one boolean per paragraph, in order.
  */
@@ -1025,28 +947,6 @@ function wordAlignedSpanIsInParagraph(span, paragraph) {
       && spanBoundaryIsWordAligned(normalizedParagraph, at + normalizedSpan.length)) return true;
   }
   return false;
-}
-
-// Every span of a text the predicate above admits, up to the punctuation at
-// its edges: a span that opens on “(” or closes on “,” carries the same words
-// as the one inside it, and every rule these spans are tried against reads
-// words — so a candidate with punctuation edges is never the one that
-// qualifies when the trimmed one does not, and enumerating both would only
-// square the work.
-function wordAlignedSpanBounds(value) {
-  const source = String(value);
-  const starts = [];
-  const ends = [];
-  for (let index = 0; index < source.length; index += 1) {
-    if (!isSpanWordCharacter(source[index])) continue;
-    if (!isSpanWordCharacter(source[index - 1])) starts.push(index);
-    if (!isSpanWordCharacter(source[index + 1])) ends.push(index + 1);
-  }
-  const spans = [];
-  for (const start of starts) {
-    for (const end of ends) if (end > start) spans.push({ start, end });
-  }
-  return spans;
 }
 
 // Printed by the review contract beside the three span rules, from the
@@ -1545,174 +1445,6 @@ function argumentLinksRow(observations, mappedCount) {
 // truncating, and the enumeration below reads it to bound the quotes it
 // considers reachable: a quote longer than this is one the gate never sees.
 export const MAX_ARGUMENT_MAPPING_FIELD_CHARS = 1_000;
-// Beyond this the span enumeration is quadratic in a paragraph no cover letter
-// writes. Past it the reporter falls back to the sentence-count verdict, which
-// is the weaker one, so the subset relation holds either way.
-const MAX_SPAN_ENUMERATION_WORDS = 200;
-
-// Every content-word occurrence of the posting, with the character offsets a
-// quote containing it would have to span.
-function postingTermOccurrences(posting) {
-  const source = normalized(posting);
-  const occurrences = [];
-  for (const match of source.matchAll(WORD_TOKEN_RE)) {
-    for (const term of argumentContentWords(match[0])) {
-      occurrences.push({ term, start: match.index, end: match.index + match[0].length });
-    }
-  }
-  return occurrences;
-}
-
-// Is there a verbatim posting span this relevance span would satisfy
-// relevanceNamesNeed() against? That function wants two distinct relevance
-// terms inside the quote, or one of nine letters or more — so the question is
-// whether the posting carries one such term at all, or carries two of them
-// close enough together for one quote to cover both.
-function relevanceCanNameSomeNeed(relevance, occurrences) {
-  const terms = new Set(argumentContentWords(relevance));
-  const hits = occurrences.filter(occurrence => terms.has(occurrence.term));
-  if (hits.some(occurrence => occurrence.term.length >= 9)) return true;
-  for (let index = 0; index < hits.length; index += 1) {
-    for (let next = index + 1; next < hits.length; next += 1) {
-      if (hits[next].end - hits[index].start > MAX_ARGUMENT_MAPPING_FIELD_CHARS) break;
-      if (hits[next].term !== hits[index].term) return true;
-    }
-  }
-  return false;
-}
-
-// Does this paragraph carry a span that could be a legal relevance field?
-//
-// `apart` is the obligation of a paragraph that owes a sentence about the
-// target: the span must say something outside the sentence its proof sits in,
-// and the gate judges only that outside part (relevanceBeyondProof). The
-// reporter does not know which span the audit will call the proof, so it grants
-// the writer the best choice: for each sentence that states a candidate past
-// action it asks whether some legal span, judged on the part outside THAT
-// sentence, could name a responsibility of the posting. Every proof span lies in
-// at least one such sentence and touching more sentences only removes words from
-// the outside part, so a paragraph that fails here fails the gate whatever proof
-// the audit picks. A paragraph with nothing but its proof sentence has no
-// outside part at all, which is decided even when no posting copy is available.
-// A paragraph past the budget only has to carry a span that names some
-// responsibility of the posting, the same enumeration with the whole span as
-// the part judged, so the reporter for such a paragraph is a subset of the gate
-// for the same reason.
-function paragraphOffersRelevanceSpan(paragraph, postingQuoteText, { apart = true } = {}) {
-  const source = normalized(paragraph);
-  const boxes = apart ? sentenceBoxes(paragraph) : [];
-  if (apart && boxes.length < 2) return false;
-  const posting = text(postingQuoteText);
-  const whitespaceTokens = String(paragraph).split(/\s+/u).filter(Boolean);
-  if (!posting || whitespaceTokens.length > MAX_SPAN_ENUMERATION_WORDS) return true;
-  const occurrences = postingTermOccurrences(posting);
-  if (!occurrences.length) return true;
-  const proofSentences = apart
-    ? boxes.filter(box => paragraphHasCandidatePastProof(source.slice(box.start, box.end))).map(box => new Set([box.index]))
-    : [];
-  // No sentence reads as a proof on its own (the cue straddles a sentence break):
-  // nothing can be said to be outside it, so the whole span is judged, which is
-  // the weaker verdict and therefore still a subset.
-  const exclusions = proofSentences.length ? proofSentences : [new Set()];
-  const spans = wordAlignedSpanBounds(source);
-  for (const excluded of exclusions) {
-    for (const span of spans) {
-      const relevance = source.slice(span.start, span.end);
-      if (GENERIC_ARGUMENT_RELEVANCE.test(relevance)) continue;
-      const judged = excluded.size ? textOutsideSentences(source, boxes, span, excluded) : relevance;
-      if (judged && relevanceCanNameSomeNeed(judged, occurrences)) return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Which argumentMapping spans a final cover-letter paragraph cannot supply.
- *
- * checkParagraphArgumentLinks() runs only once the review has written the
- * audit, but half of what it reads is the LETTER, which is written three
- * stages earlier. This reports the part of that verdict the letter alone
- * decides, so the stage that writes a paragraph is the stage told it cannot be
- * mapped.
- *
- * It is a strict subset of that gate, by construction rather than by care:
- * a mapping is required for exactly the paragraphs this returns spans for
- * (`paragraphHasCandidatePastProof`), every span must be an exact normalized
- * span of its paragraph, and `normalized()` is `text()` lowercased. A paragraph
- * reported here therefore has no span that could satisfy that field, and the
- * gate must report the same field. The reverse does not hold, and must not: a
- * paragraph that offers a span whose OTHER conditions fail is the review's to
- * report, not this stage's.
- *
- * "By construction" is exact only because both sides read one predicate for
- * what counts as a span of a paragraph. This enumeration used to walk whole
- * words while the gate took any substring, so a span cut out of the middle of
- * a word — “systems delivery path” inside “microsystems delivery path” — was
- * legal at completion and invisible here: the letter was reported unmappable
- * at the stage that could still rewrite it, for a field the gate would have
- * accepted. `wordAlignedSpanBounds` now enumerates exactly what
- * `wordAlignedSpanIsInParagraph` admits there.
- *
- * The relevance half needs the posting to reach that same standard. A span is
- * recognised by what it shares with the posting, in whatever wording the writer
- * chose, and the gate rejects a span that reads as a generic relevance label or
- * names nothing from the posting. A paragraph whose spans are all generic, or
- * share too little with the posting, has no legal relevance span at all — and
- * used to be reported by nobody until the completion gate read it, with the
- * letter frozen and the only repair a rewrite. With `postingQuoteText` supplied,
- * the candidate spans are enumerated instead of guessed. That argument holds
- * only while this reads the SAME posting copy checkParagraphArgumentLinks grades
- * jobNeedQuote against: a copy with fewer terms in it would report a paragraph
- * the gate can map.
- *
- * Only the first MAX_EXPLICIT_TRANSFER_PARAGRAPHS proof-bearing paragraphs of a
- * letter owe a sentence of their own about the target, so the caller passes
- * `owesTransfer` from the letter-wide explicitTransferOwed() count, the very
- * count the gate reads. Such a paragraph is reported when no span of it, judged
- * on the part outside its proof sentence, could name a responsibility of the
- * posting. A paragraph that owes a relevance span but not that sentence (a
- * budget wider than the transfer budget) is reported only when no span of it
- * could name any responsibility of the posting at all, which is a subset of
- * what the gate asks of it.
- *
- * The claim half has its own budget: only the first MAX_EXPLICIT_CLAIM_PARAGRAPHS
- * proof-bearing paragraphs owe a claim span, so the caller passes `owesClaim`
- * from the letter-wide explicitClaimOwed() count, the very count the gate reads.
- * A paragraph past it is never reported for its claim: the gate does not ask it
- * for one.
- *
- * The relevance half has one too, for the same reason: only the first
- * MAX_EXPLICIT_RELEVANCE_PARAGRAPHS proof-bearing paragraphs owe a relevance
- * span, so the caller passes `owesRelevance` from explicitRelevanceOwed(). A
- * paragraph past it is never reported for its relevance: the gate asks it for
- * nothing there, and a later paragraph therefore has no gap at all (its proof
- * span is a span of the very sentence that made it proof-bearing). The
- * `owesTransfer` flag only chooses WHICH relevance rule a paragraph that owes a
- * span is held to: the sentence apart from the proof, or any span naming the
- * responsibility.
- *
- * Returns `[{ field, rule }]`, empty when the paragraph states no past action
- * of the candidate's or already offers every span it owes.
- */
-export function paragraphArgumentSpanGaps(paragraph = '', postingQuoteText = '', { owesTransfer = true, owesClaim = true, owesRelevance = true } = {}) {
-  const value = text(paragraph);
-  if (!paragraphHasCandidatePastProof(value)) return [];
-  const gaps = [];
-  // `owesClaim` is that paragraph's entry of explicitClaimOwed() over the whole
-  // letter, the one count the gate reads too: a paragraph past the claim budget
-  // may leave the claim out, so no gap is reported for it.
-  if (owesClaim !== false && !CANDIDATE_CAPABILITY_CUE.test(value)) gaps.push({ field: 'claim', rule: ARGUMENT_CLAIM_SPAN_RULE });
-  // `owesRelevance` is that paragraph's entry of explicitRelevanceOwed(), the
-  // count the gate reads for the relevance span: a paragraph that owes none is
-  // never reported for it. `owesTransfer` is that paragraph's entry of
-  // explicitTransferOwed() over the whole letter, the one count the gate reads
-  // too. A paragraph that owes a span but not the sentence apart from its proof
-  // is reported only when no span of it could name a responsibility at all.
-  if (owesRelevance !== false && !paragraphOffersRelevanceSpan(value, postingQuoteText, { apart: owesTransfer !== false })) {
-    gaps.push({ field: 'relevance', rule: owesTransfer !== false ? ARGUMENT_RELEVANCE_SPAN_RULE : ARGUMENT_LATER_RELEVANCE_SPAN_RULE });
-  }
-  return gaps;
-}
 
 // Deliberately wider than PAST_PROOF_CUE's closed verb list. That list decides
 // which paragraph owes an argumentMapping, a question about one paragraph's
@@ -1756,7 +1488,7 @@ export function checkCandidateAgency(paragraphs = []) {
 // impersonal restatement of one detail of a project the résumé already lists,
 // passed every paragraph-level check. It was cheaper to pass that way than to
 // write a real letter, because the template checks relax as the paragraph
-// count grows (sharedSentenceShapeCeiling is "all but two"), a three-word
+// count grows (the retired shape ceiling was "all but two"), a three-word
 // repeat is a defect inside one paragraph but not across two, and the prompts
 // offered "split the paragraph" as the repair for almost every cohesion
 // defect. Blind reviewers then reported "inventory", "fragmentation" and
@@ -1774,7 +1506,7 @@ export function checkCandidateAgency(paragraphs = []) {
 // well inside. The margins were measured on synthetic letters in unrelated
 // fields (scripts/tests/gapfix-letter-proportion.js: five letters of 3 to 6
 // paragraphs and 230 to 394 words, and a four-paragraph letter whose one-line
-// hook and one-line direct welcome checkDirectWelcomeClosing certifies), each
+// hook and one-line direct welcome the retired direct-welcome-closing check certified), each
 // authored to pass the whole editorial battery. An atomised letter breaks most
 // of the limits at once: far too many paragraphs, nearly all of them one
 // sentence, a paragraph mean of about half the floor, almost no paragraph
@@ -1811,8 +1543,8 @@ export const MIN_MEAN_PARAGRAPH_WORDS = 25;
 // one argumentative job. Measured good letters stop at 5.
 export const MAX_PARAGRAPH_SENTENCES = 6;
 // A standalone sentence is an emphasis: a one-line hook that opens the letter
-// and a one-line direct welcome that closes it, which is the shape
-// checkDirectWelcomeClosing certifies. Two are always allowed, because a
+// and a one-line direct welcome that closes it, which is the shape the retired
+// direct-welcome-closing check certified. Two are always allowed, because a
 // four-paragraph letter that uses both would otherwise be told it has too many
 // (and the repair for that was to cut a real paragraph or to pad the hook).
 // Past that, one more is allowed for every SINGLE_SENTENCE_PARAGRAPH_SHARE_DIVISOR
@@ -2157,77 +1889,6 @@ export function checkRedundancy(paragraphs = [], evidence = {}) {
   return result('redundancy', true, `${list.length} paragraph(s) have no ${REDUNDANCY_SHINGLE_WORDS}-word résumé run`);
 }
 
-// Wording a résumé repeats is that résumé's refrain, and a letter that picks the
-// refrain up again is echoing the document it is supposed to complement even
-// when the run is far shorter than the verbatim floor. No phrase list decides
-// this, because which phrases are a refrain depends entirely on the résumé in
-// front of the check: a short run of words counts only when TWO OR MORE of the
-// current résumé bullets already contain it. This check used to reject one fixed
-// three-word phrase lifted from a single candidate's source, which no other
-// résumé shares and which a decision about what a letter may say cannot rest
-// on. A single bullet's wording is deliberately not read here: the repo's own
-// accepted letters restate one bullet's facts in runs up to the verbatim floor,
-// and every rule tried on a single bullet below that floor rejected letters the
-// pipeline accepts.
-const MIN_REFRAIN_WORDS = 3;
-const MAX_REFRAIN_OBSERVATIONS = 4;
-
-// The cover-letter contract prints this value as the object of “the list read
-// is …” after the run length checkRedundancy rejects, so a threshold stated
-// alone is not read as a promise that anything shorter is safe. It is short on
-// purpose: the correction brief is capped (MAX_CORRECTION_BRIEF_CHARS) and
-// drops whole rules from its end, so a longer value here costs a rule.
-export const COVER_LETTER_SALIENT_ECHO_PHRASES = 'wording two of your résumé bullets share';
-
-/**
- * Runs of MIN_REFRAIN_WORDS to REDUNDANCY_SHINGLE_WORDS - 1 words, bounded by
- * content words with a function word inside (a phrase, not a compound noun or
- * a list of names), that at least two distinct bullets contain. A longer
- * refrain absorbs the shorter runs inside it.
- */
-function resumeRefrains(bullets) {
-  const found = new Map();
-  bullets.forEach((bulletWords, bulletIndex) => {
-    for (let length = MIN_REFRAIN_WORDS; length < REDUNDANCY_SHINGLE_WORDS; length++) {
-      for (let start = 0; start + length <= bulletWords.length; start++) {
-        const run = bulletWords.slice(start, start + length);
-        if (FRAME_FUNCTION_WORDS.has(run[0]) || FRAME_FUNCTION_WORDS.has(run[run.length - 1])) continue;
-        if (!run.slice(1, -1).some(word => FRAME_FUNCTION_WORDS.has(word))) continue;
-        if (runContentWordCount(run) < MIN_REPEAT_CONTENT_WORDS) continue;
-        const key = run.join(' ');
-        const entry = found.get(key) || { run, bullets: new Set() };
-        entry.bullets.add(bulletIndex);
-        found.set(key, entry);
-      }
-    }
-  });
-  const shared = [...found.values()].filter(entry => entry.bullets.size >= 2);
-  return shared.filter(entry => !shared.some(other => other !== entry
-    && other.run.length > entry.run.length && containsWordSequence(other.run, entry.run)
-    && [...entry.bullets].every(index => other.bullets.has(index))));
-}
-
-export function checkSalientPhraseEcho(paragraphs = [], evidence = {}, jobText = '') {
-  const list = Array.isArray(paragraphs) ? paragraphs : [];
-  const bullets = bulletTexts(evidence).map(genericWords);
-  const refrains = bullets.length >= 2 ? resumeRefrains(bullets) : [];
-  const postingWords = new Set(genericWords(jobText));
-  const nameWords = capitalizedSourceWords([...list.map(text), ...bulletTexts(evidence)]);
-  const observations = [];
-  list.forEach((paragraph, paragraphIndex) => {
-    const paragraphWords = genericWords(paragraph);
-    for (const { run, bullets: sharedBy } of refrains) {
-      if (!containsWordSequence(paragraphWords, run)) continue;
-      // A refrain whose every content word is a name or the posting's own vocabulary
-      // is not the résumé's wording to avoid: names recur by design.
-      if (run.filter(word => !FRAME_FUNCTION_WORDS.has(word)).every(word => nameWords.has(word) || postingWords.has(word))) continue;
-      observations.push(`paragraph ${paragraphIndex + 1} repeats ${quotedRunPhrase(run)}, wording that résumé bullets ${[...sharedBy].map(index => index + 1).join(' and ')} already share; keep the fact but say it in the letter’s own construction`);
-    }
-  });
-  return observationResult('salient-phrase-echo', observations, MAX_REFRAIN_OBSERVATIONS,
-    `${list.length} paragraph(s) avoid wording the résumé repeats across bullets`);
-}
-
 export function checkGenericPhrases(paragraphs = []) {
   const list = Array.isArray(paragraphs) ? paragraphs : [];
   const observations = [];
@@ -2412,26 +2073,6 @@ export function checkInterestFraming(paragraphs = []) {
       `paragraph ${declarationIndex + 1} declares the candidate’s interest or enthusiasm; name the target work and relevant capability directly so the connection shows the reason to care`);
   }
   return result('interest-framing', true, 'motivation is conveyed through target work and candidate contribution rather than an explicit first-person interest declaration');
-}
-
-/**
- * Catch the specific malformed construction that otherwise reads plausibly to
- * a loose style check: “My experience to enforce …”. It is limited to the
- * beginning of a sentence and the explicit verb set above, so valid phrases
- * such as “My experience to date …” remain untouched.
- */
-export function checkExperienceInfinitiveGrammar(paragraphs = []) {
-  const list = Array.isArray(paragraphs) ? paragraphs : [];
-  for (let index = 0; index < list.length; index++) {
-    const match = /(?:^|[.!?]\s+)my\s+experience\s+to\s+([\p{L}][\p{L}'-]*)\b/iu.exec(text(list[index]));
-    const verb = normalized(match?.[1]);
-    const gerund = EXPERIENCE_TO_GERUNDS[verb];
-    if (gerund) {
-      return result('experience-infinitive-grammar', false,
-        `paragraph ${index + 1} starts a sentence “My experience to ${verb}”; use “My experience ${gerund} …” instead`);
-    }
-  }
-  return result('experience-infinitive-grammar', true, 'no sentence starts with “My experience to” followed by a covered verb');
 }
 
 // ---------------------------------------------------------------------------
@@ -2637,39 +2278,6 @@ function figureTokens(value) {
 function boundedQuotedList(values) {
   const visible = values.slice(0, MAX_FIGURE_DETAIL_ITEMS);
   return `[${visible.map(value => `“${boundedDetailValue(value)}”`).join(', ')}${values.length > visible.length ? ', …' : ''}]`;
-}
-
-function capitalizedBigrams(value) {
-  // JavaScript's `\b` is ASCII-word based, so it fails for names such as
-  // “Équipe Atlas”. Use Unicode letter/number boundaries instead.
-  return [...text(value).matchAll(/(?=(?<![\p{L}\p{N}])(\p{Lu}[\p{L}'-]*\s+\p{Lu}[\p{L}'-]*)(?![\p{L}\p{N}]))/gu)]
-    .map(match => match[1]);
-}
-
-/**
- * `companyName` is optional for unit use, but callers with a job should pass it
- * so a company name alone cannot satisfy the research-detail requirement.
- */
-export function checkCompanySpecificity(paragraphs = [], researchText = '', companyName = '', plannedDetail = '') {
-  const research = text(researchText);
-  if (!research) return result('company-specificity', true, 'skipped: research unavailable');
-  const letter = text((Array.isArray(paragraphs) ? paragraphs : []).join(' '));
-  const normalizedResearch = normalized(research);
-  const normalizedCompany = normalized(companyName);
-  const plannedBigrams = capitalizedBigrams(plannedDetail).filter(bigram =>
-    normalizedResearch.includes(normalized(bigram)) && !normalizedCompany.includes(normalized(bigram)));
-  if (text(plannedDetail) && !plannedBigrams.length) {
-    return result('company-specificity', false, 'planned company hook has no research-sourced capitalized detail outside the company name');
-  }
-  const allowedBigrams = plannedBigrams.length ? plannedBigrams : capitalizedBigrams(letter);
-  const detailBigram = allowedBigrams.find(bigram =>
-    normalizedResearch.includes(normalized(bigram))
-      && !normalizedCompany.includes(normalized(bigram))
-      && normalized(letter).includes(normalized(bigram)));
-  if (detailBigram) return result('company-specificity', true, `uses research-sourced capitalized detail “${boundedDetailValue(detailBigram)}”`);
-  return result('company-specificity', false, plannedBigrams.length
-    ? `planned research detail “${boundedDetailValue(plannedBigrams[0])}” does not appear in the letter`
-    : 'no research-sourced capitalized detail appears in the letter');
 }
 
 export function checkShape(planOrParagraphs = {}, paragraphs = []) {
@@ -2933,22 +2541,6 @@ export function checkCompoundHyphenation(paragraphs = []) {
     `${list.length} paragraph(s) hyphenate the covered compound modifiers`);
 }
 
-const MAX_ENTAILED_PREMISE_OBSERVATIONS = 4;
-
-// “Before <thing> was <acquired>, <subject> had to <select> <it>”: the
-// subordinate clause supplies the acquisition and the main clause claims only
-// the selection that acquisition already implies. Two small event classes carry
-// the entailment, both generic English with nothing from any one document: a
-// completed acquisition or adoption (the setup), and a selection verb
-// (the obligation). The pronoun object is required and is what binds the
-// obligation back to the thing the setup acquired, so a different, informative
-// claim that names its own object (“before <thing> was <acquired>, I had to
-// evaluate the market”) does not match.
-const ACQUISITION_EVENT = '(?:adopted|adoption|purchased|bought|procured|licensed|deployed|implemented|rolled out|brought in|onboarded|installed|selected|chosen|approved|introduced)';
-const SELECTION_OBLIGATION = '(?:choose|select|pick|approve|decide\\s+on)';
-const ENTAILED_ACQUISITION_PREMISE = new RegExp(
-  String.raw`\b(?:before|prior to)\b[^,.;:!?]{0,90}?\b${ACQUISITION_EVENT}\b[^,.;:!?]{0,40},\s*[^,.;:!?]{0,60}?\b(?:had|needed)\s+to\s+${SELECTION_OBLIGATION}\s+(?:them|it|those|these|one)\b`, 'iu');
-
 // An endpoint that names a date, a month, a weekday, or any number belongs to
 // an enumerable series, which is the one span where `through` is the precise
 // preposition rather than a second reading waiting to happen.
@@ -3006,29 +2598,6 @@ export function checkParallelStructure(passages = []) {
     `${list.length} passage(s) keep process-range endpoints grammatically parallel`);
 }
 
-/**
- * A setup clause that only restates what its own subordinate clause already
- * entails spends a line to reach the next claim: when a thing was adopted, the
- * obligation to have chosen it tells a reader nothing. The pattern stays
- * closed to that entailment: a completed acquisition event followed by an
- * obligation to select the same thing, referred to by a pronoun, because the
- * general form (a premise the page already supports) needs a reading of the
- * argument, not a match. That general form is stated in the letter prompt
- * instead.
- */
-export function checkEntailedPremise(passages = []) {
-  const list = Array.isArray(passages) ? passages : [];
-  const observations = [];
-  for (let index = 0; index < list.length; index++) {
-    const match = ENTAILED_ACQUISITION_PREMISE.exec(text(list[index]));
-    if (!match) continue;
-    observations.push(`passage ${index + 1} sets up with “${boundedDetailValue(match[0])}”; the acquisition already entails the choice, so open with the claim that adds information and drop the restated precondition`);
-    if (observations.length >= MAX_ENTAILED_PREMISE_OBSERVATIONS) break;
-  }
-  return observationResult('entailed-premise', observations, MAX_ENTAILED_PREMISE_OBSERVATIONS,
-    `${list.length} passage(s) open their setup clauses with information the sentence does not already entail`);
-}
-
 // A role noun in front of the employer (“<modifiers> role at X”) introduces the
 // employer only when the role is the candidate's. Without that anchor the branch
 // accepted a third party's role (“her role at X made …”, “a former manager's
@@ -3073,14 +2642,13 @@ function framedRoleIsCandidates(sentence, framedRoleNoun, preposition, name) {
  * supplies that missing context. Later evidence paragraphs may use the shorter
  * form once the letter's argument is established.
  *
- * `employer` is curly-quoted in the observation below for the reason stated
- * on contributionHalfRequirement's 'target' case above: checkObservationFingerprint
+ * `employer` is curly-quoted in the observation below because
+ * checkObservationFingerprint
  * (localAiApplication.js) strips only curly-quoted spans before hashing, and
  * this check is one of PASTE_CHECK_PROSE_UNITS' fingerprinted battery, so an
  * employer name interpolated bare would destabilize this branch's fingerprint
  * per job and carry job content into a digest whose header promises it never
- * does. checkNamedArtifactIntroduction, checkOpeningArtifactContext,
- * checkOpeningEmployerShorthand, and checkAdjacentEmployerRepetition below
+ * does. checkNamedArtifactIntroduction and checkOpeningArtifactContext below
  * carry the identical note rather than repeating this paragraph.
  */
 export function checkPriorEmployerOpening(paragraphs = [], employerNames = []) {
@@ -3317,24 +2885,6 @@ export function checkOpeningArtifactContext(paragraphs = [], projectNames = [], 
     : result('opening-artifact-context', true, 'opening establishes its direction before any known project or prior-employer proof');
 }
 
-// Bare industry labels can imply operational or domain tenure the evidence
-// does not establish ("My aviation work" can sound like work on aircraft).
-// Keep the lexicon closed and require a concrete system/task instead.
-const BROAD_DOMAIN_WORK_LABEL = /^(?:My|This|That)\s+(?:aviation|aerospace|automotive|banking|defen[cs]e|education|energy|finance|fintech|government|healthcare|insurance|logistics|manufacturing|medical|public[- ]sector|retail|telecom)\s+work\b/iu;
-
-export function checkVagueDomainWorkLabel(paragraphs = []) {
-  const list = Array.isArray(paragraphs) ? paragraphs : [];
-  const observations = [];
-  list.forEach((paragraph, index) => {
-    const firstSentence = sentences(paragraph)[0] || '';
-    const match = BROAD_DOMAIN_WORK_LABEL.exec(firstSentence);
-    if (!match) return;
-    observations.push(`paragraph ${index + 1} opens with “${boundedDetailValue(match[0])}”; name the supported software, system, or responsibility instead of the industry alone`);
-  });
-  return observationResult('vague-domain-work-label', observations, MAX_EXPERIENCE_FRAMING_OBSERVATIONS,
-    `${list.length} paragraph(s) describe cross-domain evidence through concrete work`);
-}
-
 // A plural third-person pronoun needs something plural, or collective, or
 // distributive, before it to stand for. Prose about data moving between
 // parties is where this goes wrong most visibly: a possessive “their” in front
@@ -3411,32 +2961,6 @@ export function checkModifierAttachment(passages = []) {
   });
   return observationResult('modifier-attachment', observations, MAX_REFERENCE_CLARITY_OBSERVATIONS,
     `${list.length} passage(s) attach temporal modifiers to the intended action`);
-}
-
-// Slash shorthand is common in raw notes, but in a migration sentence it can
-// leave a reader unsure whether a system, its tracking function, or the data
-// moved. This detects only the high-confidence movement shape; conventional
-// paired actions such as “sign-in/sign-out system” already name one clear
-// artifact and remain outside the rule.
-const AMBIGUOUS_MIGRATION_SLASH_OBJECT = /\b[\p{L}-]+\/[\p{L}-]+(?:\s+[\p{L}-]+){0,2}\s+(?:moved|migrated|transitioned|transferred)\b/iu;
-const AMBIGUOUS_MIGRATION_ABSTRACT_OBJECT = /\b(?:tracking|management|processing|reporting)\s+(?:moved|migrated|transitioned|transferred)\b/iu;
-const CONVENTIONAL_PAIRED_SLASH_ACTION = /\b([\p{L}]+)-in\s*\/\s*\1-out\b/iu;
-
-/** Requires migration copy to name the systems or data that moved. */
-export function checkMigrationObjectClarity(passages = []) {
-  const list = Array.isArray(passages) ? passages : [];
-  const observations = [];
-  list.forEach((passage, index) => {
-    const source = text(passage);
-    const slash = AMBIGUOUS_MIGRATION_SLASH_OBJECT.exec(source);
-    const match = slash && !CONVENTIONAL_PAIRED_SLASH_ACTION.test(slash[0])
-      ? slash
-      : AMBIGUOUS_MIGRATION_ABSTRACT_OBJECT.exec(source);
-    if (!match) return;
-    observations.push(`passage ${index + 1} leaves a migration object ambiguous (“${boundedDetailValue(match[0])}”); name the systems and/or data that moved, and rewrite slash shorthand as natural coordination`);
-  });
-  return observationResult('migration-object-clarity', observations, MAX_COPY_PRECISION_OBSERVATIONS,
-    `${list.length} passage(s) name the systems or data affected by migration`);
 }
 
 // Widely recognized stack tokens only. Technologies whose names are ordinary
@@ -3650,31 +3174,6 @@ export function checkTargetClaimScope(plan = {}, paragraphs = [], evidence = {},
   }
   return observationResult('target-claim-scope', observations, MAX_TARGET_CLAIM_SCOPE_OBSERVATIONS,
     'target-facing claims keep prior-work mechanics in their evidence sentences');
-}
-
-// A sentence can name an otherwise sound accomplishment and then spend its
-// final appositive merely declaring that the accomplishment is relevant. That
-// leaves the recruiter to infer the connection to the named responsibility.
-// Keep this deliberately limited to the generated comma-tail shape: judging
-// whether every sentence is persuasive would require semantic scoring, while
-// this construction has no explanatory work beyond the assertion itself.
-const DETACHED_RELEVANCE_ASSERTION = /,\s*(?:work|experience|background|skills?|qualifications?|migration|transition|change|decision)\s+(?:(?:that|which)\s+(?:is|was|are|were)\s+)?(?:(?:directly|closely)\s+)?(?:relevant|applicable)\s+to\s+(?:this|the)\s+(?:role|position)(?:['’]s)?\b/iu;
-
-/** Requires an asserted relevance tail to explain the action-to-need connection. */
-export function checkDetachedRelevanceClaim(paragraphs = []) {
-  const list = Array.isArray(paragraphs) ? paragraphs : [];
-  const observations = [];
-  for (let index = 0; index < list.length; index++) {
-    for (const sentence of sentences(list[index])) {
-      const match = DETACHED_RELEVANCE_ASSERTION.exec(text(sentence));
-      if (!match) continue;
-      observations.push(`paragraph ${index + 1} ends with an asserted relevance tail (“${boundedDetailValue(match[0])}”); connect the named action directly to the specific responsibility, using conditional language for work that would occur after hiring, or remove the relevance label`);
-      if (observations.length >= MAX_COPY_PRECISION_OBSERVATIONS) break;
-    }
-    if (observations.length >= MAX_COPY_PRECISION_OBSERVATIONS) break;
-  }
-  return observationResult('detached-relevance-claim', observations, MAX_COPY_PRECISION_OBSERVATIONS,
-    `${list.length} paragraph(s) explain relevance through an action-to-responsibility connection`);
 }
 
 // Completed experience belongs in a past-tense evidence sentence, but the work
@@ -3936,7 +3435,7 @@ export function checkProspectiveContributionTense(paragraphs = [], companyName =
   const finalParagraphIndex = list.length - 1;
   for (let index = 0; index < list.length; index++) {
     const paragraphSentences = sentences(list[index]);
-    // checkDirectWelcomeClosing certifies exactly ONE sentence per letter —
+    // The retired direct-welcome-closing check certified exactly ONE sentence per letter —
     // finalSubstantiveClosingSentenceIndex's pick in the FINAL paragraph — not
     // "any sentence in the final paragraph that happens to match an
     // invitation shape". Computing that position once, from this same
@@ -3952,7 +3451,7 @@ export function checkProspectiveContributionTense(paragraphs = [], companyName =
       const sentence = paragraphSentences[sentenceIndex];
       const value = text(sentence);
       // See certifiedClosingInvitation's comment: the ONE sentence
-      // checkDirectWelcomeClosing has already certified must not be rejected
+      // the retired direct-welcome-closing check certified must not be rejected
       // here for the present tense that certification requires.
       if (sentenceIndex === certifiedIndex && certifiedClosingInvitation(value)) continue;
       const match = NONCONDITIONAL_PROSPECTIVE_CONTRIBUTION.exec(value);
@@ -4097,238 +3596,6 @@ export function checkEndedRoleCurrentEmployment(paragraphs = [], evidence = {}, 
     failureCount: observations.length,
     referenceMonth,
   };
-}
-
-// “I built X. I built Y too.” appends a second proof without saying why it
-// follows. Both halves are required before a sentence is flagged: an additive
-// opener in front of a non-evidence sentence is ordinary connective prose.
-// The build verb must also follow the connective subject immediately, with at
-// most one -ly adverb between them. Accepting a build verb anywhere in the
-// sentence swept in subordinate clauses — “In addition, I supported the staff
-// who wrote the policy.”, “I also saw how a poorly designed intake process
-// created rework for the front office.” — where the connective joins prose,
-// not a second artifact.
-const ADDITIVE_SEAM_CONNECTIVE_BUILD = /^(?:i\s+(?:also|additionally)\s+|additionally,?\s+i\s+|in\s+addition,?\s+i\s+|on\s+top\s+of\s+that,?\s+i\s+)(?:\p{L}+ly\s+)?(?:built|wrote|created|developed|designed|shipped|launched|made|delivered|maintained|architected|implemented)\b/u;
-const ADDITIVE_SEAM_EVIDENCE_OPENERS = /^i\s+(?:built|wrote|created|developed|designed|shipped|launched|made|delivered)\b/u;
-// Additive “too” need not end the sentence: a real letter escaped the trailer
-// branch with “I built the <system> too, in <tooling>, covering …”, where the
-// seam sits mid-sentence in front of a trailing clause. Punctuation is the
-// deterministic separator — additive “too”
-// is always followed by a mark or the sentence end (“too,” “too.”), while
-// degree “too” is always followed by the word it modifies (“too slow”, “too
-// many”), so the lookahead admits the first and never the second. “As well”
-// stays end-anchored on purpose: mid-sentence “as well as the reporting layer”
-// is a comparative, not an appended proof.
-const ADDITIVE_SEAM_TRAILERS = /\btoo(?=\s*[,.!?;:]|\s*$)|\bas\s+well[.!?]?$/u;
-
-/**
- * Catch the additive seam, not the words “also” or “too”: the sentence must
- * both wear the connective and be a piece of build evidence. The repair is
- * argumentative rather than lexical, which is why the detail asks for the gap
- * the artifact answers instead of a synonym for the connective.
- */
-export function checkAdditiveSeam(paragraphs = []) {
-  const list = Array.isArray(paragraphs) ? paragraphs : [];
-  const observations = [];
-  for (let index = 0; index < list.length; index++) {
-    for (const sentence of sentences(list[index])) {
-      const candidate = normalized(sentence);
-      const seam = ADDITIVE_SEAM_CONNECTIVE_BUILD.test(candidate)
-        || (ADDITIVE_SEAM_EVIDENCE_OPENERS.test(candidate) && ADDITIVE_SEAM_TRAILERS.test(candidate));
-      if (!seam) continue;
-      observations.push(`paragraph ${index + 1} appends evidence with a bare additive connective (“${leadingWordsSnippet(sentence)}”); state the gap or need this evidence answers before naming the artifact, or state its relation to the previous proof`);
-    }
-  }
-  return observationResult('additive-seam', observations, MAX_ADDITIVE_SEAM_OBSERVATIONS,
-    `${list.length} paragraph(s) join their evidence without a bare additive connective`);
-}
-
-// A responsibility pivot needs more than the fact that two tasks occurred in
-// one job. These constructions have already produced letters that move from
-// one system or lifecycle stage to another without explaining their shared
-// responsibility: “That was a different problem. I solved it …”, “The same
-// job included …”, and a sentence that only compares two work categories
-// (“<Category> extended my <field> work beyond <category>.”). Keep the check
-// deliberately lexical and narrow. It catches the opaque hand-off, not every
-// use of “problem”, “challenge”, “same”, or “beyond”.
-const OPAQUE_RESPONSIBILITY_PIVOT = /\b(?:a|another|the)\s+(?:different|separate)\s+(?:problem|challenge)\b/iu;
-const ANAPHORIC_PIVOT_SOLUTION = /^(?:i|we)\s+(?:solved|addressed|handled|tackled|fixed)\s+(?:it|that|this)\b/iu;
-const SAME_JOB_SCOPE_OPENER = /^the\s+same\s+(?:job|role|position)\s+(?:also\s+)?(?:included|involved|covered)\b/iu;
-
-// The three category constructions below share one idea: a sentence made of
-// BARE labels, with no determiner, name, figure or constraint anywhere in the
-// label, says that one kind of work relates to another without saying how.
-// The labels are recognised by their form, never by a vocabulary of work
-// categories: a label is bare when it is a few lowercase words with no
-// determiner, possessive, digit or capitalized name, and it is abstract when
-// its head word is a nominalization (a word ending -tion, -ment, -ance, -ity,
-// -ing and the like). Concrete uses stay legal because a constraint or a named
-// object takes the label out of scope: “the migration extended the catalog
-// without an outage” states a mechanism and a result.
-const LABEL_BLOCKING_DETERMINERS = new Set([
-  'the', 'a', 'an', 'this', 'that', 'these', 'those', 'my', 'our', 'your', 'their', 'his', 'her', 'its',
-  'some', 'any', 'each', 'every', 'all', 'no', 'both', 'such',
-]);
-const ABSTRACT_LABEL_HEAD = /(?:tion|sion|ment|ance|ence|ity|ing|ism|ness|ship)s?$/u;
-
-/**
- * Whether a phrase is a bare category label. `initial` lets the first word be
- * capitalized, because the phrase opens its sentence.
- */
-function isBareCategoryLabel(phrase, { initial = false, abstract = false, maxWords = 4 } = {}) {
-  const tokens = text(phrase).match(WORD_TOKEN_RE) || [];
-  if (!tokens.length || tokens.length > maxWords) return false;
-  if (/[\p{N}]/u.test(phrase) || /['’]s\b/u.test(phrase)) return false;
-  const named = tokens.some((token, index) => /^\p{Lu}/u.test(token) && !(initial && index === 0));
-  if (named || tokens.some(token => LABEL_BLOCKING_DETERMINERS.has(token.toLowerCase()))) return false;
-  return !abstract || ABSTRACT_LABEL_HEAD.test(tokens[tokens.length - 1].toLowerCase());
-}
-
-// “<A> also extended my <B> work beyond <C>”: one abstract category called
-// broader than another. Requiring the whole sentence to fit the frame keeps
-// concrete uses legal.
-const SCOPE_EXTENSION_FRAME = /^(.{1,80}?)\s+(?:also\s+)?(?:extended|broadened|expanded|widened)\s+my\s+(.{1,60}?)\s+(?:work|experience|background|practice)\s+beyond\s+(.{1,60}?)[.!?]?$/iu;
-
-function isCategoryScopeExtension(sentence) {
-  const match = SCOPE_EXTENSION_FRAME.exec(text(sentence));
-  return Boolean(match)
-    && isBareCategoryLabel(match[1], { initial: true, abstract: true })
-    && isBareCategoryLabel(match[2])
-    && isBareCategoryLabel(match[3], { abstract: true });
-}
-
-// “Beyond <bare category>, I <did something>” has the same defect in
-// introductory form: a bare abstract category marks addition but supplies no
-// relationship. A determiner, named object, constraint, or other material
-// before the comma takes the sentence out of scope.
-const BARE_BEYOND_OPENER = /^beyond\s+([^,]{1,60}),\s*(?:i|we)\s+(?:\p{L}+ly\s+)?(?:\p{L}+ed|built|wrote|led|ran|made|took|kept|drove)\b/iu;
-
-function isBareBeyondCategoryOpener(sentence) {
-  const match = BARE_BEYOND_OPENER.exec(text(sentence));
-  return Boolean(match) && isBareCategoryLabel(match[1], { abstract: true });
-}
-
-// Once an umbrella sentence has named its branches, repeating each label
-// through the same low-information frame makes the paragraph read like an
-// outline: “I <light verb> <branch one> by …. I <light verb> <branch two> by
-// ….”. A light verb names a responsibility without saying what was done, and
-// the actions themselves should instantiate the branches. The labels are not
-// listed: a label counts when its content words were ALREADY stated by an
-// earlier sentence of the paragraph, which is what an umbrella is. One useful
-// “handled X by” sentence is not a defect, nor is a concrete problem such as an
-// outage or backlog that no earlier sentence named as a branch.
-const LIGHT_RESPONSIBILITY_VERBS = '(?:handled|addressed|covered|managed|supported|demonstrated|tackled|oversaw|owned)';
-const MIRRORED_CATEGORY_SCAFFOLD = new RegExp(
-  String.raw`^(?:(?:separately|similarly|additionally|in\s+(?:separate|related|parallel|subsequent|additional)\s+[^,]{1,60}),\s*)?(?:i|we)\s+${LIGHT_RESPONSIBILITY_VERBS}\s+(?:the\s+)?([^,.;:!?]{1,50}?)\s+(?:by|through|such\s+as)\b`, 'iu');
-
-/** The branch label a mirrored scaffold sentence announces, or '' when it is not one. */
-function scaffoldBranchLabel(sentence) {
-  const label = MIRRORED_CATEGORY_SCAFFOLD.exec(text(sentence))?.[1] || '';
-  return label && isBareCategoryLabel(label) ? normalized(label) : '';
-}
-
-/** Whether every content word of a label was already used by the given earlier words. */
-function labelWasAlreadyStated(label, earlierWords) {
-  const contentWords = words(label).filter(word => !FRAME_FUNCTION_WORDS.has(word));
-  return contentWords.length > 0 && contentWords.every(word => earlierWords.some(earlier => referentStemsMatch(word, earlier)));
-}
-
-/**
- * Requires a substantive bridge when prose changes responsibilities.
- *
- * A shared employer, job, or chronology is context, not an argumentative
- * relationship. The repair names the shared responsibility, constraint, or
- * outcome before introducing the next proof; when the evidence cannot support
- * one, the writer should remove the weaker proof: the résumé already carries
- * it, and giving it a paragraph of its own is the inventory the letter-proportion
- * check refuses.
- */
-export function checkResponsibilityTransition(paragraphs = []) {
-  const list = Array.isArray(paragraphs) ? paragraphs : [];
-  const observations = [];
-  for (let index = 0; index < list.length; index++) {
-    const paragraph = text(list[index]);
-    if (SAME_JOB_SCOPE_OPENER.test(paragraph)) {
-      observations.push(`paragraph ${index + 1} opens with “${leadingWordsSnippet(paragraph)}”; shared job scope is not a bridge between responsibilities — name the shared responsibility, constraint, or outcome before the new proof, or remove it because the résumé already carries it`);
-    }
-    const paragraphSentences = sentences(paragraph);
-    for (let sentenceIndex = 0; sentenceIndex < paragraphSentences.length; sentenceIndex++) {
-      const sentence = paragraphSentences[sentenceIndex];
-      if (isCategoryScopeExtension(sentence)) {
-        observations.push(`paragraph ${index + 1} says “${boundedDetailValue(sentence)}”, which only renames one work category as broader than another; replace the scope comparison with a supported dependency, shared constraint, or outcome that explains why the next proof follows`);
-      }
-      if (isBareBeyondCategoryOpener(sentence)) {
-        observations.push(`paragraph ${index + 1} opens evidence with a bare category transition (“${leadingWordsSnippet(sentence)}”); “beyond” marks addition but does not explain the relationship—name the dependency, shared constraint, or outcome that connects the proofs`);
-      }
-      const solution = paragraphSentences[sentenceIndex + 1];
-      if (!solution || !OPAQUE_RESPONSIBILITY_PIVOT.test(sentence) || !ANAPHORIC_PIVOT_SOLUTION.test(solution)) continue;
-      observations.push(`paragraph ${index + 1} shifts from “${leadingWordsSnippet(sentence)}” to “${leadingWordsSnippet(solution)}” through an opaque problem label; name the shared responsibility, constraint, or outcome before the new proof, or remove it because the résumé already carries it`);
-    }
-    for (let sentenceIndex = 0; sentenceIndex < paragraphSentences.length - 1; sentenceIndex++) {
-      const first = scaffoldBranchLabel(paragraphSentences[sentenceIndex]);
-      const second = scaffoldBranchLabel(paragraphSentences[sentenceIndex + 1]);
-      if (!first || !second || first === second) continue;
-      const earlierWords = paragraphSentences.slice(0, sentenceIndex).flatMap(words);
-      if (!labelWasAlreadyStated(first, earlierWords) || !labelWasAlreadyStated(second, earlierWords)) continue;
-      observations.push(`paragraph ${index + 1} repeats mirrored abstract labels (“${boundedDetailValue(first)}” then “${boundedDetailValue(second)}”); state the umbrella once, then let concrete action verbs demonstrate each branch, retaining only the separation cue needed to preserve factual scope`);
-      break;
-    }
-  }
-  return observationResult('responsibility-transition', observations, MAX_RESPONSIBILITY_TRANSITION_OBSERVATIONS,
-    `${list.length} paragraph(s) bridge responsibility shifts with a substantive relationship`);
-}
-
-// In “every existing tool calls for”, the ordinary compound noun “tool calls”
-// wins on a first pass even though “calls for” is the predicate. This is a
-// garden-path, not a punctuation issue, so the repair must choose a predicate
-// that cannot attach to “tool” (for example, “requires” or “demands”).
-const TOOL_CALLS_GARDEN_PATH = /\btool\s+calls\s+for\b/iu;
-
-/** Prevent a familiar compound noun from obscuring the intended predicate. */
-export function checkToolCallsGardenPath(paragraphs = []) {
-  const list = Array.isArray(paragraphs) ? paragraphs : [];
-  const observations = [];
-  for (let index = 0; index < list.length; index++) {
-    for (const sentence of sentences(list[index])) {
-      const match = TOOL_CALLS_GARDEN_PATH.exec(sentence);
-      if (!match) continue;
-      observations.push(`paragraph ${index + 1} creates a garden-path reading with “${boundedDetailValue(match[0])}”; readers initially parse “tool calls” as a compound noun, so replace “calls for” with “requires” or recast the sentence`);
-    }
-  }
-  return observationResult('tool-calls-garden-path', observations, MAX_COPY_PRECISION_OBSERVATIONS,
-    `${list.length} paragraph(s) avoid the “tool calls for” garden path`);
-}
-
-// A scoping phrase that names a category of built software, followed by a
-// first-person build of that same category, only repeats itself: the sentence
-// supplies neither a decision, constraint, mechanism, nor result. The category
-// nouns are the generic hypernyms of built software (tool, system, application
-// and the like), and the build object must be one of them with no modifier and
-// nothing after it; a following specific object or result makes the sentence
-// ordinary evidence, and a scope that names something other than a software
-// category is information.
-const SOFTWARE_CATEGORY_NOUN = '(?:software|code|applications?|apps?|systems?|tools?|solutions?|programs?|platforms?)';
-const CATEGORY_RESTATING_BUILD = new RegExp(
-  String.raw`^(?:for|with|where|when|across|among)\s+([^,.!?]{1,100}?),?\s+(?:i|we)\s+(?:built|developed|wrote|created|made)\s+(${SOFTWARE_CATEGORY_NOUN})[.!?]?$`, 'iu');
-const SOFTWARE_CATEGORY_NOUN_RE = new RegExp(`\\b${SOFTWARE_CATEGORY_NOUN}\\b`, 'iu');
-
-function restatesSoftwareCategory(sentence) {
-  const match = CATEGORY_RESTATING_BUILD.exec(text(sentence));
-  return Boolean(match) && SOFTWARE_CATEGORY_NOUN_RE.test(match[1]);
-}
-
-/** Reject a category-restating bridge sentence that cannot advance the argument. */
-export function checkLowInformationToolBuild(paragraphs = []) {
-  const list = Array.isArray(paragraphs) ? paragraphs : [];
-  const observations = [];
-  for (let index = 0; index < list.length; index++) {
-    for (const sentence of sentences(list[index])) {
-      if (!restatesSoftwareCategory(sentence)) continue;
-      observations.push(`paragraph ${index + 1} says “${boundedDetailValue(sentence)}”, which only restates that the scoped thing is software; replace it with the supported decision, constraint, mechanism, or result—or remove it`);
-    }
-  }
-  return observationResult('low-information-tool-build', observations, MAX_COPY_PRECISION_OBSERVATIONS,
-    `${list.length} paragraph(s) avoid category-restating software claims`);
 }
 
 // A “containerized … with/using/via <tool>” clause credits <tool> with the
@@ -4589,26 +3856,6 @@ export function checkClaimedEquivalence(paragraphs = []) {
     `${list.length} paragraph(s) argue transfer without asserting an equivalence`);
 }
 
-// A non-final paragraph must not spend its last sentence announcing a new
-// workplace/practice that the next paragraph never develops. This deliberately
-// targets the high-confidence generated shape rather than trying to infer the
-// topic of every possible final sentence.
-const DANGLING_TERMINAL_SYNTHESIS = /^(?:the|this|that)\s+(?:boundary|practice|approach|discipline|experience|judgment|work|decision)\b[^.!?]{0,120}\b(?:also\s+)?(?:shaped|informed|guided)\s+how\s+i\s+(?:used|approached|handled|worked)\b[^.!?]{0,180}\b(?:at|in)\s+[^.!?]+[.!?]?$/iu;
-
-/** Rejects a paragraph-final topic launch that is neither developed nor carried forward. */
-export function checkDanglingParagraphTransition(paragraphs = []) {
-  const list = Array.isArray(paragraphs) ? paragraphs : [];
-  const observations = [];
-  for (let index = 0; index < list.length - 1; index++) {
-    const finalSentence = sentences(list[index]).at(-1) || '';
-    const match = DANGLING_TERMINAL_SYNTHESIS.exec(text(finalSentence));
-    if (!match) continue;
-    observations.push(`paragraph ${index + 1} ends by launching an undeveloped topic (“${boundedDetailValue(finalSentence)}”); develop the concrete mechanism or result in that paragraph, carry the exact subject into the next paragraph, or remove the sentence`);
-  }
-  return observationResult('dangling-paragraph-transition', observations, MAX_COPY_PRECISION_OBSERVATIONS,
-    `${list.length} paragraph(s) conclude their own point or explicitly carry the next subject forward`);
-}
-
 /**
  * The prompt asks for short causal sentences and the model still produced a
  * 62-word sentence with nested purpose clauses. The threshold is deliberately
@@ -4678,88 +3925,6 @@ export function checkPunctuationStyle(paragraphs = []) {
     `${list.length} paragraph(s) avoid semicolons and dash splices`);
 }
 
-// Passport-desk register in a letter that is otherwise first-person prose.
-// Two fixed formulas rather than an attempt to score formality: each one has a
-// plain first-person rewrite, which is the repair the observation asks for.
-const PLAIN_REGISTER_PATTERNS = Object.freeze([
-  /\bin\s+possession\s+of\b/iu,
-  /\bpossess(?:es)?\s+a\s+valid\b/iu,
-]);
-
-/** Keeps any remaining factual prose direct rather than officialese. */
-export function checkPlainRegister(paragraphs = []) {
-  const list = Array.isArray(paragraphs) ? paragraphs : [];
-  const observations = [];
-  for (let index = 0; index < list.length; index++) {
-    const paragraph = text(list[index]);
-    const answeredGap = /\banswer(?:ed|ing|s)?\s+(?:that|this|the|a)\s+gap\b/iu.exec(paragraph);
-    if (answeredGap) {
-      observations.push(`paragraph ${index + 1} uses unnatural wording (“${boundedDetailValue(answeredGap[0])}”); use “closed the gap” or “addressed the gap”`);
-    }
-    const evidenceBring = /\b(?:are|is) the evidence I would bring\b/iu.exec(paragraph);
-    if (evidenceBring) {
-      observations.push(`paragraph ${index + 1} treats capabilities as “${boundedDetailValue(evidenceBring[0])}”; say what experience, skills, or work the candidate would bring`);
-    }
-    for (const pattern of PLAIN_REGISTER_PATTERNS) {
-      const match = pattern.exec(paragraph);
-      if (!match) continue;
-      observations.push(`paragraph ${index + 1} uses bureaucratic register (“${boundedDetailValue(match[0])}”); state the fact in plain first-person English`);
-    }
-  }
-  return observationResult('plain-register', observations, MAX_PLAIN_REGISTER_OBSERVATIONS,
-    `${list.length} paragraph(s) use direct, non-bureaucratic prose`);
-}
-
-// A sentence-initial workplace phrase followed directly by “I” needs a comma
-// to keep the organization and the subject from running together. The generic
-// lexicon covers organization types, while supplied résumé employers cover
-// proper names without teaching the check one candidate's domain vocabulary.
-// Ordinary short adjuncts remain outside this high-confidence check.
-const INTRODUCTORY_WORKPLACE_COMMA = /^(At\s+(?:(?:the|my|our)\s+)?(?:[\p{L}&.'’()-]+\s+){0,5}(?:district|company|organisation|organization|agency|school|university|college|employer|office|firm|department|ministry|council|bank|hospital|clinic|laboratory|lab|startup|team))\s+I\b/iu;
-
-/** Sets off a sentence-initial workplace phrase when the first-person subject follows. */
-export function checkIntroductoryWorkplaceComma(paragraphs = [], workplaceNames = []) {
-  const list = Array.isArray(paragraphs) ? paragraphs : [];
-  const namedWorkplaces = (Array.isArray(workplaceNames) ? workplaceNames : [])
-    .map(text).filter(Boolean).sort((left, right) => right.length - left.length)
-    .map(name => new RegExp(`^(At\\s+${escapeRegExp(name)})\\s+I\\b`, 'iu'));
-  const observations = [];
-  for (let index = 0; index < list.length; index++) {
-    for (const sentence of sentences(list[index])) {
-      const genericMatch = INTRODUCTORY_WORKPLACE_COMMA.exec(sentence);
-      const namedMatch = namedWorkplaces.map(pattern => pattern.exec(sentence)).find(Boolean);
-      const phrase = genericMatch?.[1] || namedMatch?.[1];
-      if (!phrase) continue;
-      observations.push(`paragraph ${index + 1} begins a sentence “${leadingWordsSnippet(sentence, 7)}” without setting off the introductory workplace phrase; insert a comma after “${boundedDetailValue(phrase)}”`);
-    }
-  }
-  return observationResult('introductory-workplace-comma', observations, MAX_COPY_PRECISION_OBSERVATIONS,
-    `${list.length} paragraph(s) set off sentence-initial workplace phrases before “I”`);
-}
-
-// In UI-guidance prose, bare “point” is ambiguous: one can point in the
-// metaphorical sense of referring to something. The limitation being argued is
-// visible on-screen indication, so require that distinction wherever a
-// sentence says an actor cannot point at a concrete UI target. No actor is
-// named here: any subject (a person, a guide, a tool) can be the one that
-// cannot indicate the control.
-const BARE_UI_POINT = /\b(?:cannot|can't)\s+(?!visually\b)(?:physically\s+)?(?:point|gesture)(?:\s+(?:at|to)\s+(?:the\s+)?|\s+out\s+(?:which\s+|the\s+))(?:control|button|field|menu|icon|element|link|tab|toggle|checkbox|input|panel|dialog|window|option|area|region|part)\b/iu;
-
-/** Distinguishes a visible UI indication from metaphorical reference. */
-export function checkVisualReferencePrecision(paragraphs = []) {
-  const list = Array.isArray(paragraphs) ? paragraphs : [];
-  const observations = [];
-  for (let index = 0; index < list.length; index++) {
-    for (const sentence of sentences(list[index])) {
-      const match = BARE_UI_POINT.exec(sentence);
-      if (!match) continue;
-      observations.push(`paragraph ${index + 1} says “${boundedDetailValue(match[0])}”; name the literal limitation as an inability to visually indicate the on-screen control, not a bare inability to “point”`);
-    }
-  }
-  return observationResult('visual-reference-precision', observations, MAX_COPY_PRECISION_OBSERVATIONS,
-    `${list.length} paragraph(s) distinguish visible UI indication from metaphorical reference`);
-}
-
 // “I would welcome the chance …” is polite boilerplate that weakens the last
 // line with an unnecessary conditional. This check is intentionally limited
 // to that stock cover-letter formula; other valid uses of “would welcome” are
@@ -4782,14 +3947,13 @@ const CONDITIONAL_WELCOME_CLOSE = /\bI(?:\s+would|'d)\s+welcome\s+(?:(?:the\s+)?
 const SELF_DIRECTED_CONVERSATION_CLOSE = /\bI\s+(?:want|hope|plan|aim|intend)\s+to\s+(?:talk|speak|discuss|connect|learn|explore)\b/iu;
 const LOOK_FORWARD_CONVERSATION_CLOSE = /\bI\s+look\s+forward\s+to\s+(?:talking|speaking|discussing|connecting|learning|exploring)\b/iu;
 const DIRECT_CONVERSATION_CLOSE = /\bI\s+welcome\s+(?:(?:(?:the\s+)?(?:chance|opportunity))\s+to\s+(?:talk|speak|discuss|connect|share|explore)|(?:a\s+)?(?:conversation|discussion)\b)/iu;
-const EMPLOYER_CHOICE_CLOSE = /\b(?:conversation|discussion)\s+about\s+whether\b[^.!?]{0,180}\b(?:or|versus)\b/iu;
 
 // checkProspectiveContributionTense's own design note records that a
 // modal-only guard "measurably rejected" a present-tense contribution bridge
-// — the reason CONTRIBUTION_VERBS_PRESENT exists on checkDirectWelcomeClosing.
+// — the reason the retired direct-welcome-closing check read present-tense contribution verbs.
 // That made the two checks pull in opposite directions on the identical
 // sentence: "I welcome the chance to talk about how my <domain> experience
-// helps me contribute to your <team>." passes checkDirectWelcomeClosing
+// helps me contribute to your <team>." passed the retired direct-welcome-closing check
 // (it is exactly the direct, present-tense, three-half invitation that check
 // certifies) and fails checkProspectiveContributionTense (its present-tense
 // "helps me contribute" bridge is the shape NONCONDITIONAL_PROSPECTIVE_
@@ -4802,7 +3966,7 @@ const EMPLOYER_CHOICE_CLOSE = /\b(?:conversation|discussion)\s+about\s+whether\b
 // check exists to catch — must still be caught even in the last paragraph.
 //
 // LOOK_FORWARD_CONVERSATION_CLOSE belongs in this list for the same reason
-// SELF_DIRECTED_CONVERSATION_CLOSE does: checkDirectWelcomeClosing's own
+// SELF_DIRECTED_CONVERSATION_CLOSE does: the retired direct-welcome-closing check's own
 // selfDirectedMatch already ORs the two together (one certifying branch, not
 // two), so a closing certified via "I look forward to discussing ..." was
 // being rejected right back by this function for the identical present-tense
@@ -4815,700 +3979,6 @@ function certifiedClosingInvitation(value) {
     || SELF_DIRECTED_CONVERSATION_CLOSE.test(value)
     || LOOK_FORWARD_CONVERSATION_CLOSE.test(value);
 }
-
-// A future-facing discussion can be an effective close when it makes the
-// candidate's contribution concrete. Two independent conditions, because the
-// contract (STYLE.md §11.2, SKILL.md, and the routine, which all say to apply
-// this "as a register rule, not as a template for the closing sentence") asks
-// for a connection, not a word order:
-//
-//   1. the closing names an asset the candidate demonstrably owns, and
-//   2. it points that asset at the employer's work.
-//
-// Requiring one fused `my … <modal> <verb>` pattern made the check a template
-// after all: “applying my <domain> experience to the <systems> this role
-// owns” and “the <artifact> work I built would fit the <systems> this team
-// runs” are exactly the closings the guidance asks for, and both were rejected.
-// Ownership still has to be explicit — a bare demonstrative (“that work”)
-// leans on an earlier paragraph instead of standing up in the invitation.
-// "knowledge"/"know-how" widen the asset lexicon for a candidate paraphrasing
-// to avoid repeating "experience" a second time in the same letter —
-// checkRepeatedPhrase already pushes a writer toward exactly that paraphrase
-// once "experience" has been used once, so the asset lexicon has to accept
-// the word that pressure produces.
-const CANDIDATE_ASSET_NOUNS = 'experience|expertise|skills?|work|background|perspective|practice|training'
-  + '|knowledge|know-how';
-// Concrete artifact nouns a candidate plausibly built and would name with "the
-// <noun> I built/wrote/…": app, application, dashboard, parser, extractor,
-// renderer, agent, and api cover common candidate-built shapes the prior list
-// missed. This branch still requires the authorship clause immediately after
-// the noun, so widening the noun list alone cannot admit an employer-owned
-// artifact the candidate merely used.
-const CANDIDATE_ARTIFACT_NOUNS = 'server|service|tool|tooling|pipeline|pipelines|integration|integrations'
-  + '|connector|connectors|system|systems|harness|platform|prototype|library|scraper|model'
-  + '|app|application|dashboard|parser|extractor|renderer|agent|api';
-// Three ways to mark an asset as the candidate's, in decreasing explicitness:
-// a possessive; an authorship clause; or a demonstrative that carries its own
-// descriptor. The third exists because “that <domain> experience” does name
-// the asset — it is a bare demonstrative (“that work”) that names nothing and
-// leans entirely on an earlier paragraph, so the descriptor is required.
-// Demonstratives only, never “the”: “the engineering practice this team uses”
-// is employer-facing, and accepting it would make the guard meaningless.
-// The demonstrative branch is also restricted to ASSET nouns — artifact nouns
-// (systems, pipelines, integrations) are usually the EMPLOYER's in a closing.
-// The descriptor slot counts words, so it needs a floor on what counts as a
-// descriptor: "that kind of work" leans on an earlier paragraph exactly as much
-// as "that work" does. The floor is on the HEAD modifier — the token attached
-// to the asset noun — not on the first token, because "that broader kind of
-// work" is just as vacuous while "that same-day <domain> experience" is not.
-// A light-noun frame always puts `of` or a light noun in the head position.
-const DESCRIPTOR_FILLERS = 'of|kind|kinds|sort|sorts|type|types|phase|part|parts|area|areas|line|piece'
-  + '|bit|amount|next|same|other|others|more|much|such|that|this';
-// The verbs that make “the <artifact> I <verb>” an authorship clause. One list,
-// read by the fixed-noun branch below, by the letter-used-noun branch after it and
-// by the guidance a writer is shown, so the three can never name different verbs.
-export const CANDIDATE_AUTHORSHIP_VERBS = Object.freeze(['built', 'wrote', 'designed', 'created', 'developed', 'shipped', 'led', 'own', 'owned', 'maintained', 'architected']);
-// The authorship verbs that are also proof verbs (PAST_PROOF_VERBS): a first-person clause with one of
-// them is a completed action of the candidate, which makes the paragraph that holds it proof-bearing.
-const CLOSING_AUTHORSHIP_PROOF_VERBS = Object.freeze(CANDIDATE_AUTHORSHIP_VERBS.filter(verb => PAST_PROOF_VERBS.includes(verb)));
-const CANDIDATE_ASSET_CLOSE = new RegExp(
-  `\\bmy\\s+(?:[\\p{L}’'-]+\\s+){0,3}(?:${CANDIDATE_ASSET_NOUNS})\\b`
-  + `|\\bthe\\s+(?:[\\p{L}’'-]+\\s+){0,3}(?:${CANDIDATE_ASSET_NOUNS}|${CANDIDATE_ARTIFACT_NOUNS})\\s+I\\s+`
-  + `(?:${CANDIDATE_AUTHORSHIP_VERBS.join('|')})\\b`
-  + `|\\b(?:that|this|those|these)\\s+(?:[\\p{L}’'-]+\\s+){0,2}(?!(?:${DESCRIPTOR_FILLERS})\\s)[\\p{L}’'-]+\\s+(?:${CANDIDATE_ASSET_NOUNS})\\b`,
-  'iu',
-);
-// The authorship clause above accepts only the artifact nouns listed in
-// CANDIDATE_ARTIFACT_NOUNS, and no list reaches every field: a closing built on
-// the strongest thing the candidate made (“the <noun> I built”) was rejected
-// whenever that noun was not one of about twenty-five words, although the clause
-// itself already proves the candidate says they built it. The list is not
-// lengthened. The same clause is also accepted when its noun is one the LETTER
-// has already used for the candidate's own work, so a closing can refer back to
-// what the letter showed:
-//   - the head noun of the object of an earlier first-person sentence whose verb
-//     is an authorship verb (“I built a <modifiers> <noun> that …”), or
-//   - the head noun of the object of such a verb in a career-data quote one of the
-//     letter's paragraphs cites (a quote is verb-led: “Built a <noun> …”).
-// The head is the last word of the object phrase before the first preposition,
-// relative word or conjunction, so “I built a board that replaced the sheet”
-// licenses “the board I built” and not “the sheet I built”. A closing that names
-// something the letter never said it made (rename the artifact and it is rejected
-// again), a bare pronoun or a light noun (“the one I built”) names nothing and
-// never counts, and every other part of the closing check is unchanged.
-//
-// What is read is the DIRECT object of the verb and nothing else. Three things the
-// first version read as an object are not one:
-//   - “that” in front of a noun is a determiner (“I built that <noun> with …”), and
-//     it is a relative or complementizer only when what follows is a verb, a
-//     subject pronoun, an article or the end of the clause (“I built that replaced
-//     …”, “I wrote that the …”), so a demonstrative object licenses its noun;
-//   - a coordinated chunk is an object only when it is a plain noun phrase: a chunk
-//     that opens with a subject pronoun, holds a finite verb (a participle that is
-//     not followed by “by”, an auxiliary, a plural or third-person -s word before
-//     the last) or starts a second noun phrase after its noun is a new clause with
-//     its own subject, and it ends the reading (“I built the <noun>, and the
-//     drivers loved the result” licenses the first noun only);
-//   - “I built” inside a relative clause has no object after it (“the <noun> I
-//     built reduced empty trips”): the noun before it is the thing built, and the
-//     words after the verb belong to the main clause.
-// Anything the reading cannot place licenses nothing, so a doubtful shape costs the
-// writer one rejection that says how to name the asset, never an authorship claim
-// the letter did not make.
-const AUTHORSHIP_VERB_FORMS = 'build|builds|built|building|wrote|write|writes|writing|written|design|designs|designed|designing'
-  + '|create|creates|created|creating|develop|develops|developed|developing|ship|ships|shipped|shipping'
-  + '|lead|leads|led|leading|own|owns|owned|owning|maintain|maintains|maintained|maintaining'
-  + '|architect|architects|architected|architecting';
-const AUTHORED_OBJECT_STOP_WORDS = new Set([
-  'for', 'to', 'in', 'on', 'at', 'with', 'by', 'from', 'into', 'of', 'that', 'which', 'who', 'whom', 'whose', 'so', 'because', 'while',
-  'when', 'where', 'as', 'using', 'through', 'across', 'after', 'before', 'during', 'than', 'within', 'over', 'under', 'between', 'per',
-  'via', 'until', 'about', 'against', 'around', 'then', 'if', 'is', 'are', 'was', 'were',
-]);
-// Words that can end an object phrase without naming anything: pronouns and the
-// light nouns DESCRIPTOR_FILLERS already treats as vacuous.
-const VACUOUS_AUTHORED_HEADS = new Set([
-  'it', 'them', 'one', 'ones', 'thing', 'things', 'something', 'everything', 'anything', 'part', 'parts', 'piece', 'pieces', 'kind', 'kinds',
-  'sort', 'sorts', 'type', 'types', 'bit', 'amount', 'area', 'areas', 'this', 'that', 'these', 'those', 'same', 'other', 'others', 'more', 'much', 'such',
-  // Nouns a relative clause hangs on without naming anything the candidate made.
-  'fact', 'idea', 'reason', 'way', 'time', 'day', 'year', 'week', 'month', 'what', 'which',
-]);
-const AUTHORED_ARTIFACT_CLOSE = new RegExp(
-  `\\bthe\\s+(?:[\\p{L}’'-]+\\s+){0,3}([\\p{L}’'-]+)\\s+I\\s+(?:${CANDIDATE_AUTHORSHIP_VERBS.join('|')})\\b`,
-  'giu',
-);
-const FIRST_PERSON_AUTHORSHIP = new RegExp(`\\b(?:i|we)\\s+(?:(?:have|has|had|also|then|later|personally)\\s+){0,2}(?:${AUTHORSHIP_VERB_FORMS})\\b`, 'giu');
-const ANY_AUTHORSHIP = new RegExp(`\\b(?:${AUTHORSHIP_VERB_FORMS})\\b`, 'giu');
-
-function authoredNounKey(word) {
-  const key = normalizedArgumentTerm(String(word || '').toLowerCase().replace(/['’]s$/u, ''));
-  // normalizedArgumentTerm leaves a four-letter plural alone (“hubs”, “maps”), so a
-  // letter that built “hubs” would not license “the hub I built”.
-  return key.length === 4 && /s$/u.test(key) && !/(?:ss|us|is)$/u.test(key) ? key.slice(0, -1) : key;
-}
-
-const AUTHORED_OBJECT_DETERMINERS = new Set([
-  'a', 'an', 'the', 'this', 'that', 'these', 'those', 'my', 'our', 'their', 'its', 'his', 'her', 'your', 'each', 'every', 'all', 'both',
-  'some', 'any', 'several', 'many', 'two', 'three', 'four', 'five', 'six',
-]);
-
-// Words the object reading below tells apart. Articles and possessives begin a noun
-// phrase, so one that turns up after the noun starts a second noun phrase (a reduced
-// relative or a new clause); the other determiners (“each”, “three”) may follow an
-// adjective (“the first three dashboards”) and do not.
-const AUTHORED_ARTICLES = new Set(['a', 'an', 'the', 'this', 'that', 'these', 'those', 'my', 'our', 'your', 'their', 'its', 'his', 'her']);
-const AUTHORED_SUBJECT_PRONOUNS = new Set(['i', 'we', 'you', 'they', 'he', 'she', 'it', 'who']);
-// Auxiliaries and the plainest irregular past tenses: a noun phrase that runs into one
-// has met the verb of a clause of its own.
-const AUTHORED_CLAUSE_VERBS = new Set([
-  'is', 'are', 'was', 'were', 'be', 'been', 'being', 'has', 'have', 'had', 'will', 'would', 'can', 'could', 'should', 'may', 'might', 'must', 'shall',
-  'does', 'did', 'do', 'got', 'took', 'made', 'ran', 'went', 'came', 'gave', 'found', 'kept', 'held', 'said', 'began', 'chose', 'drove', 'told',
-  'knew', 'felt', 'thought', 'met', 'paid', 'sent', 'sold', 'stood', 'taught', 'brought', 'bought', 'caught', 'became',
-]);
-const AUTHORED_RELATIVE_PRONOUNS = new Set(['that', 'which', 'whom']);
-// A noun phrase after one of these is the object of a preposition, and “I built” that
-// follows it starts the main clause (“At the depot I built a …”).
-const AUTHORED_PREPOSITIONS = new Set([
-  'for', 'to', 'in', 'on', 'at', 'with', 'by', 'from', 'into', 'of', 'as', 'through', 'across', 'after', 'before', 'during', 'within', 'over', 'under',
-  'between', 'per', 'via', 'until', 'about', 'against', 'around', 'since', 'throughout', 'despite', 'beyond', 'among', 'toward', 'towards', 'upon',
-  'onto', 'near', 'behind', 'outside', 'inside', 'without', 'like', 'amid', 'beside', 'except', 'following', 'including', 'regarding',
-]);
-// A time phrase opens a sentence without being something built (“This summer I built …”).
-const AUTHORED_TIME_NOUNS = new Set([
-  'day', 'days', 'week', 'weeks', 'month', 'months', 'year', 'years', 'quarter', 'quarters', 'season', 'seasons', 'summer', 'winter', 'spring',
-  'autumn', 'fall', 'semester', 'term', 'decade', 'time', 'times', 'morning', 'mornings', 'evening', 'evenings', 'night', 'nights', 'afternoon',
-  'shift', 'shifts', 'period', 'stint', 'tenure', 'phase',
-]);
-const AUTHORSHIP_VERB_WORDS = new Set(AUTHORSHIP_VERB_FORMS.split('|'));
-const AUTHORED_TOKEN_RE = /[\p{L}\p{N}][\p{L}\p{N}’'-]*|,/gu;
-const MAX_AUTHORED_OBJECTS = 4;
-const MAX_AUTHORED_PHRASE_WORDS = 6;
-
-const isAuthoredCoordinator = token => token === ',' || /^(?:and|or)$/iu.test(token);
-// A past participle or a simple past (“used”, “reviewed”): a hyphenated compound is a modifier and is never one.
-const isAuthoredParticiple = word => !word.includes('-') && word.length >= 4 && /[^aeiou]ed$/iu.test(word) && !/^(?:shed|sled|bred|fled|sped)$/iu.test(word);
-const isAuthoredPluralOrThirdPerson = word => /s$/u.test(word) && !/(?:ss|us|is)$/u.test(word) && !word.includes('-');
-
-// Does a “that” at the start of an object phrase determine a noun that follows (“that hub with …”)?
-// It does not when what follows is a verb, a subject pronoun, an article, a preposition or the end of
-// the clause: there it is a relative pronoun, a complementizer or a bare pronoun object.
-function demonstrativeBeginsObject(tokens, at) {
-  const next = tokens[at + 1];
-  if (!next || next === ',') return false;
-  const lower = next.toLowerCase();
-  if (AUTHORED_SUBJECT_PRONOUNS.has(lower) || AUTHORED_ARTICLES.has(lower) || AUTHORED_CLAUSE_VERBS.has(lower)
-    || AUTHORED_OBJECT_STOP_WORDS.has(lower) || isAuthoredCoordinator(lower)) return false;
-  if (isAuthoredParticiple(lower)) {
-    const after = tokens[at + 2]?.toLowerCase();
-    if (after === undefined || after === ',' || AUTHORED_ARTICLES.has(after) || AUTHORED_SUBJECT_PRONOUNS.has(after)
-      || after === 'them' || after === 'all' || after === 'both' || AUTHORED_OBJECT_STOP_WORDS.has(after) || isAuthoredCoordinator(after)) return false;
-  }
-  return true;
-}
-
-// One noun phrase from `start`, up to a coordinator, a stop word, an auxiliary, a second article or
-// the sixth word. Returns the words, the participle bookkeeping the head choice needs, and what ended it.
-function readAuthoredObjectPhrase(tokens) {
-  const phrase = [];
-  let beforeParticiple = '';
-  let participleAt = -1;
-  let end = 'end';
-  for (let at = 0; at < tokens.length; at += 1) {
-    const token = tokens[at];
-    const lower = token.toLowerCase();
-    if (isAuthoredCoordinator(token)) { end = 'coordinator'; break; }
-    if (!phrase.length && lower === 'that' && demonstrativeBeginsObject(tokens, at)) { phrase.push(token); continue; }
-    if (AUTHORED_OBJECT_STOP_WORDS.has(lower)) { end = AUTHORED_CLAUSE_VERBS.has(lower) ? 'clause' : 'stop'; break; }
-    if (AUTHORED_CLAUSE_VERBS.has(lower)) { end = 'clause'; break; }
-    if (phrase.length >= MAX_AUTHORED_PHRASE_WORDS) { end = 'stop'; break; }
-    if (AUTHORED_ARTICLES.has(lower) && phrase.some(word => !AUTHORED_OBJECT_DETERMINERS.has(word.toLowerCase()))) { end = 'article'; break; }
-    if (!beforeParticiple && lower.length >= 4 && /(?:ed|ing)$/u.test(lower) && phrase.some(word => !AUTHORED_OBJECT_DETERMINERS.has(word.toLowerCase()))) {
-      beforeParticiple = phrase.at(-1);
-      participleAt = phrase.length;
-    }
-    phrase.push(token);
-  }
-  return { phrase, beforeParticiple, trailingParticiple: participleAt >= 0 && participleAt === phrase.length - 1, end };
-}
-
-// A coordinated chunk that holds a clause of its own: a finite verb sits inside it (a participle that
-// is not followed by “by”, or a plural or third-person -s word that is not the last), so the nouns
-// around that verb are not objects of the authorship verb.
-function authoredChunkHasClause(phrase) {
-  return phrase.some((word, index) => {
-    const lower = word.toLowerCase();
-    if (index > 0 && isAuthoredParticiple(lower) && phrase[index + 1]?.toLowerCase() !== 'by') return true;
-    return index < phrase.length - 1 && isAuthoredPluralOrThirdPerson(lower) && !AUTHORED_ARTICLES.has(lower) && !AUTHORED_OBJECT_DETERMINERS.has(lower);
-  });
-}
-
-function pushAuthoredHeads(phrase, beforeParticiple, trailingParticiple, heads) {
-  for (const candidate of [trailingParticiple ? '' : phrase.at(-1), beforeParticiple]) {
-    const word = String(candidate || '');
-    if (!word || AUTHORED_OBJECT_DETERMINERS.has(word.toLowerCase())) continue;
-    const key = authoredNounKey(word);
-    if (key.length >= 3 && !VACUOUS_AUTHORED_HEADS.has(key)) heads.push(key);
-  }
-}
-
-// Is “I built” (the words before it are `before`, the clause after the verb is `rest`) a relative clause
-// that modifies a noun, as in “the hub I built reduced onboarding time” or “hubs that I built”? Then that
-// noun is the thing built and the words after the verb belong to the main clause. Returns the noun, or
-// null when the verb has an object of its own: an article or quantifier right after it, a comma or a
-// preposition phrase before it (“At the depot I built …”), a time phrase (“This summer I built …”),
-// or no noun phrase before it at all.
-function authoredRelativeAntecedent(before, rest) {
-  const restLead = (rest.match(/[\p{L}\p{N}][\p{L}\p{N}’'-]*/u) || [''])[0].toLowerCase();
-  if (AUTHORED_ARTICLES.has(restLead) || AUTHORED_OBJECT_DETERMINERS.has(restLead)) return null;
-  const tokens = (before.split(/[;:()]|\s-+\s/u).at(-1) || '').match(AUTHORED_TOKEN_RE) || [];
-  const last = tokens.at(-1);
-  if (!last || last === ',') return null;
-  const marked = AUTHORED_RELATIVE_PRONOUNS.has(last.toLowerCase());
-  let headAt = tokens.length - (marked ? 2 : 1);
-  if (marked && tokens[headAt] === ',') headAt -= 1;
-  const head = tokens[headAt];
-  const headLower = String(head || '').toLowerCase();
-  if (!head || !/^\p{L}/u.test(head) || AUTHORED_OBJECT_STOP_WORDS.has(headLower) || AUTHORED_ARTICLES.has(headLower)
-    || AUTHORED_CLAUSE_VERBS.has(headLower) || AUTHORED_OBJECT_DETERMINERS.has(headLower)) return null;
-  let determinerAt = -1;
-  for (let at = headAt - 1; at >= 0 && at >= headAt - 4; at -= 1) {
-    const lower = tokens[at].toLowerCase();
-    if (AUTHORED_ARTICLES.has(lower) || AUTHORED_OBJECT_DETERMINERS.has(lower)) { determinerAt = at; break; }
-    if (tokens[at] === ',' || AUTHORED_OBJECT_STOP_WORDS.has(lower) || AUTHORED_CLAUSE_VERBS.has(lower) || isAuthoredCoordinator(tokens[at])) break;
-  }
-  // With an explicit relative pronoun a noun phrase needs a determiner or a plural head (“hubs that I built”).
-  if (marked) return determinerAt >= 0 || isAuthoredPluralOrThirdPerson(headLower) ? head : null;
-  if (determinerAt < 0 || AUTHORED_TIME_NOUNS.has(headLower)) return null;
-  const lead = tokens[determinerAt - 1]?.toLowerCase();
-  return lead && (AUTHORED_PREPOSITIONS.has(lead) || /ing$/u.test(lead)) ? null : head;
-}
-
-// The heads of the noun phrases that follow one authorship verb, `rest` being the clause after it.
-// The first chunk is the verb's object; later chunks (after a comma, “and” or “or”) are coordinated
-// objects, a coordinated authorship verb with its own object, or the start of a new clause, which
-// ends the reading. An object that a preposition, a relative word or a second noun phrase ends is the
-// last one read.
-function authoredDirectObjectHeads(rest) {
-  const tokens = rest.match(AUTHORED_TOKEN_RE) || [];
-  const chunks = [[]];
-  for (const token of tokens) {
-    if (isAuthoredCoordinator(token)) chunks.push([]); else chunks.at(-1).push(token);
-  }
-  const heads = [];
-  // A verb followed at once by a coordinator shares the object of the verb that ends the chain:
-  // “I built, tested and deployed a hub”.
-  let chain = chunks[0].length === 0 && chunks.length > 1;
-  let read = 0;
-  for (let index = 0; index < chunks.length && read < MAX_AUTHORED_OBJECTS; index += 1) {
-    let chunk = chunks[index];
-    if (!chunk.length) continue;
-    const lead = chunk[0].toLowerCase();
-    if (index > 0) {
-      if (AUTHORED_SUBJECT_PRONOUNS.has(lead)) break;
-      const startsNounPhrase = AUTHORED_ARTICLES.has(lead) || AUTHORED_OBJECT_DETERMINERS.has(lead);
-      if (AUTHORSHIP_VERB_WORDS.has(lead) || (chain && !startsNounPhrase)) {
-        // A coordinated verb: a lone one passes the object on, one with words after it takes them.
-        if (chunk.length === 1) continue;
-        chunk = chunk.slice(1);
-      } else if (isAuthoredParticiple(lead) && chunk.length > 1) continue;
-    }
-    read += 1;
-    const { phrase, beforeParticiple, trailingParticiple, end } = readAuthoredObjectPhrase(chunk);
-    if (index > 0 && (end === 'clause' || authoredChunkHasClause(phrase))) break;
-    pushAuthoredHeads(phrase, beforeParticiple, trailingParticiple, heads);
-    if (end !== 'end') break;
-    chain = false;
-  }
-  return heads;
-}
-
-/**
- * The head nouns of the objects an authorship verb takes in `value`. With
- * `firstPersonOnly` the verb must follow I or we (a sentence of the letter);
- * without it any occurrence counts (a verb-led quote). Bounded: at most four
- * coordinated objects per verb, six words per object.
- *
- * The head is the last word of the object phrase. A participle that follows a
- * noun begins a reduced relative clause (“a chart used by every crew”,
- * “dashboards tracking daily sales”), so the word before it is the head too;
- * both candidates are kept, because a participle that opens a phrase (“a
- * ripening chart”) is a modifier and the last word is then the head. A
- * participle that ends the phrase is never a head itself.
- *
- * Only the direct object is read (see the comment above AUTHORSHIP_VERB_FORMS
- * for what that excludes): a relative clause (“the hub I built …”) licenses the
- * noun it modifies and nothing after the verb.
- */
-function authoredObjectHeads(value, { firstPersonOnly }) {
-  const heads = [];
-  const source = String(value || '');
-  const pattern = firstPersonOnly ? FIRST_PERSON_AUTHORSHIP : ANY_AUTHORSHIP;
-  for (const match of source.matchAll(pattern)) {
-    const rest = source.slice(match.index + match[0].length).split(/[.!?;:]/u)[0] ?? '';
-    if (firstPersonOnly) {
-      const antecedent = authoredRelativeAntecedent(source.slice(0, match.index), rest);
-      if (antecedent) { pushAuthoredHeads([antecedent], '', false, heads); continue; }
-    }
-    heads.push(...authoredDirectObjectHeads(rest));
-  }
-  return heads;
-}
-
-/**
- * The nouns the letter has already used for the candidate's own work: the
- * objects of first-person authorship sentences in `sentencesBefore`, and the
- * objects of authorship verbs in the career-data quotes the letter cites.
- */
-function letterAuthoredNouns(sentencesBefore, citations) {
-  const nouns = new Set();
-  for (const sentence of sentencesBefore) for (const head of authoredObjectHeads(sentence, { firstPersonOnly: true })) nouns.add(head);
-  for (const paragraphQuotes of Array.isArray(citations) ? citations : []) {
-    for (const quote of Array.isArray(paragraphQuotes) ? paragraphQuotes : []) {
-      for (const head of authoredObjectHeads(text(quote), { firstPersonOnly: false })) nouns.add(head);
-    }
-  }
-  return nouns;
-}
-
-/** Does `value` carry “the <noun> I <authorship verb>” with a noun the letter already used? */
-function authoredNounClose(value, authoredNouns) {
-  if (!authoredNouns || !authoredNouns.size) return false;
-  for (const match of String(value || '').matchAll(AUTHORED_ARTIFACT_CLOSE)) {
-    if (authoredNouns.has(authoredNounKey(match[1]))) return true;
-  }
-  return false;
-}
-
-// The present-tense forms are not optional extras: the routine and SKILL.md
-// both tell the writer to keep this invitation in direct present tense, and a
-// modal-only guard measurably rejected “…how my <domain> experience supports
-// your <backlog>” — the sentence the contract asks for.
-//
-// The verbs are three closed lists, held as data so the regex below and the
-// guidance a writer reads (contributionHalfRequirement) can never name different
-// verbs. A verb outside them fails the action half however natural it reads
-// (“could benefit”, “addresses”), which a writer cannot see unless it is told.
-//   after a modal   the base forms, with up to two words between (“could … support”);
-//   present tense   the same verbs in the third person (“supports”);
-//   anywhere        eight verbs in the bare or -ing form (“applying … to …”); the guidance prints the -ing forms.
-export const CLOSING_ACTION_MODAL_VERBS = Object.freeze([
-  'support', 'contribute', 'help', 'advance', 'strengthen', 'improve', 'build', 'deliver', 'apply', 'serve', 'shorten', 'extend', 'scale', 'accelerate', 'fit',
-]);
-export const CLOSING_ACTION_MODALS = Object.freeze(['can', 'could', 'would', 'will', 'might']);
-const CLOSING_ACTION_PRESENT_VERBS = Object.freeze([
-  'supports', 'contributes', 'helps', 'advances', 'strengthens', 'improves', 'builds', 'delivers', 'applies', 'serves', 'shortens', 'extends', 'scales', 'accelerates', 'fits',
-]);
-const CLOSING_ACTION_OPEN_BASE_VERBS = Object.freeze(['apply', 'bring', 'put', 'use', 'contribute', 'extend', 'connect', 'carry']);
-export const CLOSING_ACTION_OPEN_PARTICIPLES = Object.freeze([
-  'applying', 'bringing', 'putting', 'using', 'contributing', 'extending', 'connecting', 'carrying',
-]);
-// “contribute to” reads as one verb: the optional “to” changes what is matched, never whether it matches.
-const closingVerbPattern = verb => (/^contribute/u.test(verb) ? `${verb}(?:\\s+to)?` : verb);
-const CONTRIBUTION_VERBS = CLOSING_ACTION_MODAL_VERBS.map(closingVerbPattern).join('|');
-const CONTRIBUTION_VERBS_PRESENT = CLOSING_ACTION_PRESENT_VERBS.map(closingVerbPattern).join('|');
-const CANDIDATE_CONTRIBUTION_ACTION = new RegExp(
-  `\\b(?:${CLOSING_ACTION_MODALS.join('|')})\\s+(?:[\\p{L}’'-]+\\s+){0,2}(?:${CONTRIBUTION_VERBS})\\b`
-  + `|\\b(?:${CONTRIBUTION_VERBS_PRESENT})\\b`
-  + `|\\b(?:${[...CLOSING_ACTION_OPEN_BASE_VERBS, ...CLOSING_ACTION_OPEN_PARTICIPLES].join('|')})\\b`,
-  'iu',
-);
-
-// The third condition is what makes this a CONNECTION test rather than a
-// vocabulary test. Asset and action alone are both satisfied by "I welcome a
-// conversation about using my experience", which points nowhere: the action
-// verbs are among the commonest in English and neither test requires the
-// sentence to reach the employer's side at all. STYLE.md §11.2 asks the
-// closing to carry "the role-facing contribution", so the sentence has to name
-// the other side of that connection.
-//
-// EMPLOYER_TARGET_NOUNS/EMPLOYER_FACING_TARGET are the GENERIC lexicon only —
-// "your", "the/this <noun>", the reader nouns. A comment here used to claim
-// "No company name is available here", which was false: evaluateCoverLetterChecks
-// already receives companyName and already threads it into
-// checkCompanySpecificity and checkProspectiveContributionTense a few hundred
-// lines away — this check alone dropped it on the floor. Measured cost: a
-// job's closing paragraph named the employer BY NAME — "…could support
-// <Employer>'s <initiative>." — which is exactly the shape every other
-// rule in this app pushes a writer toward (checkOpeningEmployerShorthand,
-// checkPriorEmployerOpening, and company-specificity itself all want the
-// employer named, not a placeholder pronoun). The generic-only lexicon
-// rejected it anyway, four consecutive rounds (2026-09-24,
-// 13:08:05Z–13:10:40Z, every rejection fingerprint 752d8241 on this check's
-// direct-conversation branch), because "<Employer>'s" satisfies none of
-// "your", "the/this <noun>", or the reader-noun list. employerFacingTarget()
-// below now also accepts the employer's own name, derived from companyName.
-const EMPLOYER_TARGET_NOUNS = 'team|teams|role|position|group|organi[sz]ation|company|district|product|products'
-  + '|platform|codebase|backlog|roadmap|effort|work|mission|practice|pipeline|pipelines|system|systems|service|services'
-  // Nouns an employer-facing closing names when the target is a specific
-  // initiative rather than a standing team or system: "the <product>
-  // rollout", "this migration", "your onboarding flow". Measured directly
-  // against the incident's own rejected sentences ("…support <Employer>'s
-  // <product> rollout", "…support <Employer>'s <data> sync") — rollout and
-  // sync-style initiative nouns are exactly what those closings used.
-  + '|rollout|migration|launch|stack|infrastructure|deployment|workflow|workflows|onboarding|store|stores';
-const EMPLOYER_FACING_TARGET = new RegExp(
-  '\\byour(?:s)?\\b'
-  // A modifier slot is required: real closings say "the service team", "this
-  // engineering group", not only the bare noun.
-  + `|\\b(?:this|the)\\s+(?:[\\p{L}’'-]+\\s+){0,2}(?:${EMPLOYER_TARGET_NOUNS})\\b`
-  + '|\\b(?:client|clients|customer|customers|user|users|student|students|patient|patients|here)\\b',
-  'iu',
-);
-
-// Legal-entity suffixes stripped before deriving a distinctive token:
-// "Acme Inc." names the same reader-facing company as "Acme", and
-// matching only the full string with the suffix still attached would reject a
-// writer who — correctly, by every naming convention this app otherwise
-// enforces — drops the suffix in prose. "Co." keeps its period required (a
-// bare "Co" is two letters and too easy to collide with an ordinary word
-// ending); every other suffix accepts an optional trailing period so "Inc"
-// and "Inc." both strip.
-const COMPANY_LEGAL_SUFFIXES = [
-  'incorporated', 'corporation', 'company', 'limited',
-  'l\\.l\\.c\\.?', 'llc', 'inc\\.?', 'ltd\\.?', 'corp\\.?', 'co\\.',
-  'plc', 'gmbh', 's\\.a\\.?', 'pty', 'ab', 'nv',
-];
-// Requires a comma or whitespace immediately before the suffix, so the suffix
-// has to be its own trailing token — "Cisco" ends in "co" but has no comma or
-// space in front of it, so it is never mistaken for a stripped "Co.".
-const COMPANY_LEGAL_SUFFIX_RE = new RegExp(`[,\\s]+(?:${COMPANY_LEGAL_SUFFIXES.join('|')})\\s*$`, 'iu');
-
-// Tokens too generic to identify a company on their own. Deliberately the
-// short, explicit list the task asked for rather than a general stopword
-// list: a longer list would start rejecting real leading tokens ("And Co",
-// "For Good") that happen to share a word with a function word.
-const COMPANY_TARGET_STOPWORDS = new Set(['the', 'a', 'an']);
-
-/**
- * Builds a matcher for an employer's own name, or null when companyName
- * carries nothing safe to match on. For a MULTI-word name, matches the full
- * name CASE-INSENSITIVELY plus its distinctive leading token ("Acme" for
- * "Acme Inc.") CASE-SENSITIVELY — the two halves deliberately do not
- * share a case-sensitivity rule (see below for why the full multi-word name
- * is exempt from the case-sensitive treatment). A SINGLE-word name gets only
- * the case-sensitive token match — see the dedicated comment on that branch
- * below for why it is not also given a case-insensitive alternative the way
- * the multi-word full name is. Every alternative optionally accepts a
- * trailing possessive "'s" — straight or curly, since the letter text this
- * matches against is not guaranteed to have gone through text()'s apostrophe
- * normalization by the time this runs — and all are escapeRegExp'd: this
- * app's own company names include parenthesized forms ("Example Web Services
- * (EWS)") whose literal characters would otherwise be read as regex syntax.
- *
- * Case-sensitive tokens are guarded only by length>=3 and a 3-word stopword
- * set. Measured false positives: "Fine Mart" -> "Fine" matched "my fine
- * work"; "Focus Corporation" -> "Focus" matched this app's own guidance
- * text ("focus work"); and this app's own job board turns up real employers
- * whose distinguishing token is an ordinary English word, such as a
- * single-word brand that is also a common noun or verb. Each one let candidate-facing prose
- * satisfy the target half of the three-part closing requirement without the
- * sentence ever reaching the employer's side — a false PASS, the more
- * expensive of the two failure directions on a check gating a paste handoff.
- * Matching that token CASE-SENSITIVELY, exactly as the company spells it,
- * closes that: a letter naming the employer writes "Anchor's ingestion
- * pipeline" with the posting's own capital; candidate-facing prose writes
- * "anchor" lowercase. This is not airtight — sentence-initial
- * capitalization ("Anchor handles onboarding.") would still satisfy the
- * case-sensitive match for reasons that have nothing to do with the employer
- * — but that residual risk is small here specifically: every sentence this
- * check grades has already matched one of the invitation regexes above
- * (CONDITIONAL_WELCOME_CLOSE, DIRECT_CONVERSATION_CLOSE,
- * SELF_DIRECTED_CONVERSATION_CLOSE, LOOK_FORWARD_CONVERSATION_CLOSE), and
- * every one of those anchors at the START of the sentence ("I welcome a
- * conversation about ...", "I look forward to ..."), so the token is almost
- * never itself sentence-initial.
- */
-function companyNameTargetPattern(companyName) {
-  const stripped = text(companyName).replace(COMPANY_LEGAL_SUFFIX_RE, '').trim();
-  if (stripped.length < 3) return null;
-  const tokens = stripped.split(/\s+/).filter(Boolean);
-  if (tokens.every(token => COMPANY_TARGET_STOPWORDS.has(normalized(token)))) return null;
-  // Both alternatives share the identical boundary + optional-possessive
-  // wrapper; only the case-sensitivity flag differs between them, which is
-  // why they are two separate regexes rather than two branches of one
-  // alternation — a single RegExp cannot vary case-sensitivity per branch.
-  const boundedAlternative = token => `(?<![\\p{L}\\p{N}])${escapeRegExp(token)}(?:['’]s)?(?![\\p{L}\\p{N}])`;
-  // A single-word company name IS its own leading token: nothing distinguishes
-  // it from an ordinary word except capitalization, the identical collision
-  // the multi-word leading-token fix above exists to close. Measured: with
-  // companyName 'Anchor', "how my <asset> could support my own anchor
-  // of ideas" — pure candidate-facing prose, no employer reference at all —
-  // satisfied the target half before this branch existed, because a
-  // single-word name fell through to fullNamePattern below, which is
-  // case-INSENSITIVE by design for the multi-word case. That design choice is
-  // right for a two-word full name ("Fine Mart" together, lowercase or not, is
-  // measurably unlikely to appear by coincidence) but wrong for a one-word
-  // name that IS one of this app's own measured ordinary-word collisions
-  // (single-word brands that are also common nouns) — a single common word
-  // colliding with ordinary prose is exactly the case the multi-word branch
-  // already treats as too risky to match case-insensitively. So a one-word
-  // name is routed through the case-sensitive path instead of the full-name
-  // path, never both — a single-word "full name" and a single-word "leading
-  // token" would be the identical string, so building both would only test
-  // the same regex twice.
-  if (tokens.length === 1) {
-    const single = tokens[0];
-    if (single.length < 3 || COMPANY_TARGET_STOPWORDS.has(normalized(single))) return null;
-    const singleTokenPattern = new RegExp(boundedAlternative(single), 'u');
-    return { test: value => singleTokenPattern.test(value) };
-  }
-  const fullNamePattern = new RegExp(boundedAlternative(stripped), 'iu');
-  const leading = tokens[0];
-  const leadingTokenPattern = (leading.length >= 3 && !COMPANY_TARGET_STOPWORDS.has(normalized(leading)))
-    ? new RegExp(boundedAlternative(leading), 'u')
-    : null;
-  return { test: value => fullNamePattern.test(value) || (leadingTokenPattern ? leadingTokenPattern.test(value) : false) };
-}
-
-/**
- * EMPLOYER_FACING_TARGET plus the employer's own name. Routed through here so
- * every place inside this check that needs to know whether a sentence reaches
- * the employer's side reads the identical rule — see the EMPLOYER_TARGET_NOUNS
- * comment above for the incident that made the company-name half necessary.
- */
-function employerFacingTarget(value, companyName) {
-  if (EMPLOYER_FACING_TARGET.test(value)) return true;
-  const companyPattern = companyNameTargetPattern(companyName);
-  return companyPattern ? companyPattern.test(value) : false;
-}
-
-/**
- * Which of the three contribution predicates a closing sentence still fails,
- * in a fixed order (asset, action, target) so a message built from this array
- * always lists them the same way. An empty array means the sentence satisfies
- * the full connection. See the comment on candidateContributionRequirement
- * below for why the CALLER, not this function, decides how much of this to
- * report.
- */
-function missingContributionHalves(value, companyName, { authoredNouns = null } = {}) {
-  const missing = [];
-  if (!CANDIDATE_ASSET_CLOSE.test(value) && !authoredNounClose(value, authoredNouns)) missing.push('asset');
-  if (!CANDIDATE_CONTRIBUTION_ACTION.test(value)) missing.push('action');
-  if (!employerFacingTarget(value, companyName)) missing.push('target');
-  return missing;
-}
-
-// The observation has to be executable on its own: a writer reading only this
-// line must be able to produce a closing that passes. The previous wording
-// ("name the experience, skills, or work…") described the goal but not the
-// things the check tests, so a revision could name the experience, still miss
-// the ownership marker, and fail the identical check a second time.
-//
-// Composed from one function — contributionHalfRequirement() below — rather
-// than hand-maintained twice, so the conditional-modal branch (which grades
-// all three predicates at once, since none of them has been checked yet at
-// that point in the sentence) and the two branches that already know exactly
-// which predicate failed read the identical wording for whichever half they
-// name. That composition is load-bearing, not tidiness, across two separate
-// incidents on the same check:
-//
-// 1. A single job's cover-letter paste handoff was rejected 16 consecutive
-//    times over 87 minutes (2026-09-24, 08:23:19Z to 09:50:59Z), every
-//    rejection naming this check's id, while the response grew from 4227 to
-//    4314 chars rewriting the contribution clause and never touching the
-//    conditional modal that actually tripped it — because the conditional
-//    branch's own message pointed at the contribution clause ("name the
-//    specific work or contribution to discuss") instead of at the modal.
-//    Composing the same requirement into both branches means a writer told to
-//    delete the modal is told, in the same round, the one other way this
-//    sentence can still fail once the modal is gone.
-//
-// 2. The same check rejected a different job's letter a second time, 4
-//    consecutive rounds (2026-09-24, 13:08:05Z–13:10:40Z), every round
-//    fingerprint 752d8241 on the direct-conversation branch (branch 4). The
-//    single fixed message every branch shared quoted an example for the asset
-//    half and the action half but never for the target half — the exact half
-//    the closing kept failing, once the generic-only employer lexicon (see
-//    the EMPLOYER_TARGET_NOUNS comment above) rejected a company-named
-//    target. A writer who already has a working asset and action and reads a
-//    message that only ever demonstrates asset and action has no way to learn
-//    what the sentence actually still needs, and rewrites the two halves that
-//    were never broken. missingContributionHalves() above now reports WHICH
-//    predicates failed; candidateContributionRequirement() below builds the
-//    message from only those, so a writer who satisfies two of three is told
-//    about the one that is failing and nothing else.
-function contributionHalfRequirement(half, companyName) {
-  switch (half) {
-    case 'asset':
-      return 'name the candidate’s asset with a possessive, an authorship clause, or a demonstrative that carries '
-        + 'its own descriptor (“my <descriptor> work”, “the <artifact> I built”, “that <descriptor> experience”), '
-        + 'never a bare demonstrative (“that work”); in an authorship clause the verb is one of '
-        + `${CANDIDATE_AUTHORSHIP_VERBS.slice(0, -1).join(', ')} or ${CANDIDATE_AUTHORSHIP_VERBS.at(-1)}, and the <artifact> is a noun this letter has `
-        + 'already used for your own work, either as the object of an earlier sentence of yours with such a verb or in a '
-        + 'career-data quote the letter cites (a short fixed list of everyday artifact nouns also passes without that); '
-        + `an authorship clause states a past action of yours when its verb is ${CLOSING_AUTHORSHIP_PROOF_VERBS.slice(0, -1).join(', ')} or ${CLOSING_AUTHORSHIP_PROOF_VERBS.at(-1)}, `
-        + 'and a closing that holds one is a proof-bearing paragraph, so the review must also record an argumentMapping for it (a proof span and a '
-        + 'jobNeedQuote that no other paragraph uses): use a possessive asset unless the artifact is the strongest item the letter showed';
-    case 'action':
-      return 'say what that asset does for the target work, with one of these verbs: '
-        + `${CLOSING_ACTION_MODAL_VERBS.slice(0, -1).join(', ')} or ${CLOSING_ACTION_MODAL_VERBS.at(-1)}, after ${CLOSING_ACTION_MODALS.slice(0, -1).join(', ')} or ${CLOSING_ACTION_MODALS.at(-1)} `
-        + '(up to two words may stand between) or in the present tense (“supports”, “applies”); or '
-        + `${CLOSING_ACTION_OPEN_PARTICIPLES.slice(0, -1).join(', ')} or ${CLOSING_ACTION_OPEN_PARTICIPLES.at(-1)}; `
-        + 'a verb outside these fails this half however naturally it reads';
-    case 'target': {
-      // This half had no example at all before the second incident above.
-      // companyName is named in the message itself, when a usable pattern can
-      // actually be built from it (see companyNameTargetPattern), so the
-      // writer does not have to guess that the employer's own spelling counts
-      // as reaching the employer's side — and is never told a name the
-      // matcher itself would refuse (too short, or nothing but a stopword).
-      // The name goes inside curly quotes like every other example here, and
-      // that placement is load-bearing rather than cosmetic:
-      // checkObservationFingerprint (localAiApplication.js) strips every
-      // curly-quoted span before hashing precisely so a branch's fingerprint
-      // is its own fixed wording and nothing job-specific. Interpolated bare,
-      // the employer's name would survive into the digest — giving the SAME
-      // branch a different fingerprint per company (defeating the cross-receipt
-      // branch comparison the fingerprint exists for) and carrying job content
-      // into a receipt whose header promises it never does.
-      const named = companyNameTargetPattern(companyName) ? text(companyName) : '';
-      const namedClause = named ? `, or the employer’s own name exactly as this letter already spells it (“${named}”)` : '';
-      return 'reach the employer’s side too — “your …”, “the”/“this” plus up to two words and a noun for the team, '
-        + 'product or work (“the … <noun>”, “this … <noun>”), a reader noun '
-        + `(“clients”, “customers”, “users”)${namedClause}; a sentence naming only the `
-        + 'candidate’s side fails this half even when the asset and action are both present';
-    }
-    default:
-      return '';
-  }
-}
-
-/**
- * Builds the remediation text from exactly the missing halves (the
- * direct-conversation and self-directed branches, which have already graded
- * all three predicates) or from all three at once (the conditional-modal
- * branch, which grades the sentence before the modal is even gone). See the
- * incident notes on contributionHalfRequirement above for why per-half
- * attribution replaced one fixed message shared by every branch.
- */
-function candidateContributionRequirement(missing, companyName) {
-  const lead = missing.length === 3
-    ? 'the sentence needs all three parts'
-    : missing.length === 1
-      ? `the sentence is missing its ${missing[0]} half`
-      : `the sentence is missing its ${missing.slice(0, -1).join(', ')} and ${missing[missing.length - 1]} halves`;
-  const parts = missing.map(half => contributionHalfRequirement(half, companyName));
-  const requirement = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join('; ')}; and ${parts[parts.length - 1]}`;
-  // The repeat-floor clause above tells a writer how far to vary a half's
-  // WORDS. It says nothing about SHAPE: checkRepeatedSentenceShape grades this
-  // closing sentence's syntactic frame against every other sentence in the
-  // letter independently of wording, so a rewrite that clears the word floor
-  // by swapping nouns and verbs into the same slots can still trip that check.
-  // Naming it here, in the same message already sending a writer toward a
-  // wording rewrite, keeps the two floors from reading as one problem with one
-  // fix.
-  return `${lead} — ${requirement}; name whichever half is rewritten in wording this letter has not already used `
-    + `for it elsewhere — a run of ${MIN_CROSS_PARAGRAPH_REPEAT_WORDS} or more words carried verbatim from an `
-    + 'earlier paragraph into this one is counted as a repeat on its own, independent of this check; sentence shape '
-    + 'is graded separately from wording too, so if an earlier sentence already used this one’s shape, vary the '
-    + 'construction and not only the words';
-}
-
-// Passed to candidateContributionRequirement by the conditional-modal branch,
-// which has not evaluated any of the three predicates yet at the point it
-// fires — the modal itself is what failed the sentence, so all three still
-// belong in that branch's message regardless of what the clause after the
-// modal actually contains.
-const ALL_CONTRIBUTION_HALVES = Object.freeze(['asset', 'action', 'target']);
 
 // The functions the host requires of the sentences of a cover letter, each in one phrase, and the
 // checks that can reject a letter for losing one. No closing function is listed: how a letter closes
@@ -5550,7 +4020,7 @@ export const HOST_REQUIRED_LETTER_FUNCTIONS = ['claim-and-relevance', 'proof', '
 // close on exactly the invitation this check exists to reject. The fix walks
 // backward past sentences this matcher recognizes rather than widening the
 // scope to the whole paragraph, because the comment inside
-// checkDirectWelcomeClosing already explains why grading the two invitation
+// the retired direct-welcome-closing check already explained why grading the two invitation
 // shapes at different scopes made the rule unlearnable — a per-branch scope
 // change here would repeat that mistake. If every sentence in the paragraph is
 // courtesy, there is no substantive sentence to fall back to and today's
@@ -5561,8 +4031,8 @@ const COURTESY_CLOSING_SENTENCE = /^(?:thank\s+you\s+for\b|i\s+(?:truly\s+)?appr
 /**
  * Index into an already-split sentence list of the final sentence that
  * carries content beyond courtesy, walking backward past every sentence
- * COURTESY_CLOSING_SENTENCE recognizes. Shared by checkDirectWelcomeClosing —
- * which certifies the sentence it returns — and
+ * COURTESY_CLOSING_SENTENCE recognizes. Shared by the retired
+ * direct-welcome-closing check — which certified the sentence it returned — and
  * checkProspectiveContributionTense's own exemption, which must skip that
  * SAME sentence and no other. Returning a POSITION rather than text is what
  * makes the second caller correct: identifying "the certified sentence" by
@@ -5577,56 +4047,6 @@ function finalSubstantiveClosingSentenceIndex(paragraphSentences) {
   return paragraphSentences.length ? paragraphSentences.length - 1 : -1;
 }
 
-
-/** Keeps the invitation in the closing direct and specific. */
-export function checkDirectWelcomeClosing(paragraphs = [], companyName = '', { citations = null } = {}) {
-  const list = Array.isArray(paragraphs) ? paragraphs : [];
-  const observations = [];
-  const index = list.length - 1;
-  const closingSentences = index >= 0 ? sentences(list[index]) : [];
-  const finalIndex = finalSubstantiveClosingSentenceIndex(closingSentences);
-  const finalSentence = finalIndex >= 0 ? closingSentences[finalIndex] : '';
-  // What the letter has already said the candidate made: every sentence before
-  // the one graded (earlier paragraphs, and earlier sentences of the closing
-  // paragraph), and the quotes the letter cites. See AUTHORED_ARTIFACT_CLOSE.
-  const authoredNouns = letterAuthoredNouns(
-    [...list.slice(0, Math.max(index, 0)).flatMap(paragraph => sentences(paragraph)), ...closingSentences.slice(0, Math.max(finalIndex, 0))],
-    citations,
-  );
-  const conditionalMatch = CONDITIONAL_WELCOME_CLOSE.exec(finalSentence);
-  if (conditionalMatch) {
-    observations.push(`paragraph ${index + 1}'s final substantive sentence opens with a conditional or deferential `
-      + `invitation (“${boundedDetailValue(conditionalMatch[0])}”); delete that opening modal and make the invitation `
-      + 'direct, in the present tense — do not rewrite the clause after it, since the modal itself is what fails '
-      + `this check, not the clause it introduces. Once the modal is gone the sentence is graded as a direct `
-      + `invitation, so ${candidateContributionRequirement(ALL_CONTRIBUTION_HALVES, companyName)}`);
-  }
-  // Computed once and reused by both branches below: they read the identical
-  // finalSentence/companyName pair, and missingContributionHalves is a pure
-  // function of that pair.
-  const missing = missingContributionHalves(finalSentence, companyName, { authoredNouns });
-  const selfDirectedMatch = SELF_DIRECTED_CONVERSATION_CLOSE.exec(finalSentence)
-    || LOOK_FORWARD_CONVERSATION_CLOSE.exec(finalSentence);
-  if (selfDirectedMatch && missing.length) {
-    observations.push(`paragraph ${index + 1}'s final substantive sentence ends with conversation or learning intent (“${boundedDetailValue(selfDirectedMatch[0])}”) but no candidate contribution; the invitation wording itself is correct, so keep it; ${candidateContributionRequirement(missing, companyName)}`);
-  }
-  const directConversation = DIRECT_CONVERSATION_CLOSE.exec(finalSentence);
-  const employerChoice = EMPLOYER_CHOICE_CLOSE.exec(finalSentence);
-  if (employerChoice) {
-    observations.push(`paragraph ${index + 1}'s final substantive sentence asks the employer to choose between initiatives (“${boundedDetailValue(employerChoice[0])}”); close with the candidate's concrete contribution to the target work instead of posing a question for the employer to decide`);
-    // Both branches read the FINAL SUBSTANTIVE SENTENCE, deliberately. STYLE.md
-    // §11.2 is explicit that "its final sentence should connect the
-    // candidate's relevant contribution to the target work", and grading the
-    // two invitation shapes at different scopes made the rule unlearnable: the
-    // same closing paragraph passed with "I welcome a conversation about that
-    // work" and failed with "I look forward to discussing that work", decided
-    // only by which verb the last sentence happened to use.
-  } else if (directConversation && missing.length) {
-    observations.push(`paragraph ${index + 1}'s final substantive sentence uses a direct conversation invitation (“${boundedDetailValue(directConversation[0])}”) but never connects a candidate asset to the employer's work; the invitation wording itself is correct, so keep it; ${candidateContributionRequirement(missing, companyName)}`);
-  }
-  return observationResult('direct-welcome-closing', observations, MAX_COPY_PRECISION_OBSERVATIONS,
-    `${list.length} paragraph(s) use a direct, specific invitation when they close with “welcome”`);
-}
 
 // Numbers a person writes out in a résumé or a letter. The claim side and the
 // evidence side read the same table, so "four years" in the prose is the same
@@ -5898,70 +4318,6 @@ export function findUnsupportedDurationClaim(finalText, sourceQuotes = []) {
   return null;
 }
 
-// A paragraph-opening demonstrative noun phrase promises that its referent
-// sits in the paragraph the reader just finished. A shipped letter opened a
-// paragraph “That <topic> practice …” two paragraphs after the <topic>
-// material, forcing the reader to hunt backward. Deliberately narrow: only
-// the opening words of paragraphs after the first are read, only when the
-// demonstrative heads a noun phrase (pronoun and fixed-phrase heads are
-// skipped via the stopword set), and the referent search stems both sides so
-// a verb form anchors its noun form. Mid-paragraph demonstratives have local
-// context and stay out of scope.
-const OPENING_DEMONSTRATIVE_RE = /^(?:that|this|these|those)\s+([\p{L}’'-]+)(?:\s+([\p{L}’'-]+))?/iu;
-const DEMONSTRATIVE_HEAD_STOPWORDS = new Set([
-  'is', 'was', 'are', 'were', 'be', 'being', 'been', 'has', 'had', 'have',
-  'said', 'same', 'one', 'way', 'why', 'how', 'what', 'kind', 'sort', 'much',
-  'many', 'last', 'first', 'second', 'time', 'point', 'and', 'or', 'of', 'in',
-  'to', 'a', 'an', 'the', 'my', 'own', 'very',
-]);
-
-const DEMONSTRATIVE_AUXILIARY_WORDS = new Set([
-  'would', 'could', 'can', 'will', 'should', 'may', 'might', 'must', 'shall', 'do', 'does', 'did',
-  'cannot', 'needs',
-]);
-
-function referentStem(word) {
-  const lower = String(word || '').toLowerCase();
-  const stripped = lower.replace(/(?:ation|ing|ed|es|s)$/u, '');
-  return stripped.length >= 4 ? stripped : lower;
-}
-
-function referentStemsMatch(left, right) {
-  const a = referentStem(left);
-  const b = referentStem(right);
-  if (Math.min(a.length, b.length) < 4) return a === b;
-  return a.startsWith(b) || b.startsWith(a);
-}
-
-/** Keeps a paragraph-opening “That/This <noun>” anchored to the previous paragraph. */
-export function checkOpeningDemonstrative(paragraphs = []) {
-  const list = Array.isArray(paragraphs) ? paragraphs : [];
-  const observations = [];
-  for (let index = 1; index < list.length; index++) {
-    const paragraph = text(list[index]);
-    const match = OPENING_DEMONSTRATIVE_RE.exec(paragraph);
-    if (!match) continue;
-    // A modal or auxiliary is never a noun, so it can neither be the head to look
-    // for nor be the word that satisfies the search: “That would help” has no
-    // noun phrase at all, and “That judgment would” is looking for judgment
-    // alone. Before this, a “would” anywhere in the previous paragraph anchored
-    // “That judgment would”, and “That would help” was reported for a “would”
-    // the previous paragraph did not carry.
-    const isAuxiliary = word => DEMONSTRATIVE_AUXILIARY_WORDS.has(word) || word.endsWith("n't");
-    if (isAuxiliary(match[1].toLowerCase())) continue;
-    const heads = [match[1], match[2]]
-      .filter(Boolean)
-      .map(word => word.toLowerCase())
-      .filter(word => !DEMONSTRATIVE_HEAD_STOPWORDS.has(word) && !isAuxiliary(word));
-    if (!heads.length) continue;
-    const previousWords = words(list[index - 1]);
-    if (heads.some(head => previousWords.some(word => referentStemsMatch(head, word)))) continue;
-    observations.push(`paragraph ${index + 1} opens with “${leadingWordsSnippet(paragraph, 4)}”, but the previous paragraph never mentions ${heads.map(head => `“${head}”`).join(' or ')}; name the referent explicitly or open with this paragraph's own subject`);
-  }
-  return observationResult('opening-demonstrative', observations, MAX_OPENING_DEMONSTRATIVE_OBSERVATIONS,
-    `${list.length} paragraph(s) anchor their opening references in the preceding paragraph`);
-}
-
 /** Opening word as written: the first run of letters/apostrophes, or '' when none. */
 function paragraphOpeningWord(value) {
   const match = /[\p{L}][\p{L}'’]*/u.exec(text(value));
@@ -6017,83 +4373,6 @@ export function checkBodyPointCount(paragraphs = []) {
     `${bodyPoints} body point(s) between the thesis and the closing`);
 }
 
-// At a paragraph boundary, “The department” after a named employer
-// makes the prior employer sound like generic context rather than the named
-// source of the next evidence. This is intentionally narrower than a ban on
-// definite descriptions: only organization labels that match a known employer
-// named in the immediately preceding paragraph are in scope.
-const EMPLOYER_ORGANIZATION_LABELS = new Set([
-  'district', 'department', 'agency', 'company', 'organization', 'organisation',
-  'university', 'college', 'hospital', 'city', 'county', 'state',
-]);
-const OPENING_EMPLOYER_SHORTHAND = /^the\s+(?:school\s+)?([\p{L}’'-]+)\b/iu;
-
-/**
- * Flags a vague employer shorthand at a paragraph boundary without prescribing
- * repetition. `employer` is curly-quoted below — see checkPriorEmployerOpening's
- * comment above.
- */
-export function checkOpeningEmployerShorthand(paragraphs = [], employerNames = []) {
-  const list = Array.isArray(paragraphs) ? paragraphs : [];
-  const employers = (Array.isArray(employerNames) ? employerNames : []).map(text).filter(Boolean);
-  const observations = [];
-  for (let index = 1; index < list.length; index++) {
-    const paragraph = text(list[index]);
-    const match = OPENING_EMPLOYER_SHORTHAND.exec(paragraph);
-    const label = normalized(match?.[1]);
-    if (!label || !EMPLOYER_ORGANIZATION_LABELS.has(label)) continue;
-    const previous = normalized(list[index - 1]);
-    const employer = employers.find(name => words(name).includes(label) && previous.includes(normalized(name)));
-    if (!employer) continue;
-    // Names the offending span and the shape of the repair, and quotes no
-    // wording for the letter to adopt. The rule is stated in full beside
-    // checkRepeatedSentenceShape below: a gate that hands over a string hands
-    // over something to copy into the letter. This message and the adjacent one
-    // both used to offer a literal re-entry cue as the repair, and the letter of
-    // 2026-09-23 opened two of its four paragraphs with exactly that cue. The
-    // employer's own name stays: it is the candidate's employer, already in the
-    // letter, and it is what makes the observation locatable.
-    observations.push(`paragraph ${index + 1} opens with employer shorthand (“${leadingWordsSnippet(paragraph, 3)}”) after naming “${employer}” in the prior paragraph; open instead on whatever this paragraph is actually about, whether that is the candidate, the work itself, or “${employer}” named in full where another employer or role could be the referent`);
-    if (observations.length >= MAX_EXPERIENCE_FRAMING_OBSERVATIONS) break;
-  }
-  return observationResult('opening-employer-shorthand', observations, MAX_EXPERIENCE_FRAMING_OBSERVATIONS,
-    `${list.length} paragraph(s) avoid vague employer shorthand at paragraph boundaries`);
-}
-
-/**
- * Full-name repetition in consecutive evidence paragraphs is usually
- * unnecessary after a single clear employer mention. Keep the guard narrow:
- * it applies only when the candidate begins the next sentence with the same
- * employer, and ignores contexts that name multiple employers. `employer` is
- * curly-quoted below — see checkPriorEmployerOpening's comment above.
- */
-export function checkAdjacentEmployerRepetition(paragraphs = [], employerNames = []) {
-  const list = Array.isArray(paragraphs) ? paragraphs : [];
-  const employers = (Array.isArray(employerNames) ? employerNames : [])
-    .map(text).filter(Boolean)
-    .sort((left, right) => right.length - left.length);
-  const observations = [];
-  for (let index = 1; index < list.length; index++) {
-    const previous = text(list[index - 1]);
-    const opening = text(sentences(list[index])[0]);
-    const priorMentions = employers.filter(employer => {
-      const reference = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(employer)}(?![\\p{L}\\p{N}])`, 'iu');
-      return reference.test(previous);
-    });
-    if (priorMentions.length !== 1) continue;
-    const employer = priorMentions[0];
-    const repeatedCandidateOpening = new RegExp(`^(?:at\\s+)?${escapeRegExp(employer)}\\s*,\\s*i\\b`, 'iu');
-    if (!repeatedCandidateOpening.test(opening)) continue;
-    // Same rule as the message above, and the same repair: describe what the
-    // opening should be about and stop. A named cue here is a phrase the letter
-    // will contain, which is how two of four paragraphs came to share one.
-    observations.push(`paragraph ${index + 1} repeats “${employer}” in its opening immediately after paragraph ${index}; one established employer needs no re-introduction, so let the opening start from this paragraph's own subject and keep “${employer}” only where another employer or role could be the referent`);
-    if (observations.length >= MAX_EXPERIENCE_FRAMING_OBSERVATIONS) break;
-  }
-  return observationResult('adjacent-employer-repetition', observations, MAX_EXPERIENCE_FRAMING_OBSERVATIONS,
-    `${list.length} paragraph(s) avoid needless full-name repetition after a single, established prior employer`);
-}
-
 // Closed by construction: articles, pronouns, determiners, auxiliaries and
 // modals, the common prepositions, and the coordinating and subordinating
 // conjunctions. Everything else is content, and this list is the whole
@@ -6111,69 +4390,6 @@ const FRAME_FUNCTION_WORDS = new Set([
   'both', 'also', 'not', 'no', 'there', 'here', 'then', 'still', 'more', 'most', 'each', 'every', 'all',
   'any', 'some', 'one', 'own', 'same', 'such', 'very', 'too', 'only',
 ]);
-// Deliberately not an ellipsis: every quoted detail value passes through
-// text(), whose NFKC pass rewrites U+2026 to three periods, so a quoted frame
-// would no longer contain the glyph its own legend names. An asterisk survives
-// that normalization and cannot be read as the truncation marker either.
-const FRAME_WILDCARD = '*';
-
-/**
- * Reduces a sentence to the shape of its opening: function words stay literal,
- * every run of content words collapses to one wildcard. Collapsing the run is
- * what makes the comparison a shape rather than a phrase — two sentences that
- * differ only in the verb and the noun filling their slots reduce to the same
- * elements however long those fillers are. Returns '' for a sentence with no
- * comparable shape, so a short or wildcard-heavy sentence is simply not judged.
- */
-function sentenceShapeFrame(sentence) {
-  const skeleton = [];
-  let literals = 0;
-  for (const word of words(sentence)) {
-    const token = FRAME_FUNCTION_WORDS.has(word) ? word : FRAME_WILDCARD;
-    if (token === FRAME_WILDCARD && skeleton[skeleton.length - 1] === FRAME_WILDCARD) continue;
-    if (token !== FRAME_WILDCARD) literals += 1;
-    skeleton.push(token);
-    if (skeleton.length >= SENTENCE_SHAPE_FRAME_WORDS) break;
-  }
-  if (skeleton.length < SENTENCE_SHAPE_FRAME_WORDS) return '';
-  if (literals < MIN_SENTENCE_SHAPE_FUNCTION_WORDS) return '';
-  return skeleton.join(' ');
-}
-
-/**
- * The most paragraphs that may carry one shape before the letter is reading as
- * a filled template. All but two, and never fewer than two, so a letter may
- * still run three of six paragraphs in deliberate parallel while four of four
- * is reported.
- */
-export function sharedSentenceShapeCeiling(paragraphCount) {
-  return Math.max(MIN_SHARED_SHAPE_PARAGRAPHS - 1, paragraphCount - 2);
-}
-
-// The contract is written before the letter exists, so the clause it prints
-// has to state the ceiling as a formula. Both numbers in that formula are read
-// back out of the function above rather than restated by hand: the flat floor
-// it returns for the shortest judged letter, and the offset it subtracts once
-// the letter is long enough for the count to govern. A hand-copied pair here
-// would look guarded and drift the first time the formula moved.
-const SHAPE_CEILING_LONG_LETTER_PROBE = 10;
-const SHAPE_CEILING_FLOOR = sharedSentenceShapeCeiling(MIN_SHARED_SHAPE_PARAGRAPHS);
-const SHAPE_CEILING_OFFSET = SHAPE_CEILING_LONG_LETTER_PROBE - sharedSentenceShapeCeiling(SHAPE_CEILING_LONG_LETTER_PROBE);
-export const SHARED_SENTENCE_SHAPE_CEILING_RULE =
-  `at most ${SHAPE_CEILING_FLOOR} of them may carry one shape,`
-  + ` and once the letter runs longer than ${SHAPE_CEILING_FLOOR + SHAPE_CEILING_OFFSET} paragraphs`
-  + ` the ceiling is its paragraph count less ${SHAPE_CEILING_OFFSET}`;
-// The adjacency branch of the same check, stated for the contract. A ceiling is
-// a count, and a count cannot see distance: two adjacent paragraphs are always
-// at or under SHAPE_CEILING_FLOOR, which is how the letter of 2026-09-23 opened
-// paragraphs 2 and 3 on one frame and passed the whole battery. The
-// clause has no number of its own, so there is none to derive; it is written
-// beside the ceiling rule it qualifies so the contract can never print the
-// formula without the condition the formula cannot express.
-export const ADJACENT_SENTENCE_SHAPE_RULE =
-  'and no two paragraphs standing next to each other may carry one shape at all,'
-  + ' because the parallelism that ceiling leaves room for is parallelism spread through the letter,'
-  + ' not paragraphs running together';
 
 /**
  * Names where each repeat sits. A paragraph number alone was enough while only
@@ -6183,155 +4399,6 @@ export const ADJACENT_SENTENCE_SHAPE_RULE =
 function joinShapeLocations(locations) {
   const parts = locations.map(({ paragraph, sentence }) => `paragraph ${paragraph} sentence ${sentence}`);
   return joinAnd(parts);
-}
-
-/**
- * The locations of one shape that sit in consecutive paragraphs, in paragraph
- * order. A location with no neighbour one paragraph away is dropped: a shape in
- * paragraphs 1 and 4 is spread parallelism the ceiling governs, and naming
- * paragraph 1 in an adjacency report would point the writer at a sentence the
- * report is not about.
- */
-function backToBackShapeLocations(locations) {
-  const ordered = [...locations].sort((left, right) => left.paragraph - right.paragraph || left.sentence - right.sentence);
-  return ordered.filter((location, index) => ordered.some((other, otherIndex) =>
-    otherIndex !== index && Math.abs(other.paragraph - location.paragraph) === 1));
-}
-
-/**
- * How many of those sentences have to move. Breaking a run of consecutive
- * paragraphs takes every second paragraph in the run, so a pair costs one
- * rewrite and a triad also costs one: the middle. Each maximal run is counted
- * on its own, because two separate adjacent pairs of one shape are two repairs.
- */
-function backToBackShapeRewrites(locations) {
-  let rewrites = 0;
-  let run = 1;
-  for (let index = 1; index <= locations.length; index++) {
-    const continues = index < locations.length && locations[index].paragraph - locations[index - 1].paragraph === 1;
-    if (continues) {
-      run += 1;
-      continue;
-    }
-    rewrites += Math.floor(run / 2);
-    run = 1;
-  }
-  return rewrites;
-}
-
-/**
- * Every sentence shape the letter carries, and which of them the shape check
- * reports: the ones over the count ceiling, and the ones carried by paragraphs
- * standing next to each other. One reading shared by checkRepeatedSentenceShape
- * and by checkRepeatedTransferCarrier, which must not name a pair of sentences
- * this one already reports. `list` is the letter's non-empty paragraph texts.
- */
-function sentenceShapeAnalysis(list) {
-  const shapes = new Map();
-  list.forEach((paragraph, index) => {
-    const seen = new Set();
-    sentences(paragraph).forEach((sentence, position) => {
-      const frame = sentenceShapeFrame(sentence);
-      if (!frame || seen.has(frame)) return;
-      seen.add(frame);
-      shapes.set(frame, [...(shapes.get(frame) || []), { paragraph: index + 1, sentence: position + 1 }]);
-    });
-  });
-  const ceiling = sharedSentenceShapeCeiling(list.length);
-  const over = [...shapes]
-    .filter(([, locations]) => locations.length > ceiling)
-    .sort((left, right) => right[1].length - left[1].length);
-  // The ceiling counts, and a count cannot see distance. It exists to permit
-  // deliberate parallelism, which is why it allows a shape in all but two
-  // paragraphs; but what a reader registers as one template filled twice is
-  // back-to-back, and two adjacent paragraphs are always at or under a ceiling
-  // that starts at two. A live letter is the measurement: paragraph 2 opened
-  // "In that role, my <field> experience includes" and paragraph 3 answered
-  // "In that <title> role, my <other field> experience spans", one shape in
-  // consecutive paragraphs, two of four, and the whole battery passed it. So adjacency is read as its own defect, and
-  // only for shapes the count has not already reported, because a shape over
-  // the ceiling is the same defect and must not be named twice in one message.
-  //
-  // This branch charges a shape checkRepeatedPhrase excuses the words of, and on
-  // that same letter it does: it reports paragraph 1 sentence 5 and paragraph 2
-  // sentence 4 for one shape, "i would * that *", while
-  // repeatComparisonSentence removes those very words from the repeat
-  // comparison. Read as one rule the pair looks contradictory; they are two
-  // levels of one policy. A stock transfer frame is a choice the writer makes,
-  // never a requirement, and the words of a frame are not charged twice (the
-  // budget and the repeated-transfer-carrier check police the frame). Reaching
-  // for the same shape again in the very next paragraph is reported here, where
-  // the shape is read: paragraph 3 of that letter shows the alternative was
-  // available, transferring on "I can apply that" while 1 and 2 both used
-  // "I would apply that". The asymmetry is the design.
-  const adjacent = [...shapes]
-    .filter(([frame, locations]) => !over.some(([reported]) => reported === frame)
-      && backToBackShapeLocations(locations).length > 0)
-    .map(([frame, locations]) => [frame, backToBackShapeLocations(locations)])
-    .sort((left, right) => right[1].length - left[1].length
-      || left[1][0].paragraph - right[1][0].paragraph);
-  return { shapes, ceiling, over, adjacent };
-}
-
-/**
- * When every paragraph makes its move the same way, the letter reads as one
- * template filled four times rather than an argument developed four ways. No
- * run-length check can see this: a template rotates the verb and the noun
- * through fixed slots, so two sentences built on one frame share no run long
- * enough to register, and `checkRedundancy` compares the letter to the RÉSUMÉ
- * rather than paragraph to paragraph. This compares shapes instead, and
- * reports only the count, the shape it read, and where it read it — whether
- * that shape is filler or deliberate parallelism is the writer's judgement,
- * which is why the ceiling leaves room for a parallel pair or a parallel triad
- * in a long letter.
- *
- * Every sentence is read, not only the closing one. Reading a single position
- * measured the position rather than the template: the live letter of
- * 2026-09-21 was rejected for four paragraphs closing on one shape, came back
- * with two closings rotated, and still opened every paragraph's evidence with
- * one frame, which this check could not see and which a reader sees first. A
- * paragraph is counted once per shape however often it repeats that shape
- * inside itself, so parallelism a writer builds within one paragraph is its
- * own business.
- */
-export function checkRepeatedSentenceShape(paragraphs = []) {
-  const list = (Array.isArray(paragraphs) ? paragraphs : []).map(text).filter(Boolean);
-  if (list.length < MIN_SHARED_SHAPE_PARAGRAPHS) {
-    return result('repeated-sentence-shape', true,
-      `letter has ${list.length} paragraph(s); sentence shapes are compared from ${MIN_SHARED_SHAPE_PARAGRAPHS}`);
-  }
-  const { ceiling, over, adjacent } = sentenceShapeAnalysis(list);
-  if (!over.length && !adjacent.length) {
-    return result('repeated-sentence-shape', true,
-      `no sentence shape is carried by more than ${ceiling} of ${list.length} paragraph(s) or by two consecutive paragraphs`);
-  }
-  // No em dash and no suggested replacement wording: this detail is quoted
-  // back to the writer verbatim, and a gate that hands over a string hands
-  // over something to copy into the letter.
-  // The ceiling alone left the writer to subtract: a repair measured against
-  // this message rotated one sentence out of four, which still left three on
-  // the shape, and cost a whole round to a count the check had already done.
-  const visible = over.slice(0, MAX_REPEATED_SHAPE_OBSERVATIONS);
-  const omitted = over.length - visible.length;
-  const reports = visible.map(([frame, locations]) =>
-    `${joinShapeLocations(locations)} reduce to the same sentence shape “${boundedDetailValue(frame)}”,`
-    + ` and at most ${ceiling} of these ${list.length} paragraphs may carry one shape,`
-    + ` so at least ${locations.length - ceiling} of those ${locations.length} sentences must be rewritten to a different shape`);
-  // The adjacency report does the same arithmetic the count report does, so the
-  // writer is never left to work out how many sentences have to move: breaking
-  // a run of N consecutive paragraphs takes every second one of them.
-  const adjacentVisible = adjacent.slice(0, MAX_REPEATED_SHAPE_OBSERVATIONS);
-  const adjacentOmitted = adjacent.length - adjacentVisible.length;
-  const adjacentReports = adjacentVisible.map(([frame, locations]) =>
-    `${joinShapeLocations(locations)} carry the same sentence shape “${boundedDetailValue(frame)}” in back-to-back paragraphs,`
-    + ` and the ${ceiling} paragraphs the count allows one shape are for parallelism spread through the letter rather than for paragraphs running together,`
-    + ` so at least ${backToBackShapeRewrites(locations)} of those ${locations.length} sentences must be rewritten to a different shape`);
-  return result('repeated-sentence-shape', false,
-    `${[...reports, ...adjacentReports].join('; ')}`
-    + `${omitted ? `; ${omitted} additional repeated shape(s) omitted` : ''}`
-    + `${adjacentOmitted ? `; ${adjacentOmitted} additional back-to-back shape(s) omitted` : ''};`
-    + ` a sentence shape is that sentence's first ${SENTENCE_SHAPE_FRAME_WORDS} words with every run of content words shown as ${FRAME_WILDCARD},`
-    + ` so rotating the verb or the noun through the same slots leaves it unchanged`);
 }
 
 // Derived from the cue the argument gate enforces rather than restated, so the
@@ -6479,19 +4546,18 @@ function dictatedTransferPositions(tokens, carrier) {
  * carrier.
  *
  * FORMULAIC_TRANSFER_FRAME is a stock frame, and its words are not charged here.
- * Two other checks police the frame itself: the budget (checkTransferCarrierBudget)
- * allows it in at most MAX_EXPLICIT_TRANSFER_PARAGRAPHS paragraphs, and
- * checkRepeatedTransferCarrier and the shape check refuse one form in neighbouring
- * paragraphs, so charging the same words again here would report one defect three
- * times. The carrier's words are removed from the comparison rather than
+ * Retired checks once policed the frame itself (a budget on how many paragraphs
+ * may carry it, a refusal of one form in neighbouring paragraphs and a shape
+ * check), so charging the same words again here would have reported one defect
+ * several times; the words stay uncharged. The carrier's words are removed from the comparison rather than
  * filtered off the result, because longestSharedRun answers with one run per
  * pair: post-filtering the carrier would let it stand in front of a real repeat
  * in the same pair of sentences and hide it, which is exactly what happens in
  * a measured letter, where one pair of transfer sentences carries both the
  * carrier and a four-word run the writer repeated on top of it.
  *
- * This excuses the carrier's WORDS while checkRepeatedSentenceShape's adjacency
- * branch charges its SHAPE, and on a measured letter both fired that way at once:
+ * This excuses the carrier's WORDS while the retired shape check's adjacency
+ * branch charged its SHAPE, and on a measured letter both fired that way at once:
  * nothing here reported "i would apply that", and that check reported paragraph 1
  * sentence 5 and paragraph 2 sentence 4 for carrying one shape in back-to-back
  * paragraphs. They are two levels of one policy. Choosing the SAME shape in two
@@ -6578,8 +4644,7 @@ function comparedUnit(unit, together) {
 
 // A name is SUPPOSED to recur. An employer, a product or a project named twice
 // is the same thing named twice, and how often a name may be repeated is
-// already governed by checkPriorEmployerOpening, checkOpeningEmployerShorthand
-// and checkAdjacentEmployerRepetition, so a run of nothing but names belongs to
+// already governed by checkPriorEmployerOpening, so a run of nothing but names belongs to
 // them and not here. Capitalization is read across the whole letter rather than
 // at the occurrence, because a name is capitalized wherever it appears while an
 // ordinary word is capitalized only where a sentence happens to open with it,
@@ -6713,9 +4778,8 @@ export const REPEATED_PHRASE_RULE =
 
 /**
  * The letter repeating itself. Nothing in this battery compared a paragraph to
- * itself or to another paragraph: `checkRedundancy` and `checkSalientPhraseEcho`
- * measure the letter against the RÉSUMÉ, `checkRepeatedSentenceShape` compares
- * skeletons with every content word erased, and every other n-gram site takes
+ * itself or to another paragraph: `checkRedundancy` measures the letter against
+ * the RÉSUMÉ, and a since-retired shape check compared skeletons with every content word erased, and every other n-gram site takes
  * its needle from the résumé, the plan or a fixed list. So a measured letter
  * stated one "<capability> across <two areas>" phrase twice in one paragraph,
  * opened a sentence in each of two paragraphs with the same
@@ -6794,272 +4858,9 @@ export function checkRepeatedPhrase(paragraphs = [], { jobNeedQuotes = [] } = {}
     + ` and none of ${MIN_CROSS_PARAGRAPH_REPEAT_WORDS} words across paragraphs`);
 }
 
-const MAX_TRANSFER_CARRIER_OBSERVATIONS = 4;
-const MAX_DANGLING_DEMONSTRATIVE_OBSERVATIONS = 4;
-
-// A letter may carry a stock transfer frame in at most
-// MAX_EXPLICIT_TRANSFER_PARAGRAPHS paragraphs (see checkTransferCarrierBudget)
-// and no rule requires one, so the words of a carrier are a choice that the
-// budget and this check police and checkRepeatedPhrase leaves alone. What is
-// reported here is reaching for the SAME form in the paragraph right after: a
-// shipped letter handed paragraph 2's proof over with “That <field> experience
-// would support …” and paragraph 3's with “That <noun> would support …”, and
-// passed every check because checkRepeatedSentenceShape compares a five-word
-// frame whose fifth slot differed (“… and” against “… for”). Both sentences
-// are one transfer form once the noun phrase and the verb are read as slots,
-// which is what the normalization below does. The repair asked for is the
-// writer's own wording, never a different member of a list: nothing here
-// names a form to move to.
-//
-// The rule says exactly what the code does, because a writer told a looser
-// version rotates the wrong part. After I only WOULD or CAN is a modal slot, so
-// “I would apply that X” and “I would bring my Y” are one form whatever
-// follows the verb; a carrier led by a noun phrase keeps its determiner and
-// would; and any other carrier is its bare verb, determiner and noun slot, so a
-// modal the cue does not list (will, could) stands in front of it without
-// making a form of its own. The examples use X and Y rather than words: a gate
-// that names a string gets it copied.
-export const REPEATED_TRANSFER_CARRIER_RULE =
-  'a stock transfer frame is never required, and every carrier-shaped phrase is read in any two consecutive paragraphs,'
-  + ' the opening and the closing included, so two paragraphs standing next to each other may not both carry the same form;'
-  + ' a form is what is left of the carrier once its verb and its noun are slots, so changing only the verb or only the noun keeps the same form:'
-  + ' after I, only would or can is part of the form, so “I would apply that X” and “I would bring my Y” are one form, and “I can bring” is another;'
-  + ' a carrier led by that, this, these, those or the and a noun phrase keeps that determiner and would,'
-  + ' so “that X would support” and “that Y would help” are one form;'
-  + ' any other carrier keeps its determiner and a would standing directly before its verb, and no other modal,'
-  + ' so “will apply that X” and “could apply that Y” are one form;'
-  + ' reaching for one form again in the very next paragraph is a choice, because no rule requires a carrier at all,'
-  + ' and the repair is your own wording in one of the two paragraphs, not a different stock form';
-
-const TRANSFER_FORM_SUBJECT_RE = /^(that|this|these|those|the)\s+.+\s+(would)\s+(?:help|support|enable)$/u;
-const TRANSFER_FORM_FIRST_PERSON_RE = /^i\s+(would|can)\s+(?:apply|bring|use|contribute)$/u;
-const TRANSFER_FORM_OBJECT_RE = /^((?:would\s+)?)(?:apply|bring|use|contribute)\s+(that|this|my|the)\s+\S+$/u;
-// The verb slot of a form. Angle brackets keep it from being read as a word of
-// the letter, and it is deliberately not one of the verbs the cue accepts: a
-// message that showed a real verb would hand the writer a string to copy.
-const TRANSFER_FORM_VERB_SLOT = '<verb>';
-
-/**
- * The form of one matched transfer carrier: the words the writer chose to carry
- * it, with the parts that rotate through it left as slots. The noun phrase is a
- * wildcard and the verb family (apply, bring, use, contribute; help, support,
- * enable) is a verb slot, because swapping only the verb or only the noun leaves
- * the form unchanged, which is the same reading the shape check gives a
- * sentence. The modal and the determiner stay where the rule above says they do.
- * Anything that matches no slot-bearing shape (“helping the team”) is its own
- * form as written.
- */
-function transferCarrierForm(carrier) {
-  const value = normalized(carrier);
-  const subject = TRANSFER_FORM_SUBJECT_RE.exec(value);
-  if (subject) return `${subject[1]} ${FRAME_WILDCARD} ${subject[2]} ${TRANSFER_FORM_VERB_SLOT}`;
-  const firstPerson = TRANSFER_FORM_FIRST_PERSON_RE.exec(value);
-  if (firstPerson) return `i ${firstPerson[1]} ${TRANSFER_FORM_VERB_SLOT}`;
-  const object = TRANSFER_FORM_OBJECT_RE.exec(value);
-  if (object) return `${object[1]}${TRANSFER_FORM_VERB_SLOT} ${object[2]} ${FRAME_WILDCARD}`;
-  return value;
-}
-
-// The two cue shapes that end on the TARGET (“helping this role”, “supporting your
-// team”) are not read. They carry no capability noun, so they are ordinary
-// English that any sentence about the employer can contain (“to support the
-// team”), and a body paragraph and the closing one sharing it is not two proofs
-// handed over the same way. Only a carrier that names what is being handed over,
-// or the act of handing it, is a form the writer chose to transfer with.
-const TARGET_ONLY_CARRIER_RE = /^(?:help|support)/u;
-
-/** Every transfer carrier form in a paragraph, with the sentence that carries it. */
-function paragraphTransferForms(paragraph) {
-  const forms = new Map();
-  sentences(paragraph).forEach((sentence, position) => {
-    for (const match of normalized(sentence).matchAll(FORMULAIC_TRANSFER_FRAME_GLOBAL)) {
-      const form = transferCarrierForm(match[0]);
-      if (TARGET_ONLY_CARRIER_RE.test(form)) continue;
-      if (!forms.has(form)) forms.set(form, { sentence: position + 1, frame: sentenceShapeFrame(sentence) });
-    }
-  });
-  return forms;
-}
-
 function joinAlternatives(items) {
   if (items.length < 2) return items[0] || '';
   return `${items.slice(0, -1).join(', ')} or ${items[items.length - 1]}`;
-}
-
-/**
- * Two paragraphs standing next to each other carry the same transfer form.
- *
- * A pair the sentence-shape check also reports is reported here too. Suppressing
- * it left a hole: a repair that answers the shape report alone can keep the
- * carrier, and the same two sentences then fail this check a round later. One
- * rewrite of a carrier clears both, so a double report costs nothing, and the
- * message says when the two name the same sentences so the writer makes one
- * edit that answers both rather than two that conflict.
- *
- * The message also names the forms the pair's OUTER neighbours use. Rotating a
- * pair's end paragraph onto the form of the paragraph beyond it moves the
- * defect one paragraph over, which is what a message that named only the
- * shared form invited.
- */
-export function checkRepeatedTransferCarrier(paragraphs = []) {
-  const list = (Array.isArray(paragraphs) ? paragraphs : []).map(text).filter(Boolean);
-  const perParagraph = list.map(paragraphTransferForms);
-  const reportedShapes = new Map();
-  if (list.length >= MIN_SHARED_SHAPE_PARAGRAPHS) {
-    const { over, adjacent } = sentenceShapeAnalysis(list);
-    for (const [frame, locations] of [...over, ...adjacent]) {
-      reportedShapes.set(frame, new Set([...(reportedShapes.get(frame) || []), ...locations.map(location => location.paragraph)]));
-    }
-  }
-  const pairs = new Map();
-  for (let index = 0; index + 1 < list.length; index++) {
-    for (const [form, here] of perParagraph[index]) {
-      const next = perParagraph[index + 1].get(form);
-      if (!next) continue;
-      const reported = reportedShapes.get(here.frame);
-      const sameShapeReport = Boolean(here.frame && here.frame === next.frame && reported?.has(index + 1) && reported.has(index + 2));
-      pairs.set(form, [...(pairs.get(form) || []), { paragraph: index + 1, here, next, sameShapeReport }]);
-    }
-  }
-  const neighbourForms = (paragraphNumber, shared) => (perParagraph[paragraphNumber - 1] ? [...perParagraph[paragraphNumber - 1].keys()] : [])
-    .filter(form => form !== shared)
-    .map(form => `“${boundedDetailValue(form)}” (paragraph ${paragraphNumber} uses it)`);
-  const observations = [];
-  for (const [form, found] of pairs) {
-    let run = [];
-    const flush = () => {
-      if (!run.length) return;
-      const last = run[run.length - 1];
-      const spanned = [...run.map(pair => pair.paragraph), last.paragraph + 1];
-      const where = [...run.map(pair => `paragraph ${pair.paragraph} sentence ${pair.here.sentence}`),
-        `paragraph ${last.paragraph + 1} sentence ${last.next.sentence}`];
-      const named = spanned.length === 2
-        ? `paragraphs ${spanned[0]} and ${spanned[1]} both carry`
-        : `paragraphs ${spanned.slice(0, -1).join(', ')} and ${spanned[spanned.length - 1]} all carry`;
-      const repair = spanned.length === 2
-        ? 'one of them'
-        : `at least ${Math.floor(spanned.length / 2)} of them so that no two neighbouring paragraphs share it`;
-      const avoid = [...neighbourForms(spanned[0] - 1, form), ...neighbourForms(spanned[spanned.length - 1] + 1, form)];
-      const sameShape = run.some(pair => pair.sameShapeReport);
-      observations.push({
-        start: spanned[0],
-        message: `${named} the same transfer form “${boundedDetailValue(form)}” (${where.join(', ')});`
-          + ` rewrite the carrier in ${repair} in your own wording, since no stock transfer form is required${avoid.length ? ` and ${joinAlternatives(avoid)} would be the same defect again` : ''}`
-          + `${sameShape ? '; repeated-sentence-shape reports these same sentences, so one rewrite that changes both the carrier form and the sentence shape answers both reports' : ''}`,
-      });
-      run = [];
-    };
-    for (const pair of found) {
-      if (run.length && pair.paragraph !== run[run.length - 1].paragraph + 1) flush();
-      run.push(pair);
-    }
-    flush();
-  }
-  observations.sort((left, right) => left.start - right.start);
-  return observationResult('repeated-transfer-carrier', observations.map(({ message }) => message), MAX_TRANSFER_CARRIER_OBSERVATIONS,
-    `${list.length} paragraph(s) carry no transfer form in two consecutive paragraphs`);
-}
-
-// The one place a demonstrative's noun is a CLOSED vocabulary. Judging every
-// sentence-opening “That <noun>” read open English without a part-of-speech
-// tagger, and it was wrong in every direction: “I rebuilt the API. That rebuild
-// …”, “This cut p95 latency …”, “These safeguards …”, “That reliability …”
-// after “reliable”, and the claim-span rule's own “That difficulty lay in …”
-// were all reported, and each repair for a true report broke a second rule. So
-// this reads only the demonstrative-headed TRANSFER CARRIER in its subject
-// shape, whose nouns FORMULAIC_TRANSFER_FRAME lists, and only the nouns the
-// back-references below do not already excuse.
-//
-// The object shape (“I would apply that capability”) is deliberately NOT read.
-// It sits directly after the proof sentence it transfers, so its noun reads as
-// a summary of the action just described rather than as a term nobody has
-// introduced, and a shipped letter's paragraph 1 measured that way: flagging it
-// was a false positive. A sentence that OPENS on the demonstrative and names a
-// quality with no referent is what reads as dangling, so only that is judged.
-//
-// “That experience”, “this experience”, “that work”, “this work”, “those
-// patterns” and “these patterns” point back at the proof sentence with nothing
-// earlier required, so those three nouns are exempt. The others (capability, approach, judgment, practice)
-// have no such licence: a paragraph about a practice that turns its proof
-// toward the employer with “That <noun> would support …” names a second
-// abstraction nobody has introduced, which is what the shipped sentence did.
-const DEMONSTRATIVE_EXEMPT_CARRIER_NOUN_LIST = Object.freeze(['experience', 'work', 'pattern', 'patterns']);
-const DEMONSTRATIVE_EXEMPT_CARRIER_NOUNS = new Set(DEMONSTRATIVE_EXEMPT_CARRIER_NOUN_LIST);
-const DEMONSTRATIVE_JUDGED_SUBJECT_NOUNS = Object.freeze(
-  TRANSFER_CUE_SUBJECT_NOUNS.filter(noun => !DEMONSTRATIVE_EXEMPT_CARRIER_NOUNS.has(noun)));
-// The nouns the rule prints: the singular of each judged noun, read off the
-// same array the regex below is built from.
-const DEMONSTRATIVE_JUDGED_NOUN_LIST = Object.freeze(DEMONSTRATIVE_JUDGED_SUBJECT_NOUNS.filter(noun => !noun.endsWith('s')));
-
-export const DANGLING_DEMONSTRATIVE_RULE =
-  'a sentence after the first of its paragraph that turns its proof toward the employer with that, this, these or those,'
-  + ` then any modifiers, then ${joinAlternatives(DEMONSTRATIVE_JUDGED_NOUN_LIST)} (or its plural) and would help, support or enable,`
-  + ' must find that noun, or a word standing before it in the carrier, or a form of one of them,'
-  + ' in an earlier sentence of the same paragraph, so put a word an earlier sentence of the paragraph uses for that capability directly before the noun,'
-  + ` or use one of the back-references that name ${joinAlternatives([...DEMONSTRATIVE_EXEMPT_CARRIER_NOUN_LIST])} and need no earlier mention;`
-  + ' no object-position carrier such as apply that X, and no other sentence that opens with a demonstrative, is read here';
-
-const DEMONSTRATIVE_SUBJECT_CARRIER_RE = new RegExp(
-  String.raw`\b(that|this|these|those)\s+((?:[\p{L}'’-]+\s+){0,5})(${DEMONSTRATIVE_JUDGED_SUBJECT_NOUNS.join('|')})\s+would\s+(?:help|support|enable)\b`, 'giu');
-
-/** A noun and its plural read as one word, so “capabilities” finds “capability”. */
-function carrierNounStem(word) {
-  const lower = String(word || '').toLowerCase();
-  if (/[^aeiou]ies$/u.test(lower)) return `${lower.slice(0, -3)}y`;
-  return /[^s]s$/u.test(lower) ? lower.slice(0, -1) : lower;
-}
-
-/**
- * Every demonstrative-headed carrier in one sentence whose noun is judged:
- * where it is, what it says, and the words that can excuse it. Modifier words
- * are the ones standing between the determiner and the noun, minus function
- * words, so “that very approach” is not excused by the “very” an earlier
- * sentence happens to contain.
- */
-function demonstrativeCarriers(sentence) {
-  const source = normalized(sentence);
-  const found = [];
-  for (const match of source.matchAll(DEMONSTRATIVE_SUBJECT_CARRIER_RE)) {
-    const modifiers = (match[2].match(WORD_TOKEN_RE) || []).filter(word => !FRAME_FUNCTION_WORDS.has(word));
-    found.push({ index: match.index, span: match[0], noun: match[3], modifiers });
-  }
-  return found.sort((left, right) => left.index - right.index);
-}
-
-/**
- * A demonstrative-headed transfer carrier, after the first sentence of its
- * paragraph, must find its noun, or a word before that noun in the carrier, in
- * an earlier sentence of the same paragraph. See the constants above for the
- * closed scope and the exemptions, and why nothing else is read.
- */
-export function checkDanglingDemonstrative(paragraphs = []) {
-  const list = (Array.isArray(paragraphs) ? paragraphs : []).map(text).filter(Boolean);
-  const observations = [];
-  list.forEach((paragraph, paragraphIndex) => {
-    const own = sentences(paragraph);
-    own.forEach((sentence, position) => {
-      if (position === 0) return;
-      const carriers = demonstrativeCarriers(sentence);
-      if (!carriers.length) return;
-      const earlier = own.slice(0, position).flatMap(words).flatMap(word => [word, ...word.split('-')]).map(carrierNounStem);
-      for (const carrier of carriers) {
-        const candidates = [...carrier.modifiers, carrier.noun];
-        const referenced = candidates.some(candidate => [candidate, ...candidate.split('-')].some(part => {
-          const stem = carrierNounStem(part);
-          return earlier.some(word => referentStemsMatch(stem, word));
-        }));
-        if (referenced) continue;
-        const quoted = sentence.slice(carrier.index, carrier.index + carrier.span.length);
-        observations.push(`paragraph ${paragraphIndex + 1} sentence ${position + 1} carries “${boundedDetailValue(quoted)}”,`
-          + ` but no earlier sentence of paragraph ${paragraphIndex + 1} mentions ${joinAlternatives(candidates.map(candidate => `“${candidate}”`))};`
-          + ' put a word an earlier sentence of this paragraph uses for that capability directly before the noun,'
-          + ' or use one of the back-references that name experience, work or patterns and need no earlier mention');
-        break;
-      }
-    });
-  });
-  return observationResult('dangling-demonstrative', observations, MAX_DANGLING_DEMONSTRATIVE_OBSERVATIONS,
-    `${list.length} paragraph(s) open no demonstrative transfer carrier on a capability noun the paragraph has not yet used`);
 }
 
 // ---------------------------------------------------------------------------
@@ -7080,61 +4881,6 @@ export function checkDanglingDemonstrative(paragraphs = []) {
 
 function joinAnd(items) {
   return items.length < 2 ? String(items[0] ?? '') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
-}
-
-function paragraphNumberList(numbers) {
-  return `paragraph${numbers.length === 1 ? '' : 's'} ${joinAnd(numbers.map(String))}`;
-}
-
-/**
- * More paragraphs carry a stock transfer frame than the letter's budget allows.
- *
- * Counts paragraphs, not carriers: a paragraph with two forms is one paragraph.
- * The two cue shapes that end on the target alone (“helping this role”) are not
- * transfer forms here for the same reason checkRepeatedTransferCarrier does not
- * read them, so they cost nothing. The opening and the closing count, because a
- * closing that hands the work over is the same cadence as a proof paragraph that
- * does. Only the frames are counted: a sentence about the target in the writer's
- * own words is the one thing the letter owes (checkParagraphArgumentLinks) and
- * is never a carrier, however often it appears. The frame the message lets stay
- * is the one in the paragraph that owes the sentence, else the one in the first
- * proof-bearing paragraph that carries one, else the earliest: the paragraphs it
- * tells the writer to rewrite are every other carrier, so removing exactly those
- * always leaves a letter inside the budget, and the owing paragraph is free to
- * word its sentence however it likes. The message names the repair and none of
- * the carrier wording: a message that quotes a string gets it copied.
- */
-export function checkTransferCarrierBudget(paragraphs = []) {
-  const list = (Array.isArray(paragraphs) ? paragraphs : []).map(text).filter(Boolean);
-  const owed = explicitTransferOwed(list);
-  const carriers = [];
-  list.forEach((paragraph, index) => {
-    const forms = paragraphTransferForms(paragraph);
-    if (!forms.size) return;
-    carriers.push({
-      paragraph: index + 1,
-      sentence: Math.min(...[...forms.values()].map(found => found.sentence)),
-      owed: owed[index],
-      proofBearing: paragraphHasCandidatePastProof(paragraph),
-    });
-  });
-  if (carriers.length <= MAX_EXPLICIT_TRANSFER_PARAGRAPHS) {
-    return result('transfer-carrier-budget', true,
-      `${carriers.length} of ${list.length} paragraph(s) carry a stock transfer frame, within the budget of ${MAX_EXPLICIT_TRANSFER_PARAGRAPHS}`);
-  }
-  // Which frames stay: the owing paragraph's first, then a proof paragraph's, then the earliest.
-  const rank = carrier => (carrier.owed ? 0 : carrier.proofBearing ? 1 : 2);
-  const kept = new Set([...carriers].sort((left, right) => rank(left) - rank(right) || left.paragraph - right.paragraph)
-    .slice(0, MAX_EXPLICIT_TRANSFER_PARAGRAPHS).map(carrier => carrier.paragraph));
-  const excess = carriers.filter(carrier => !kept.has(carrier.paragraph));
-  return result('transfer-carrier-budget', false,
-    `${paragraphNumberList(carriers.map(carrier => carrier.paragraph))} carry a stock transfer frame, but a letter may carry one in at most ${MAX_EXPLICIT_TRANSFER_PARAGRAPHS} ${MAX_EXPLICIT_TRANSFER_PARAGRAPHS === 1 ? 'paragraph' : 'paragraphs'},`
-    + ` the opening and the closing counted, and none is required: the one sentence a letter owes about why its work matters to the target is`
-    + ` worded however the writer likes, in ${OWING_PROOF_PARAGRAPHS};`
-    + ` end ${paragraphNumberList(excess.map(carrier => carrier.paragraph))} on what the work did by taking the frame out of`
-    + ` ${excess.map(carrier => `paragraph ${carrier.paragraph} sentence ${carrier.sentence}`).join(', ')},`
-    + ' keeping each paragraph’s proof, so that a proof paragraph closes on its last sentence about the work'
-    + ' and an opening or closing states its point without a stock frame');
 }
 
 // The benefits a sentence about the target is most often tempted to promise, as closed
@@ -7387,7 +5133,7 @@ function paragraphJobNeedQuotes(plan) {
 // grammar of a required sentence, repetition limits, opening and closing
 // forms, paragraph shape) never does: a deterministic wording gate cannot be
 // satisfied naturally, and a writer who must satisfy one writes filler. The
-// gate audit measured exactly that, so every check carries one of three
+// gate audit measured exactly that, so every check carries one of two
 // dispositions.
 //
 //   'gate'     a failure blocks the letter and is returned for correction;
@@ -7395,11 +5141,10 @@ function paragraphJobNeedQuotes(plan) {
 //              (the check id and how many observations there were; the
 //              observation text is not persisted) and the writer prompt may
 //              still describe the check as guidance;
-//   'off'      the check is not run by production callers (they pass
-//              activeOnly), so it runs only in tests and when called by hand.
-//              The function stays exported and tested; a recorded check id
-//              and the dispositions table still name it, and
-//              partitionCheckResults drops its rows.
+//
+// A check that was judged 'off' (not run at all) is deleted, not parked: its
+// id can still appear in stored rule tallies, edit logs and archived runs, and
+// every reader treats an id this table does not list as an unknown id.
 //
 // An id this table does not list is a GATE: a check added without being
 // classified fails closed, as every check did before there was a table, until
@@ -7415,7 +5160,7 @@ function paragraphJobNeedQuotes(plan) {
 // truth half can hold while the taste half advises.
 // ---------------------------------------------------------------------------
 
-export const CHECK_DISPOSITION_VALUES = Object.freeze(['gate', 'advisory', 'off']);
+export const CHECK_DISPOSITION_VALUES = Object.freeze(['gate', 'advisory']);
 
 // [id, disposition, class, why]. The class is the audit's (TRUTH / HYGIENE /
 // TASTE / MIXED); where the disposition departs from the audit's recommendation
@@ -7424,67 +5169,38 @@ export const CHECK_DISPOSITION_VALUES = Object.freeze(['gate', 'advisory', 'off'
 const CHECK_DISPOSITION_ROWS = Object.freeze([
   // ---- the production battery (evaluateCoverLetterChecks), in battery order
   ['redundancy', 'advisory', 'TASTE', 'a verbatim run shared with a résumé bullet is repetition, not a falsehood; the word floor re-rejects a repair the host itself suggested and misses a restated meaning.'],
-  ['salient-phrase-echo', 'off', 'TASTE', 'depends on a refrain list the writer cannot see, so the rule cannot be learned; no fact is at stake.'],
   ['generic-phrases', 'advisory', 'TASTE', 'stock phrases and opener formulas are a true weakness, but a closed list that synonyms pass is a lexical lottery, not a gate.'],
   ['interest-framing', 'advisory', 'TASTE', 'declarations of enthusiasm are style advice with no fact in them.'],
-  ['experience-infinitive-grammar', 'off', 'TASTE', 'the grammar of one construction a writer does not produce.'],
-  ['company-specificity', 'off', 'TASTE', 'inert in the paste pipeline, which never supplies research text, and wording-only where it does run.'],
   ['shape', 'gate', 'HYGIENE', 'a letter needs at least one non-empty body paragraph.'],
   ['figure-discipline', 'gate', 'MIXED', 'a figure the approved evidence never states is a fabricated metric. Only that half gates (the count cap is figure-count), and a figure is licensed by the evidence the letter cites as well as by the mapped evidence.'],
   ['logistics-exclusion', 'gate', 'MIXED', 'availability, start-date, location and relocation promises state facts about the candidate that no approved evidence supports; promise-shaped patterns, no false positives measured.'],
-  ['compound-hyphenation', 'off', 'TASTE', 'orthography; the message already prints the corrected spelling.'],
-  ['parallel-structure', 'off', 'TASTE', 'grammar heuristics.'],
   ['prior-employer-opening', 'advisory', 'TASTE', 'where a sentence states the candidate’s relationship to an employer is a wording preference; the closed frames rejected complete relationship statements and taught one template.'],
   ['prior-employer-short-form', 'gate', 'MIXED', 'the user’s stated rule: a past employer is written by its full name or not named; a first-word short form reads as an adjective. Held as MIXED rather than TASTE because the letter table keeps TASTE rules advisory, and the half that gates here is a claim about which organization the work was for.'],
   ['named-artifact-introduction', 'advisory', 'TASTE', 'introduction style, not fact.'],
   ['opening-artifact-context', 'advisory', 'TASTE', 'opening form; with the other opening checks it steered writers toward an abstract opener about the employer’s domain, which is the unsupported claim a gate should be catching.'],
-  ['vague-domain-work-label', 'off', 'TASTE', 'a one-pattern wording fixer.'],
-  ['reference-clarity', 'off', 'TASTE', 'grammar judgment that rejected a plural pronoun with a plain coordinated antecedent.'],
-  ['modifier-attachment', 'off', 'TASTE', 'one regex fitted to one past sentence.'],
-  ['migration-object-clarity', 'off', 'TASTE', 'a one-pattern fixer.'],
   ['opening-posting-restatement', 'advisory', 'TASTE', 'rejected the opener the host’s own opening rule asks for (naming the role and the employer).'],
   ['opening-job-summary-scaffolding', 'advisory', 'TASTE', 'style.'],
   ['anchor-relevance', 'advisory', 'TASTE', 'forbids accurate, relevant tool naming and its repair makes the letter vaguer; it is not a truth gate.'],
   ['target-claim-scope', 'gate', 'MIXED', 'telling the employer its role involves the candidate’s own prior mechanics is a claim about the employer. Held as a gate once it reads only sentences that name a responsibility of the posting.'],
   ['target-company-binding', 'gate', 'TRUTH', 'a name from another application where this job’s employer belongs is a copy/paste company error. Held as a gate once it excludes technologies, names the evidence or posting explains, and history recalled in the past tense.'],
-  ['detached-relevance-claim', 'off', 'TASTE', 'a one-pattern wording rule.'],
   ['prospective-contribution-tense', 'advisory', 'TASTE', 'the tense of a hedge; no fact at stake.'],
-  ['additive-seam', 'off', 'TASTE', 'connective style.'],
-  ['responsibility-transition', 'off', 'TASTE', 'fixed phrases.'],
-  ['tool-calls-garden-path', 'off', 'TASTE', 'a single literal string.'],
-  ['low-information-tool-build', 'off', 'TASTE', 'one wording pattern.'],
   ['containerization-technology-roles', 'gate', 'TRUTH', 'fires only when a tool is credited with a role the résumé itself assigns to another tool: attribution truth, precise.'],
   ['posting-reference', 'advisory', 'TASTE', 'register advice.'],
   ['claimed-equivalence', 'advisory', 'MIXED', 'an asserted cross-domain equivalence is truth-adjacent, but the lexical carriers also match innocent phrasing and cannot tell a claim about the employer from the candidate’s own account; advice, not a gate.'],
-  ['dangling-paragraph-transition', 'off', 'TASTE', 'one regex shape.'],
   ['sentence-length', 'advisory', 'TASTE', 'a readability preference.'],
   ['punctuation-style', 'advisory', 'TASTE', 'house style the host can normalise mechanically instead of rejecting.'],
   ['paragraph-openers', 'advisory', 'TASTE', 'opening-word variety that the brief asks for; the host records it and never rejects on it.'],
   ['body-point-count', 'advisory', 'TASTE', 'the brief caps the letter at three body points; the host records it and never rejects on it.'],
-  ['plain-register', 'off', 'TASTE', 'a few fixed phrases from past letters.'],
-  ['introductory-workplace-comma', 'off', 'TASTE', 'comma placement.'],
-  ['visual-reference-precision', 'off', 'TASTE', 'fitted to one project description.'],
-  ['direct-welcome-closing', 'off', 'TASTE', 'it certified one closing shape, a direct invitation, and that shape became the stock closing of every letter; how a letter closes is the writer’s choice.'],
-  ['opening-demonstrative', 'off', 'TASTE', 'cohesion judgment for a reviewer.'],
-  ['opening-employer-shorthand', 'off', 'TASTE', 'wording.'],
-  ['adjacent-employer-repetition', 'off', 'TASTE', 'wording that pulled opposite to prior-employer-opening.'],
-  ['entailed-premise', 'off', 'TASTE', 'one regex.'],
-  ['repeated-sentence-shape', 'off', 'TASTE', 'teaches a writer to contort syntax and did not catch the monotone shape it names.'],
   ['repeated-phrase', 'advisory', 'TASTE', 'the floor sits below ordinary repeated naming of one thing; repetition of an idea is a reviewer’s call.'],
   ['candidate-agency', 'advisory', 'TASTE', 'existed so the audit’s span obligations had something to grade, and those obligations are advisory now.'],
   ['letter-proportion', 'advisory', 'TASTE', 'counts over how the letter is cut and worded, not facts; page fit is measured by the renderer. Its paragraph ceiling is split off as letter-paragraph-ceiling.'],
-  ['repeated-transfer-carrier', 'off', 'TASTE', 'existed only to fence the mandated transfer sentence.'],
-  ['dangling-demonstrative', 'off', 'TASTE', 'a cohesion rule.'],
   ['ended-role-current-employment', 'gate', 'TRUTH', 'a role with an explicit past end date framed as current employment is a false date claim; reads explicit end dates only.'],
-  ['transfer-carrier-budget', 'off', 'TASTE', 'a fence around the mandated transfer sentence.'],
   ['transfer-benefit-support', 'gate', 'TRUTH', 'a benefit class (reliability, cost, safety and so on) that neither the proof nor the cited quotes state is an outcome the evidence does not show; a closed lexicon that errs toward silence.'],
 
   // ---- rows the production battery adds around evaluateCoverLetterChecks
   ['role-thesis', 'gate', 'HYGIENE', 'only the half that records a roleThesis at all gates; one sentence, long enough and free of stock language is role-thesis-shape.'],
-  ['mapping-narrative-structure', 'off', 'TASTE', 'scaffolding for the argument plan, not a property of the letter.'],
   ['evidence-grounding', 'gate', 'HYGIENE', 'binds each argument evidence string to a final résumé bullet; cheap and precise.'],
   ['paragraph-argument-links', 'gate', 'MIXED', 'the provenance half of the argument audit: a recorded span must be an exact span of its paragraph, a jobNeedQuote an exact span of the posting copy, and the paragraph may not promote a use requirement into a build or a tool-assisted practice into a product. The span grammar is paragraph-argument-shape.'],
-  ['paragraph-argument-span-gaps', 'off', 'TASTE', 'the drafting twin of the span grammar; it rejected paragraphs that were not defective and carried no check id.'],
   ['unsupported-experience-span', 'gate', 'TRUTH', 'a span of years the text claims must be stated by a quote the same unit cites; computed durations are a classic fabrication.'],
 
   // ---- halves split off the rows above, each under its own id
@@ -7501,7 +5217,7 @@ const VALID_DISPOSITIONS = new Set(CHECK_DISPOSITION_VALUES);
 
 /**
  * The disposition of one check id. An id the table does not list, or lists
- * with a value that is not one of the three, is a gate: the safe answer for a
+ * with a value that is not one of the two, is a gate: the safe answer for a
  * check nobody has classified is the one it had before there was a table.
  * `table` is injectable so a test can flip one entry and prove the outcome
  * flips with it.
@@ -7540,8 +5256,7 @@ function advisoryObservationCount(row) {
  *             content-free records { id, count }: the id and how many
  *             observations there were, never the observation text. One record
  *             per id, counts summed;
- *   (dropped) a failed half whose disposition is 'off', and every half that
- *             passed.
+ *   (dropped) every half that passed.
  *
  * Fail-safe in the direction of blocking: a half with no id, an id the table
  * does not list, and a row that does not say `passed: true` all count as
@@ -7555,7 +5270,6 @@ export function partitionCheckResults(results, table = CHECK_DISPOSITIONS) {
     for (const part of checkResultParts(row)) {
       if (part.passed === true) continue;
       const disposition = checkDisposition(part.id, table);
-      if (disposition === 'off') continue;
       if (disposition === 'advisory') {
         advisoryCounts.set(part.id, (advisoryCounts.get(part.id) || 0) + advisoryObservationCount(part));
         continue;
@@ -7567,29 +5281,19 @@ export function partitionCheckResults(results, table = CHECK_DISPOSITIONS) {
 }
 
 /** Evaluates the prose-level checks used to decide the single revision attempt. */
-export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence = {}, jobText = '', researchText = '', companyName = '', forbiddenNames = [], referenceDate = null, paragraphCitations = null, activeOnly = false } = {}) {
-  const plannedCompanyDetail = text(plan?.companyHook?.detail);
+export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence = {}, jobText = '', researchText = '', companyName = '', forbiddenNames = [], referenceDate = null, paragraphCitations = null } = {}) {
   const priorEmployers = (Array.isArray(evidence?.roles) ? evidence.roles : [])
     .map(role => text(role?.company)).filter(Boolean);
-  const companySpecificity = () => researchText && !plannedCompanyDetail
-    ? result('company-specificity', true, 'skipped: argument plan intentionally omitted a company-specific hook')
-    : checkCompanySpecificity(paragraphs, researchText, companyName, plannedCompanyDetail);
   const checks = [
     ['redundancy', () => checkRedundancy(paragraphs, evidence)],
-    ['salient-phrase-echo', () => checkSalientPhraseEcho(paragraphs, evidence, jobText)],
     ['generic-phrases', () => checkGenericPhrases(paragraphs)],
     ['interest-framing', () => checkInterestFraming(paragraphs)],
-    ['experience-infinitive-grammar', () => checkExperienceInfinitiveGrammar(paragraphs)],
-    ['company-specificity', companySpecificity],
     ['shape', () => checkShape(plan, paragraphs)],
     ['figure-discipline', () => checkFigureDiscipline(paragraphs, evidence, plan, { citations: paragraphCitations })],
     ['logistics-exclusion', () => checkLogisticsExclusion(plan, paragraphs)],
-    // Register and style checks. They are appended rather than interleaved so
-    // the established check order stays stable, and every one of them reads
-    // paragraphs only, so they still run in the plan-degraded path where the
-    // call site filters out the plan-dependent 'shape' result.
-    ['compound-hyphenation', () => checkCompoundHyphenation(paragraphs)],
-    ['parallel-structure', () => checkParallelStructure(paragraphs)],
+    // Register and style checks. They read paragraphs only, so they still run
+    // in the plan-degraded path where the call site filters out the
+    // plan-dependent 'shape' result.
     ['prior-employer-opening', () => checkPriorEmployerOpening(paragraphs, priorEmployers)],
     ['prior-employer-short-form', () => checkPriorEmployerShortForm(paragraphs, priorEmployers, {
       otherNames: [companyName, ...(Array.isArray(evidence?.projects) ? evidence.projects : []).map(project => project?.name)],
@@ -7600,38 +5304,19 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
       (Array.isArray(evidence?.projects) ? evidence.projects : []).map(project => project?.name),
       priorEmployers,
     )],
-    ['vague-domain-work-label', () => checkVagueDomainWorkLabel(paragraphs)],
-    ['reference-clarity', () => checkReferenceClarity(paragraphs)],
-    ['modifier-attachment', () => checkModifierAttachment(paragraphs)],
-    ['migration-object-clarity', () => checkMigrationObjectClarity(paragraphs)],
     ['opening-posting-restatement', () => checkOpeningPostingRestatement(paragraphs, jobText)],
     ['opening-job-summary-scaffolding', () => checkOpeningJobSummaryScaffolding(paragraphs)],
     ['anchor-relevance', () => checkAnchorRelevance(paragraphs, jobText, researchText)],
     ['target-claim-scope', () => checkTargetClaimScope(plan, paragraphs, evidence, jobText)],
     ['target-company-binding', () => checkTargetCompanyBinding(paragraphs, companyName, priorEmployers, { evidence, jobText, forbiddenNames })],
-    ['detached-relevance-claim', () => checkDetachedRelevanceClaim(paragraphs)],
     ['prospective-contribution-tense', () => checkProspectiveContributionTense(paragraphs, companyName)],
-    ['additive-seam', () => checkAdditiveSeam(paragraphs)],
-    ['responsibility-transition', () => checkResponsibilityTransition(paragraphs)],
-    ['tool-calls-garden-path', () => checkToolCallsGardenPath(paragraphs)],
-    ['low-information-tool-build', () => checkLowInformationToolBuild(paragraphs)],
     ['containerization-technology-roles', () => checkContainerizationTechnologyRoles(paragraphs, evidence)],
     ['posting-reference', () => checkPostingReference(paragraphs)],
     ['claimed-equivalence', () => checkClaimedEquivalence(paragraphs)],
-    ['dangling-paragraph-transition', () => checkDanglingParagraphTransition(paragraphs)],
     ['sentence-length', () => checkSentenceLength(paragraphs)],
     ['punctuation-style', () => checkPunctuationStyle(paragraphs)],
     ['paragraph-openers', () => checkParagraphOpeners(paragraphs)],
     ['body-point-count', () => checkBodyPointCount(paragraphs)],
-    ['plain-register', () => checkPlainRegister(paragraphs)],
-    ['introductory-workplace-comma', () => checkIntroductoryWorkplaceComma(paragraphs, priorEmployers)],
-    ['visual-reference-precision', () => checkVisualReferencePrecision(paragraphs)],
-    ['direct-welcome-closing', () => checkDirectWelcomeClosing(paragraphs, companyName, { citations: paragraphCitations })],
-    ['opening-demonstrative', () => checkOpeningDemonstrative(paragraphs)],
-    ['opening-employer-shorthand', () => checkOpeningEmployerShorthand(paragraphs, priorEmployers)],
-    ['adjacent-employer-repetition', () => checkAdjacentEmployerRepetition(paragraphs, priorEmployers)],
-    ['entailed-premise', () => checkEntailedPremise(paragraphs)],
-    ['repeated-sentence-shape', () => checkRepeatedSentenceShape(paragraphs)],
     ['repeated-phrase', () => checkRepeatedPhrase(paragraphs, { jobNeedQuotes: paragraphJobNeedQuotes(plan) })],
     ['candidate-agency', () => checkCandidateAgency(paragraphs)],
     // Reads how the letter is cut rather than what it says, and is the only
@@ -7641,18 +5326,13 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     // bound to; a caller that cannot supply them still gets every structural
     // limit.
     ['letter-proportion', () => checkLetterProportion(paragraphs, { citations: paragraphCitations })],
-    // Appended last for the same reason as the register block above: the
-    // established order stays stable and both read paragraphs only.
-    ['repeated-transfer-carrier', () => checkRepeatedTransferCarrier(paragraphs)],
-    ['dangling-demonstrative', () => checkDanglingDemonstrative(paragraphs)],
+    // Reads paragraphs and the résumé's explicit end dates only.
     ['ended-role-current-employment', () => checkEndedRoleCurrentEmployment(paragraphs, evidence, referenceDate)],
-    // Appended after the established order for the same reason as above. The
-    // budget reads paragraphs only; the benefit check also reads the quotes
-    // each paragraph cites and is silent when they are not supplied.
-    ['transfer-carrier-budget', () => checkTransferCarrierBudget(paragraphs)],
+    // Reads the quotes each paragraph cites and is silent when they are not
+    // supplied.
     ['transfer-benefit-support', () => checkTransferBenefitSupport(paragraphs, { citations: paragraphCitations, jobText })],
   ];
-  return checks.filter(([id]) => !activeOnly || checkDisposition(id) !== 'off').map(([, run]) => run());
+  return checks.map(([, run]) => run());
 }
 
 /** Authors the stable cover-letter fields without changing the document-builder contract. */

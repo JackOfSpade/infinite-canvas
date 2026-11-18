@@ -36,6 +36,18 @@ is built from does not rebuild Infinite Canvas. A file both apps bundle
 rebuilds both. Each launcher falls back to hashing the whole repo until its
 first build has written that list.
 
+## The cue card
+
+The live window is a display only. The page reaches the controller
+(`electron/interviewWindow.js`) through five bridge calls: `getBrief`,
+`startListening`, `stopListening`, `onListeningUpdated` and `onBriefUpdated`.
+The controller exports `launch`, `getBrief`, `startListening`, `stopListening`
+and session helpers, nothing else. A question reaches it from the listening
+path (`onQuestion`) or from a plan the canvas supplies at launch; there is no
+typed question, follow-up, prepared-card choice, Next, layout or pin control.
+The window opens pinned and stays pinned. The snapshot and sealed answer bank
+are verified once at launch. Details: `docs/interview-live-ai-matching.md`.
+
 ## Data
 
 - **Profile** (`~/Library/Application Support/Interview Helper`): Electron's own

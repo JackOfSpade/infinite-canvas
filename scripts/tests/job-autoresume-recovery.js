@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { readJobsSources } from './jobsSourceFixture.mjs';
 import { runInNewContext } from 'node:vm';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -947,7 +948,7 @@ export default [
         'six completed sources remain reusable and the three blocked providers are never relabelled or retried by Finish');
 
         const jobSearchSource = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
-        const jobsMainSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+        const jobsMainSource = readJobsSources('jobs', 'searchHandlers');
         assert(jobSearchSource.includes('>Finish with saved listings</button>')
           && jobSearchSource.includes('Resume continues only remaining sources from their per-query checkpoints; an interrupted load-more query may replay from its first view'),
         'mounting the sanitized card surfaces both exact Resume and Finish-with-saved actions');
@@ -1274,7 +1275,7 @@ export default [
         'changed or unsafe prepared inputs fail closed instead of launching a fresh substitute');
 
         const hookSource = fs.readFileSync(path.resolve('src/hooks/useWorkspaceStartupRecovery.js'), 'utf8');
-        const mainSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+        const mainSource = readJobsSources('jobs', 'searchHandlers');
         assert(hookSource.includes("entry.kind === 'jobboard-child-bootstrap'")
           && hookSource.includes('boardRecoveryClaim:'),
         'the hidden executor forwards the process claim with the frozen child request');
@@ -1514,7 +1515,7 @@ export default [
       const searchSource = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
       const boardSource = fs.readFileSync(path.resolve('src/nodes/JobBoardNode.jsx'), 'utf8');
       const selectorSource = fs.readFileSync(path.resolve('src/nodes/jobboard/JobBoardSearchSelection.jsx'), 'utf8');
-      const mainSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const mainSource = readJobsSources('jobs', 'searchHandlers');
 
       assert(searchSource.includes('manualAiExplicitResumeRequest?.runId !== resume.runId')
         && searchSource.includes('Continuing explicitly selected manual AI run')

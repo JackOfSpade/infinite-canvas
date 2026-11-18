@@ -112,7 +112,7 @@ export default [
         assert.match(report, /non-aggregator-apply-options 2 row\(s\)/u);
         resetManualScraperTelemetry();
         assert.equal(getManualScraperTelemetry().events.length, 0);
-        const source = fs.readFileSync(new URL('../../electron/ipc/browser/manualScraper.js', import.meta.url), 'utf8');
+        const source = fs.readFileSync(new URL('../../electron/ipc/browser/manualScraper/expandByPanel.js', import.meta.url), 'utf8');
         assert.match(source, /let googleApplyOptionsNonAggregator = 0/u);
         assert.match(source, /applyOptions\.some\([^\n]+googleApplyOptionsNonAggregator\+\+/u);
         assert.match(source, /enhanced\[i\] = \{[^\n]+applyOptions, salaryProvenance: 'unknown'/u);

@@ -83,6 +83,10 @@ export function sourceReceiptWindowParts(source) {
   if (windowDropped != null && windowDropped > 0) {
     parts.push(`${windowDropped} dated card(s) before the date window dropped in the scraper`);
   }
+  const alreadyReadSkipped = nonnegativeCount(source?.alreadyReadSkipped);
+  if (alreadyReadSkipped != null && alreadyReadSkipped > 0) {
+    parts.push(`${alreadyReadSkipped} card(s) left unopened because an earlier run already read or showed them`);
+  }
   if (Array.isArray(source?.healthFailures) && source.healthFailures.length > 0) {
     const described = describeSourceHealthFailures(source.healthFailures);
     if (described) parts.push(`health: ${described}`);

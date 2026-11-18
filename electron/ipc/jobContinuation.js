@@ -31,6 +31,7 @@ import {
   withCurrentJobAnalysisOperationAuthority,
 } from './jobAnalysisOperationAuthorityStore.js';
 import { fsyncDirectory } from '../utils/pathSafety.js';
+import { atomicWriteFile } from '../utils/atomicWrite.js';
 import { stableJson } from '../../src/utils/stableJson.js';
 
 const VERSION = 1;
@@ -544,26 +545,15 @@ async function readStore(filePath, nodeId) {
 }
 
 async function atomicWrite(filePath, store) {
-  const tmp = `${filePath}.tmp-${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
-  let handle;
-  try {
-    const serialized = `${JSON.stringify(store)}\n`;
-    if (Buffer.byteLength(serialized, 'utf8') > MAX_FILE_BYTES) {
-      throw new Error('Job continuation checkpoint is too large to persist safely.');
-    }
-    handle = await fs.promises.open(tmp, 'wx', 0o600);
-    await handle.writeFile(serialized, 'utf8');
-    await handle.sync();
-    await handle.close();
-    handle = null;
-    await fs.promises.rename(tmp, filePath);
-    try {
-      await fsyncDirectory(path.dirname(filePath));
-    } catch { /* directory fsync is best effort on filesystems that reject it */ }
-  } finally {
-    try { await handle?.close(); } catch { /* noop */ }
-    try { await fs.promises.unlink(tmp); } catch { /* renamed or absent */ }
+  const serialized = `${JSON.stringify(store)}\n`;
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_FILE_BYTES) {
+    throw new Error('Job continuation checkpoint is too large to persist safely.');
   }
+  await atomicWriteFile(filePath, serialized, {
+    syncFile: true,
+    syncDirectory: 'best-effort',
+    tempPath: () => `${filePath}.tmp-${process.pid}-${crypto.randomBytes(8).toString('hex')}`,
+  });
 }
 
 async function withRecoveryOwner(canvasFilePath, callback) {

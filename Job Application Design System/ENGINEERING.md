@@ -57,7 +57,12 @@ and its font-ready gate before suspecting this stylesheet.
 
 ## Index of files
 
-Everything in the folder, current as of this audit pass.
+Everything in the folder, current as of this audit pass. Five paths are
+generated or tool-owned and are never hand-edited: `_ds_bundle.js` (its
+header carries source hashes of the `build/` modules and
+`handoff/pagination-contract-check.js`; `token-sync-test.js` fails when any
+of them changes without a regeneration), `_ds_manifest.json`,
+`_adherence.oxlintrc.json`, `thumbnail.html` and `.thumbnail`.
 
 ### Design surfaces (read at generation time)
 
@@ -93,6 +98,7 @@ Run in this order by the `test` script:
 | `education-placement-test.js` | No Education section anywhere; the degree rides in the header subtitle. |
 | `ats-parse-test.js` | STYLE.md §8.1 parse hazards, in the documents *and* every stylesheet they link. Takes file paths; defaults to the shipped samples. |
 | `annotation-budget-test.js` | One annotation per bullet, 180/100-character budgets, plus a checker self-test. Takes file paths; defaults to the shipped samples. |
+| `fit-estimate-test.js` | Static one-page fit gate (STYLE.md §6 line-yield model): the document's estimated line total against capacity computed from the tokens, plus the per-row single-line budgets. Takes file paths; defaults to the shipped sample. |
 | `page-policy-doc-test.js` | The one-page default and its explicit-override language. |
 | `parallelism-gate-doc-test.js` | §11.2.3 Rule 5 (parallel construction) survives in all three docs. |
 | `synthesis-scope-gate-doc-test.js` | §11.2.3 Rule 6 (earned generalization) survives in all three docs. |

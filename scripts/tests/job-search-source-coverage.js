@@ -1,12 +1,15 @@
 import { assert, jobSearchNextAnchor, resolveJobSearchDateWindow } from '../test-dependencies.js';
+import { readJobsSources } from './jobsSourceFixture.mjs';
 import { buildJobSearchDateHistory } from '../../electron/ipc/bugReport/jobSearchDates.js';
 import { completionTimestampIso } from '../../src/utils/completionTimestamp.js';
 import { buildJobHubScrapeClearPatch } from '../../src/utils/jobSearchSplitClear.js';
-import { collectionEvidenceForSnapshot } from '../../electron/ipc/jobs.js';
+import { buildJobTasks, collectionEvidenceForSnapshot, listingReadProgress } from '../../electron/ipc/jobs.js';
+import { createSeenListingMatcher, dedupAgainstHistory } from '../../electron/ipc/jobsHistory.js';
 import { sanitizeJobRunCollectionDiagnostics } from '../../electron/ipc/jobRunStaging.js';
 import { sanitizeJobSearchDateDiagnostics } from '../../src/utils/jobSearchDateDiagnostics.js';
 import fs from 'node:fs';
-import { didDetailBlockReprobeRecover } from '../../electron/ipc/browser/manualScraper.js';
+import { didDetailBlockReprobeRecover, partitionAlreadyReadJobs, withoutAlreadyReadJobs } from '../../electron/ipc/browser/manualScraper.js';
+import { assessSourceHealth } from '../../electron/ipc/jobSourceHealth.js';
 import { formatPipelineState } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import {
   __resetJobsTelemetryForTests,
@@ -25,6 +28,8 @@ import {
   resolveJobSearchSourceWindows,
   serializeJobSearchWindow,
   sourceFinishedQueriesForRun,
+  sourceReadContextKey,
+  sourceReadKeysForRun,
   sourcesBehindLatest,
   sourcesWithoutDateProgress,
 } from '../../src/utils/jobSearchSourceCoverage.js';
@@ -554,9 +559,9 @@ export default [
       const node = fs.readFileSync('src/nodes/JobSearchNode.jsx', 'utf8');
       assert(/savedScrapeOutcome\?\.status === 'completed'[\s\S]{0,900}buildCollectionEvidenceCommitPatch\(node\?\.data, evidence, id, ALL_JOB_SOURCE_IDS\)/.test(node),
         'the saved-scrape path applies the record only after its rows are shown');
-      const jobs = fs.readFileSync('electron/ipc/jobs.js', 'utf8');
+      const jobs = readJobsSources('jobs', 'searchHandlers');
       assert(/completedSourceIds,\n\s+\},\n\s+\}\);\n\s+await assertSearchCurrent\(\);/.test(jobs)
-        && /snapshot = await attachCollectionEvidence\(snapshot, jsonPath\);/.test(jobs),
+        && /snapshot = await attachCollectionEvidence\(snapshot, jsonPath\);/.test(fs.readFileSync('electron/ipc/jobs/analysisStore.js', 'utf8')),
       'the host writes the finished-platform list at the gathered stage and into the saved scrape');
     },
   },
@@ -605,7 +610,7 @@ export default [
       assert(didDetailBlockReprobeRecover({ expandedCount: 2 }) === true
         && didDetailBlockReprobeRecover({ expandedCount: 2, descWarning: { code: 'description-panel-unresponsive' } }) === false,
       'an unresponsive panel keeps the detail cooldown armed, like a rate limit');
-      const scraper = fs.readFileSync('electron/ipc/browser/manualScraper.js', 'utf8');
+      const scraper = fs.readFileSync('electron/ipc/browser/manualScraper/expandByPanel.js', 'utf8');
       const guard = scraper.indexOf('if (!panelInterrupt && panelProvenThisWalk) {');
       assert(guard > 0 && guard < scraper.indexOf("'stale-desc-selectors',\n            panelInterrupt?.status"),
         'the proven-panel deferral is decided before the selector-failure abort');
@@ -726,6 +731,180 @@ export default [
           `the report says so, got ${formatPipelineState(pipeline)}`);
         assert(recordRunCompletedWithUnfinishedSources('hub', 'run-1') === false, 'a repeat completion changes nothing');
       } finally { __resetJobsTelemetryForTests(); }
+    },
+  },
+  {
+    name: 'A blocked platform keeps the listings it read and the ones it could not read, and the next scan opens only what is still owed',
+    run() {
+      const bookmark = localDate(2026, 11, 15, 4).getTime();
+      const run1 = localDate(2026, 11, 18, 1).getTime();
+      const run2 = localDate(2026, 11, 19, 1).getTime();
+      const entry = at => ({ coverageStartedAt: at, completedAt: at, runId: null });
+      const long = 'Build and ship product features with the team. '.repeat(20);
+      const rows = [
+        { source: 'google', title: 'Read One', company: 'Acme', url: 'https://www.google.com/search?q=a#htidocid=read-1', description: long },
+        { source: 'google', title: 'Read Two', company: 'Acme', url: 'https://www.google.com/search?q=a#htidocid=read-2', description: long },
+        { source: 'google', title: 'Blocked', company: 'Beta', url: 'https://www.google.com/search?q=a#htidocid=unread-1', description: long, descriptionDeferredReason: 'description-card-unavailable' },
+        { source: 'google', title: 'Empty', company: 'Gamma', url: 'https://www.google.com/search?q=a#htidocid=unread-2', description: '' },
+      ];
+      const progress = listingReadProgress(rows);
+      assert(progress.readKeys.length === 2 && progress.unreadListings.length === 2,
+        `two listings were read and two were not, got ${progress.readKeys.length}/${progress.unreadListings.length}`);
+      assert(progress.unreadListings.every(listing => listing.key && listing.title && listing.url),
+        'a listing that was not read is saved with its key, title and link');
+      assert(new Set([...progress.readKeys, ...progress.unreadListings.map(listing => listing.key)]).size === 4,
+        'no listing is counted as both read and unread');
+
+      // Run 1: Google is blocked. No query finished, yet the listing-level work is kept.
+      let data = { sourceCoverage: { google: entry(bookmark) } };
+      Object.assign(data, buildSourceCoverageCommitPatch(data, {
+        runId: 'r1', collectionStartedAt: run1, collectionCompletedAt: run1 + 1000,
+        completedSourceIds: [],
+        sourceQueryProgress: { google: { finishedQueries: [], ...progress } },
+        locationKey: 'Canada',
+      }, 'hub'));
+      assert(data.sourceCoverage.google.coverageStartedAt === bookmark, 'the blocked platform keeps its date');
+      assert(data.sourceQueryProgress.google.unreadListings.length === 2, 'the work still owed is on record');
+      const readForRun = sourceReadKeysForRun(data, ['google', 'glassdoor'], 'Canada');
+      assert(JSON.stringify(Object.keys(readForRun)) === '["google"]' && readForRun.google.length === 2,
+        'the next run is told which listings were already read');
+      assert(Object.keys(sourceFinishedQueriesForRun(data, ['google'], 'Canada')).length === 0,
+        'no query is reported finished when none was');
+      assert(Object.keys(sourceReadKeysForRun(data, ['google'], 'Toronto, Ontario, Canada')).length === 0,
+        'a different search location reads every listing again');
+
+      // The next scan opens the unread cards and a new card, not the read ones.
+      const readSet = new Set(readForRun.google);
+      const reWalk = [...rows.map(({ source, title, company, url }) => ({ source, title, company, url })),
+        { source: 'google', title: 'New', company: 'Delta', url: 'https://www.google.com/search?q=a#htidocid=new-1' }];
+      const keyOf = job => listingReadProgress([{ ...job, description: long }]).readKeys[0];
+      const opened = withoutAlreadyReadJobs(reWalk, job => readSet.has(keyOf(job)));
+      assert(JSON.stringify(opened.map(job => job.title)) === JSON.stringify(['Blocked', 'Empty', 'New']),
+        `only the unread and new cards are opened, got ${opened.map(job => job.title).join(', ')}`);
+      assert(withoutAlreadyReadJobs(reWalk, () => { throw new Error('lookup failed'); }).length === reWalk.length,
+        'a failing lookup opens every card instead of losing one');
+      assert(withoutAlreadyReadJobs(reWalk, null).length === reWalk.length, 'without a lookup every card is opened');
+
+      // Run 2: still blocked. One of the unread listings is read; the lists add up.
+      Object.assign(data, buildSourceCoverageCommitPatch(data, {
+        runId: 'r2', collectionStartedAt: run2, collectionCompletedAt: run2 + 1000,
+        completedSourceIds: [],
+        sourceQueryProgress: { google: {
+          finishedQueries: ['a'],
+          readKeys: [progress.unreadListings[0].key],
+          unreadListings: [progress.unreadListings[1], progress.unreadListings[0]],
+        } },
+        locationKey: 'Canada',
+      }, 'hub'));
+      assert(data.sourceQueryProgress.google.readKeys.length === 3, 'read listings add up across blocked runs');
+      assert(data.sourceQueryProgress.google.unreadListings.length === 1
+        && data.sourceQueryProgress.google.unreadListings[0].key === progress.unreadListings[1].key,
+        'a listing that has now been read leaves the not-done list');
+      assert(data.sourceQueryProgress.google.oldestStartedAt === run1, 'the oldest contributing run start is kept');
+
+      // Run 3: the platform finishes. Its date moves and both lists are dropped.
+      Object.assign(data, buildSourceCoverageCommitPatch(data, {
+        runId: 'r3', collectionStartedAt: run2 + 5000, collectionCompletedAt: run2 + 6000,
+        completedSourceIds: ['google'], locationKey: 'Canada',
+      }, 'hub'));
+      assert(data.sourceCoverage.google.coverageStartedAt === run1 && Object.keys(data.sourceQueryProgress).length === 0,
+        'a finished platform moves to the oldest contributing run and starts clean');
+    },
+  },
+  {
+    name: 'A listing already shown on an earlier run is recognised before its description is opened, by the same rule the history step uses',
+    run() {
+      const history = [
+        { source: 'glassdoor', title: 'Product Engineer', company: 'Acme', location: 'Toronto, ON', url: 'https://www.glassdoor.ca/job-listing/x?jl=111', seen_date: '2026-11-15' },
+      ];
+      const cards = [
+        { source: 'glassdoor', title: 'Product Engineer', company: 'Acme', location: 'Toronto, ON', url: 'https://www.glassdoor.ca/job-listing/x?jl=111' },
+        { source: 'glassdoor', title: 'Data Analyst', company: 'Other Co', location: 'Vancouver, BC', url: 'https://www.glassdoor.ca/job-listing/y?jl=222' },
+      ];
+      const seen = createSeenListingMatcher(history);
+      const kept = dedupAgainstHistory(cards, history).kept;
+      assert(kept.length === 1 && kept[0].title === 'Data Analyst', 'fixture: the history step drops the shown listing');
+      assert(JSON.stringify(withoutAlreadyReadJobs(cards, seen)) === JSON.stringify(kept),
+        'the scraper leaves unopened exactly the cards the history step would drop');
+      assert(createSeenListingMatcher([])(cards[0]) === false, 'an empty history recognises nothing');
+
+      const isAlreadyRead = () => true;
+      const tasks = buildJobTasks(['product engineer'], 7, {
+        onlySources: new Set(['glassdoor', 'google']),
+        alreadyReadBySource: { google: isAlreadyRead },
+      }, 'Canada');
+      assert(tasks.length > 0 && tasks.filter(task => task.sourceId === 'google').every(task => task.options.isAlreadyRead === isAlreadyRead),
+        'the platform given a lookup carries it on every one of its tasks');
+      assert(tasks.filter(task => task.sourceId !== 'google').every(task => task.options?.isAlreadyRead === undefined),
+        'a platform without a lookup opens every card');
+    },
+  },
+  {
+    name: 'Read listings are reused only under the job preferences they were judged by',
+    run() {
+      const bookmark = localDate(2026, 11, 15, 4).getTime();
+      const run1 = localDate(2026, 11, 18, 1).getTime();
+      const run2 = localDate(2026, 11, 19, 1).getTime();
+      const remoteOnly = sourceReadContextKey('Remote only');
+      const anyPlace = sourceReadContextKey('Remote or Toronto');
+      assert(remoteOnly !== anyPlace && remoteOnly === sourceReadContextKey('  Remote   only '),
+        'the key follows the preferences text, not its spacing');
+      assert(!remoteOnly.includes('Remote'), 'the key never carries the preferences text');
+
+      let data = { sourceCoverage: { google: { coverageStartedAt: bookmark, completedAt: bookmark, runId: null } } };
+      Object.assign(data, buildSourceCoverageCommitPatch(data, {
+        runId: 'r1', collectionStartedAt: run1, collectionCompletedAt: run1 + 1000, completedSourceIds: [],
+        sourceQueryProgress: { google: { finishedQueries: ['a'], readKeys: ['k1', 'k2'] } },
+        locationKey: 'Canada', readContextKey: remoteOnly,
+      }, 'hub'));
+      assert(sourceReadKeysForRun(data, ['google'], 'Canada', remoteOnly).google?.length === 2,
+        'the same preferences reuse the read listings');
+      assert(Object.keys(sourceReadKeysForRun(data, ['google'], 'Canada', anyPlace)).length === 0,
+        'changed preferences read every listing again');
+      assert(JSON.stringify(sourceFinishedQueriesForRun(data, ['google'], 'Canada')) === '{"google":["a"]}',
+        'finished queries do not depend on the preferences');
+
+      // A run under the new preferences keeps only what it read itself.
+      Object.assign(data, buildSourceCoverageCommitPatch(data, {
+        runId: 'r2', collectionStartedAt: run2, collectionCompletedAt: run2 + 1000, completedSourceIds: [],
+        sourceQueryProgress: { google: { finishedQueries: [], readKeys: ['k2', 'k3'] } },
+        locationKey: 'Canada', readContextKey: anyPlace,
+      }, 'hub'));
+      assert(JSON.stringify(data.sourceQueryProgress.google.readKeys) === '["k2","k3"]',
+        `listings judged under the old preferences are forgotten, got ${JSON.stringify(data.sourceQueryProgress.google.readKeys)}`);
+      assert(Object.keys(sourceReadKeysForRun(data, ['google'], 'Canada', remoteOnly)).length === 0
+        && sourceReadKeysForRun(data, ['google'], 'Canada', anyPlace).google.length === 2,
+        'the read listings now belong to the new preferences');
+    },
+  },
+  {
+    name: 'The source health check counts cards an earlier run read, so a re-walk that opens only leftovers does not look like a broken site',
+    run() {
+      const cards = ['a', 'b', 'c', 'd'].map(id => ({ title: id }));
+      const split = partitionAlreadyReadJobs(cards, job => ({ a: 'read', b: 'shown', c: true }[job.title] || false));
+      assert(split.open.length === 1 && split.open[0].title === 'd' && split.readEarlier === 2 && split.shownEarlier === 1,
+        `read and shown cards are counted apart, got ${JSON.stringify({ open: split.open.length, read: split.readEarlier, shown: split.shownEarlier })}`);
+
+      const long = 'Build and ship product features with the team. '.repeat(20);
+      const row = (index, description) => ({
+        source: 'glassdoor', title: `Role ${index}`, company: `Co ${index}`, location: 'Toronto, ON', posted: '2d',
+        salary: '$100K', url: `https://www.glassdoor.ca/job-listing/x?jl=${index}`, description: description === '' ? '' : `${long} ${index}`,
+      });
+      // A re-walk opened 20 cards: 12 read fine, 8 still have no description.
+      const opened = [...Array.from({ length: 12 }, (_, i) => row(i)), ...Array.from({ length: 8 }, (_, i) => row(100 + i, ''))];
+      const alone = assessSourceHealth(opened).filter(item => item.field === 'description');
+      assert(alone.length === 1 && alone[0].rows === 20 && alone[0].missing === 8,
+        'fixture: judged on the opened cards alone, 8 of 20 without a description alarms');
+      const widened = assessSourceHealth(opened, { measuredEarlierBySource: { glassdoor: 100 } });
+      assert(widened.length === 0, `with the 100 cards the earlier run read, 8 of 120 is not an alarm, got ${JSON.stringify(widened)}`);
+      // A site that really broke still alarms: every opened card is blank.
+      const broken = Array.from({ length: 60 }, (_, i) => row(200 + i, ''));
+      const stillLoud = assessSourceHealth(broken, { measuredEarlierBySource: { glassdoor: 100 } }).filter(item => item.field === 'description');
+      assert(stillLoud.length === 1 && stillLoud[0].rows === 160 && stillLoud[0].missing === 60,
+        'a re-walk whose opened cards are all blank still alarms');
+      // Earlier-read cards never make up the minimum sample by themselves.
+      assert(assessSourceHealth(broken.slice(0, 5), { measuredEarlierBySource: { glassdoor: 100 } }).length === 0,
+        'five opened cards are too few to judge, however many were read earlier');
     },
   },
 ];

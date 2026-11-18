@@ -139,15 +139,14 @@ function planOf(paragraphs) {
   };
 }
 
-// Every check the host runs on a final letter: the editorial battery as production runs it (checks
-// whose disposition is 'off' are not run) and the audit's argument links.
+// Every check the host runs on a final letter: the editorial battery as production runs it and the
+// audit's argument links.
 function battery(domain, paragraphs) {
   const texts = paragraphs.map(paragraph => paragraph.sentences.join(' '));
   return [
     ...evaluateCoverLetterChecks({
       plan: {}, paragraphs: texts, evidence: { roles: [{ company: domain.employer }], projects: [], bullets: [] }, jobText: domain.posting, researchText: '', companyName: domain.company,
       paragraphCitations: domain.citations ? paragraphs.map(() => domain.quotes) : null,
-      activeOnly: true,
     // paragraph-openers is an advisory record of opening-word variety that never rejects a letter, and these
     // fixtures predate that house rule, so the battery here is every rejecting or advisory check except it.
     }).filter(check => check.id !== 'paragraph-openers'),
@@ -208,7 +207,7 @@ export default [
         assert(reached.has(id), `C: the experiment reaches ${id} (reached ${[...reached].join(', ')})`);
         assert(Object.hasOwn(HOST_REQUIRED_LETTER_FUNCTION_CHECKS, id), `C: and the map names it`);
       }
-      // The closing is the writer's choice: its check is off, so no production deletion reports it and the map does not name it.
+      // The closing is the writer's choice: its check is retired, so no deletion reports it and the map does not name it.
       // The seed bank letter has no cited quote, so deleting the sentence that licenses its closing noun is the deletion that used to reject the closing.
       const seed = DOMAINS.find(domain => domain.key === 'seed bank curation');
       const rows = deletions(seed);

@@ -188,7 +188,7 @@ export default [
   {
     name: 'recovery country scope: resume-job-source and resolve-job-source both apply the country filter',
     run: () => {
-      const src = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      const src = readFileSync(new URL('../../electron/ipc/jobs/recoveryHandlers.js', import.meta.url), 'utf8');
       const grab = (start, end) => {
         const a = src.indexOf(start);
         const b = src.indexOf(end, a);

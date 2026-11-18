@@ -1,4 +1,5 @@
 import { assert } from './testHelpers.js';
+import { readJobsSource } from './jobsSourceFixture.mjs';
 import { buildJobsPipelineSnapshot, getJobsTelemetry } from '../test-dependencies.js';
 import { researchCompensationAssessments } from '../../electron/ipc/jobs.js';
 import {
@@ -350,8 +351,7 @@ export default [{
 }, {
   name: 'The assessment builder keeps every salary source and appends the location provenance link',
   run: async () => {
-    const { readFileSync } = await import('node:fs');
-    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const source = readJobsSource('compensationResearch');
     assert(!source.includes('item.locationSource ? 4 : 5') && source.split('locationLink ? [...links, locationLink] : links').length === 2,
       'salary evidence is no longer capped to make room for the location link (method v6), and the builder still appends that link to the saved sources');
     return { builders: 1 };

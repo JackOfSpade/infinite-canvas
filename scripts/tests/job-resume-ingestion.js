@@ -1,4 +1,5 @@
 import { __analysisPathsForCurrentRequestForTests, __createDescriptionRecoveryCheckpointForTests, __discardJobAnalysisSnapshotForTests, __discardOwnedJobRunForTests, __formatJobAnalysisPromptForTests, __getJobAnalysisRetirementStateForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, __removeDescriptionRecoveryCheckpointForTests, __runWithIpcRequestContextForTests, __saveDescriptionRecoverySnapshotIfCurrentForTests, __saveJobAnalysisSnapshotForTests, assessDescriptionRecoverySnapshotOwnership, assert, canRecoverGatheredRunDirectly, claimJobAnalysisOperationAuthority, collectDeletedJobAnalysisDiscards, collectDeletedJobRunDiscards, createDescriptionRecoveryMutex, filterJobsByDescriptionEvidence, fs, getJobAnalysisPaths, ipcMain, isLiveDescriptionRecoveryRun, isSafeJobAnalysisCleanupNoop, listDescriptionRecoveryCheckpointsSync, markSourceStatus, path, PDFDocument, readRunState, recordSourcePage, setStage, startRun } from '../test-dependencies.js';
+import { readJobsSource, readJobsSources } from './jobsSourceFixture.mjs';
 import electronPkg from 'electron';
 import { writeApprovedCareerSnapshotFixture } from './careerSnapshotFixture.mjs';
 import { approvedCareerEvidenceCatalog, careerSnapshotPath, careerSnapshotStorageRoot, readCareerSnapshot, writeCareerSnapshotAtomically } from '../../electron/ipc/careerSnapshot.js';
@@ -419,7 +420,7 @@ export default [
   {
     name: 'job analysis snapshot publication flushes both replacement and directory before recovery acknowledges',
     run: () => {
-      const source = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const source = readJobsSource('analysisStore');
       const start = source.indexOf('async function writeJobAnalysisFileAtomically');
       const end = source.indexOf('// A snapshot is a three-file logical record', start);
       const writer = source.slice(start, end);
@@ -647,7 +648,7 @@ export default [
         && !canRecoverGatheredRunDirectly(gathered, ['other role']),
       'only an explicit gathered partial-finish marker may bypass the ordinary blocked/incomplete provider-resume path; query identity remains required');
 
-      const source = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const source = readJobsSources('jobs', 'searchHandlers');
       assert(source.includes('const cache = skipProviderCollection ? {} : await preflight')
         && source.includes('if (skipProviderCollection) {')
         && source.includes('[browserOut, httpResults] = [{ manualResults: [], indeedResult: null }, []];')
@@ -679,9 +680,9 @@ export default [
       'every source records its terminal manifest status as it finishes, so resume after a mid-gather crash reuses staged rows instead of re-scraping them');
       assert(source.includes("if (combinedSignal.aborted || rows.some(row => row?.cancelled === true || row?.stopReason === 'aborted')) return;")
         && source.includes("blocked ? 'blocked' : 'done'")
-        && source.includes('if (stageSource) {')
-        && source.includes("const retryablePartial = warning?.code === 'query-error'")
-        && source.includes('await stageSource({ sourceId, jobs, warning, retryablePartial });')
+        && readJobsSource('collection').includes('if (stageSource) {')
+        && readJobsSource('collection').includes("const retryablePartial = warning?.code === 'query-error'")
+        && readJobsSource('collection').includes('await stageSource({ sourceId, jobs, warning, retryablePartial });')
         && source.includes('r?.retryablePartial === true'),
       'a clean zero-result completion is terminal, while interrupted work, partial query coverage, and failed durable staging remain unfinished for a later exact resume');
       assert(source.includes('if (!signal?.aborted && !pipelineAbort.signal.aborted) pipelineAbort.abort(error);')
@@ -724,7 +725,7 @@ export default [
       assert(source.includes('resumeSourceIds = Object.keys(priorSources).filter(sourceId => ACTIVE_SOURCE_ID_SET.has(sourceId))')
         && source.includes("if (JSON.stringify(priorInputs.queries || []) !== JSON.stringify(queries))")
         && source.includes('activeSourceIds = resumeSourceIds || getRunnableJobSourceIds')
-        && source.includes('nodeId: state.manifest.inputs?.nodeId || null'),
+        && readJobsSource('coreHandlers').includes('nodeId: state.manifest.inputs?.nodeId || null'),
       'resume validates the original query set and restores source breadth from the manifest while peek exposes its owning hub');
       const renderer = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
       const resumeHandlerStart = renderer.indexOf('const handleResumeRun = useCallback');
@@ -2237,7 +2238,7 @@ export default [
           && !unsavedCheckpointExists,
         'an unsaved hub has no stable durable-authority scope, so it cannot create a recovery checkpoint that a later hub deletion would need to retire');
 
-        const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+        const jobsSource = readJobsSource('recoveryHandlers');
         const genericResolveStart = jobsSource.indexOf('const runGenericResolve = async () => {');
         const genericResolveEnd = jobsSource.indexOf("handleSafe('resume-job-source'", genericResolveStart);
         const genericResolve = jobsSource.slice(genericResolveStart, genericResolveEnd);
@@ -2319,14 +2320,14 @@ export default [
       } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
       }
-      const source = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const source = readJobsSource('recoveryHandlers');
       const snapshotReport = fs.readFileSync(path.resolve('electron/ipc/bugReport/jobsSnapshot.js'), 'utf8');
-      assert(source.includes('const blockedUrls = orderedBlockedManualSourceUrls(')
+      assert(readJobsSource('searchHandlers').includes('const blockedUrls = orderedBlockedManualSourceUrls(')
         && source.includes('loadDescriptionRecoveryCheckpoint(canvasFilePath, nodeId, jobRunId)')
         && source.includes('return withDescriptionRecoveryLock({ canvasFilePath, nodeId, jobRunId, signal }, runGenericResolve);')
         && source.includes('checkpointRemainingUrls = consumedQueue.remaining')
-        && source.includes('descriptionRecoveryJobs, descriptionRecoveryState, profile, careerData')
-        && source.includes('buildJobAnalysisSnapshot({ jobs, descriptionRecoveryJobs, descriptionRecoveryState, profile')
+        && readJobsSource('coreHandlers').includes('descriptionRecoveryJobs, descriptionRecoveryState, profile, careerData')
+        && readJobsSource('coreHandlers').includes('buildJobAnalysisSnapshot({ jobs, descriptionRecoveryJobs, descriptionRecoveryState, profile')
         && !snapshotReport.includes('blockedUrls'),
       'configured URL queues are checkpoint-owned for every generic resolver and are not emitted in JOBRESOLVE report metadata');
       const q2 = 'https://www.glassdoor.com/Job/jobs.htm?kw=platform&locId=123&locT=C';
@@ -2420,7 +2421,7 @@ export default [
           && telemetry.resumeAttempts.indeed[0].detail === 'current B',
         'a late A token (or an ambiguous legacy action) cannot mutate B’s resolve telemetry or Indeed attempt trail, and a failed B cannot clobber a newer telemetry owner');
 
-        const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+        const jobsSource = readJobsSource('recoveryHandlers');
         const genericStart = jobsSource.indexOf("handleSafe('resolve-job-source'");
         const resumeStart = jobsSource.indexOf("handleSafe('resume-job-source'");
         const mergeStart = jobsSource.indexOf("ipcMain.handle('record-resolve-merge'");
@@ -2478,7 +2479,7 @@ export default [
         && !isLiveDescriptionRecoveryRun({ ...activeManifest, runId: 'hub-current-41' }, 'hub-current', 'hub-current-42'),
       'a mismatched saved snapshot is reported as a not-ready checkpoint while the exact requested hub/run remains unfinished, including the gathered-to-snapshot handoff');
 
-      const source = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const source = readJobsSource('recoveryHandlers');
       const genericStart = source.indexOf("handleSafe('resolve-job-source'");
       const resumeStart = source.indexOf("handleSafe('resume-job-source'");
       const generic = source.slice(genericStart, resumeStart);
@@ -2515,7 +2516,7 @@ export default [
       assert(!/<\/?p>/i.test(evidence.jobs[0].snippet),
         'recovered provider text is markup-normalized before scoring evidence is tested');
 
-      const source = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const source = readJobsSource('recoveryHandlers');
       const genericStart = source.indexOf("handleSafe('resolve-job-source'");
       const resumeStart = source.indexOf("handleSafe('resume-job-source'");
       const mergeStart = source.indexOf("ipcMain.handle('record-resolve-merge'", resumeStart);
@@ -2523,8 +2524,8 @@ export default [
       const sourceCard = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
       const generic = source.slice(genericStart, resumeStart);
       const resume = source.slice(resumeStart, mergeStart);
-      assert(source.includes('salaryRangeMetadata: salaryRangeMetadata(job.salary)')
-        && source.includes('salaryAnomaly,'),
+      assert(readJobsSource('boardHandlers').includes('salaryRangeMetadata: salaryRangeMetadata(job.salary)')
+        && readJobsSource('boardHandlers').includes('salaryAnomaly,'),
       'taxonomy audit retains both universal salary-range provenance and the existing anomaly signal');
       assert(generic.includes('const descriptionEvidence = filterJobsByDescriptionEvidence(items);')
         && generic.includes('buildResolvedDescriptionWarning(')
@@ -2585,7 +2586,7 @@ export default [
     // snapshot must never wedge another source's Solve.
     name: 'description recovery targets stranded rows for every enrichment source, and only Google is blocked without a snapshot',
     run: () => {
-      const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobsSource = readJobsSource('recoveryHandlers');
       assert(jobsSource.includes("if (resolveConfig?.requiresDescriptionEnrichment) {")
         && !jobsSource.includes("if (sourceId === 'google' && canvasFilePath) {"),
       'the recovery snapshot is loaded for every source whose Solve enriches descriptions, not Google alone');
@@ -2601,7 +2602,7 @@ export default [
       assert(jobsSource.includes("replaceSourceItems: sourceId === 'google' && !!sourceRecoverySnapshot,"),
         'replaceSourceItems stays Google-only: other sources recover a visible subset and must merge, or unreached rows would look like they vanished');
       assert(!/unresolved Google listing\(s\)/.test(jobsSource)
-        && jobsSource.includes('export function resolveSourceLabel(sourceId)'),
+        && readJobsSource('sourceRules').includes('export function resolveSourceLabel(sourceId)'),
       'recovery messages name the actual source now that non-Google sources reach them');
       return { blockedSources: ['google'] };
     },
@@ -2636,7 +2637,7 @@ export default [
       assert(wrong.length === 0,
         `only a read block page, an already-fired abort, and a destroyed renderer are direct negative observations of a native verification; every other terminal — including a missing or unrecognised one — is the ABSENCE of a positive observation and must probe (misclassified: ${wrong.map(([outcome]) => JSON.stringify(outcome)).join(', ') || 'none'})`);
 
-      const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobsSource = readJobsSource('recoveryHandlers');
       const resumeStart = jobsSource.indexOf("handleSafe('resume-job-source'");
       const mergeStart = jobsSource.indexOf("ipcMain.handle('record-resolve-merge'", resumeStart);
       const resume = jobsSource.slice(resumeStart, mergeStart);
@@ -2686,7 +2687,7 @@ export default [
     // opened no window while recording 'logged-in'.
     name: 'a resume that waited on a native window re-checks run ownership, and every deliberate Indeed session invalidation drops the login dedupe stamp',
     run: () => {
-      const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobsSource = readJobsSource('recoveryHandlers');
       const resumeStart = jobsSource.indexOf("handleSafe('resume-job-source'");
       const mergeStart = jobsSource.indexOf("ipcMain.handle('record-resolve-merge'", resumeStart);
       const resume = jobsSource.slice(resumeStart, mergeStart);
@@ -2698,15 +2699,16 @@ export default [
         && resume.slice(recheck, destructure).includes('staleRun: true'),
       'both the native-login and native-challenge branches mark the window settled, and the handler re-reads the durable manifest before the scrape — a run retired while the window was open must not queue a complete Indeed pass ahead of the fresh search that replaced it');
 
-      const invalidate = jobsSource.slice(
-        jobsSource.indexOf('async function invalidateIndeedSessionIfNeedsLogin'),
-        jobsSource.indexOf('async function syncIndeedSessionStatusFromScrape'),
+      const invalidate = readJobsSource('telemetry').slice(
+        readJobsSource('telemetry').indexOf('async function invalidateIndeedSessionIfNeedsLogin'),
+        readJobsSource('telemetry').indexOf('async function syncIndeedSessionStatusFromScrape'),
       );
-      const resetHandler = jobsSource.slice(
-        jobsSource.indexOf("handleSafe('reset-platform-session'"),
-        jobsSource.indexOf("handleSafe('clear-browser-session'"),
+      const coreSource = readJobsSource('coreHandlers');
+      const resetHandler = coreSource.slice(
+        coreSource.indexOf("handleSafe('reset-platform-session'"),
+        coreSource.indexOf("handleSafe('clear-browser-session'"),
       );
-      const clearHandler = jobsSource.slice(jobsSource.indexOf("handleSafe('clear-browser-session'"));
+      const clearHandler = coreSource.slice(coreSource.indexOf("handleSafe('clear-browser-session'"));
       assert(invalidate.includes('forgetIndeedLoginConfirmation(')
         && resetHandler.includes('forgetIndeedLoginConfirmation(')
         && clearHandler.includes('forgetIndeedLoginConfirmation('),
@@ -2786,7 +2788,7 @@ export default [
           && !telemetry.sourceRunHistory['not-a-source'],
         'a superseded hub cannot append to the current receipt, and an unknown provider id cannot open a new one');
 
-        const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+        const jobsSource = readJobsSource('recoveryHandlers');
         assert(jobsSource.includes('const recordResumeAttempt = (attemptSourceId, mode, outcome, detail, observed = null) => {')
           && jobsSource.includes('recordJobSourceResumeAttempt(attemptSourceId, {\n        mode,\n        outcome,\n        nativeResult: observed?.nativeResult,\n      }, { nodeId, jobRunId });')
           && jobsSource.includes("recordResumeAttempt(sourceId, attemptMode, 'error', error?.message || String(error), { nativeResult: 'launch-error' });"),

@@ -11,7 +11,7 @@
 // detail text that names a paragraph, a quote, or a field. checkFingerprints
 // stands on the same ground too, one rung further down: a check id alone
 // cannot say WHICH BRANCH of a multi-branch check fired (measured on
-// coverLetterChecks.js's checkDirectWelcomeClosing, which has four), so the
+// the since-retired direct-welcome-closing check, which had four), so the
 // caller (pasteRejectionCheckIds, checkObservationFingerprint, both in
 // electron/ipc/localAiApplication.js) also derives a short digest per id from
 // the observation's detail — but only after stripping every curly-quoted

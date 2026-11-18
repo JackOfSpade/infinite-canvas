@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readJobsSource, readJobsSources } from './jobsSourceFixture.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -20,7 +21,7 @@ export default [
   {
     name: 'official-posting search: LinkedIn recovery settles rows without research, progress or lookups and keeps only primarily English descriptions',
     run() {
-      const source = fs.readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      const source = [readJobsSource('jobs'), readJobsSource('recoveryHandlers')].join('\n');
       const settler = source.slice(source.indexOf('const settleScrapedRowsForScoring = async'), source.indexOf('void pruneStaleUnsavedAnalysisArtifacts();'));
       assert.ok(settler.length > 200, 'the scrape-time settler is still the single boundary');
       // Search paths no longer research: the settler takes no progress reporter and makes no lookup, liveness or dedup call.
@@ -151,8 +152,10 @@ export default [
   {
     name: 'official-posting search: source continuations settle (without research) before score-safe snapshot and reply checkpoints',
     run() {
-      const source = fs.readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      const source = readJobsSources('jobs', 'searchHandlers');
       const block = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
+      const recoverySource = readJobsSource('recoveryHandlers');
+      const recoveryBlock = (start, end) => recoverySource.slice(recoverySource.indexOf(start), recoverySource.indexOf(end, recoverySource.indexOf(start)));
       assert.doesNotMatch(source, /resolveScoreSafePostings/u, 'the researching resolver is gone from every search path');
       assert.doesNotMatch(source, /dependencies\.resolveOfficialPostings/u, 'jobs.js no longer reads the official-posting resolver dependency');
       const main = block("handleSafe('search-jobs',", "handleSafe('peek-job-run',");
@@ -160,19 +163,19 @@ export default [
       assert.ok(main.indexOf('await settleScrapedRowsForScoring(kept,') < main.indexOf("phase: 'before-final-stage'"));
       const single = block("handleSafe('search-jobs-single-source',", "handleSafe('prepare-board-jobs-history',");
       assert.match(single, /await settleScrapedRowsForScoring\(kept,/u);
-      const linked = block('const isLinkedInReEnrich =', "// Use the source's ordinary list extractor");
+      const linked = recoveryBlock('const isLinkedInReEnrich =', "// Use the source's ordinary list extractor");
       assert.match(linked, /const admitForScoring = async rows => \{\s*const officialResolution = await settleScrapedRowsForScoring/u);
       assert.match(linked, /const languageFilter = filterNonEnglishJobs\(officialResolution.jobs\)/u);
       assert.match(linked, /const scoringJobs = await admitForScoring\(descriptionRecoveryJobs\)/u);
       assert.doesNotMatch(linked, /items: admitForScoring\(/u);
-      const generic = block('const runGenericResolve = async () =>', "checkpointContinuationBeforeReply('resolve-job-source')");
+      const generic = recoveryBlock('const runGenericResolve = async () =>', "checkpointContinuationBeforeReply('resolve-job-source')");
       assert.match(generic, /const resolveGenericPostings = createOfficialPostingRecoveryPassResolver\(rows =>\s*settleScrapedRowsForScoring\(rows, \{ signal \}\), \{ signal \}\)/u);
       assert.match(generic, /const resolvedJobs = \(await resolveGenericPostings\(scoreSafeRowsWithBoardClosed\(filterJobsByDescriptionEvidence\(descriptionRecoveryJobs\)\)\)\).jobs/u);
       assert.match(generic, /const scoringJobs = filterNonEnglishJobs\(resolvedJobs\).jobs/u);
       assert.match(generic, /const officialResolution = await resolveGenericPostings\(\s*overlayResolvedRecoveryRows\(scoreSafeRowsWithBoardClosed\(descriptionEvidence\), sourceRecoverySnapshot\?\.jobs\)\)/u);
       assert.match(linked, /scoringItems = await persistRecoveryPool\(items\)/u);
       assert.doesNotMatch(linked, /const scoringItems = await admitForScoring\(items\)/u);
-      const indeed = block("handleSafe('resume-job-source',", "checkpointContinuationBeforeReply('resume-job-source')");
+      const indeed = recoveryBlock("handleSafe('resume-job-source',", "checkpointContinuationBeforeReply('resume-job-source')");
       assert.equal([...indeed.matchAll(/await settleScrapedRowsForScoring\(scoreSafeRowsWithBoardClosed\(descriptionEvidence\), \{ signal \}\)/gu)].length, 2);
     },
   },

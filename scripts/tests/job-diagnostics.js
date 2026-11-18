@@ -1,4 +1,6 @@
 import { ALL_COMP_SOURCE_IDS, buildJobCompletionAssessment, filterJobsByAge, getJobSearchTransientKeysForSave, COL_X, assert, applyBugReportCode, buildCoverLetterDocument, buildJobRecoverySnapshot, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildScoringAudit, calibratedScoreForJob, canonicalSalaryRangeLabel, chunkScoringBatches, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, assertRetainedResumeRoleBullets, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getGlassdoorLocIdCache, getJobAnalysisPaths, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, inspectJobBoardRoleByIndex, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeRecoveredScoreRows, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeJobBoardRoleByIndex, normalizeRangesWithRepairs, parseSalaryToNumeric, path, planJobCardDeletionCleanup, prepareLiveScoringResults, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, salaryRangeMetadata, sanitizeJobTaxonomy, saveGlassdoorLocId, scoringAuditRowsFromBatches, shouldNavigateForDescription, descriptionNavigationDecision, isUnavailableDetailPage, shouldReflowMeasuredJobCard, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, tryGetStore, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, validateJobBoardRoleTaxonomy, validateJobScoringSubmission, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
+import { readJobsSource, readJobsSources } from './jobsSourceFixture.mjs';
+import { readManualScraperSources } from './manualScraperSourceFixture.mjs';
 import { clearRestoredJobTreeLayout } from '../test-dependencies.js';
 import jobSearchDateReportTests from './jobSearchDateReportFixture.mjs';
 import { __canWriteJobResolveTelemetryForTests, __recordJobSourceResolvePassForTests } from '../test-dependencies.js';
@@ -4206,7 +4208,7 @@ export default [
           && truncatedPreferenceAssessment.includes('saved preference candidate pool 1 ≠ post-history candidates 2'),
         'preference-filtered completion requires a complete retained candidate pool, without comparing it to score-ready zero');
 
-        const jobsBackend = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+        const jobsBackend = readJobsSources('jobs', 'searchHandlers');
         const freshRunResetStart = jobsBackend.indexOf('// Reset per-run state at search START');
         const freshRunResetEnd = jobsBackend.indexOf('// Fresh per-source event trail for this run', freshRunResetStart);
         const freshRunReset = jobsBackend.slice(freshRunResetStart, freshRunResetEnd);
@@ -6006,7 +6008,7 @@ export default [
           'Same-IP retry policy must suppress only the immediate retry, then allow a one-minute cooled retry or an IP change');
 
         const extractorSource = fs.readFileSync(path.resolve('electron/extractors/apiExtractors.js'), 'utf8');
-        const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+        const jobsSource = readJobsSource('recoveryHandlers');
         const snapshotSource = fs.readFileSync(path.resolve('electron/ipc/bugReport/jobsSnapshot.js'), 'utf8');
         assert(extractorSource.includes("preferAuthenticated = false")
           && extractorSource.includes('authenticatedPage = await browser.newPage()')
@@ -8471,7 +8473,7 @@ export default [
       assert(initialRaw + resumedRaw === 397 && initialScoreReady + resumedScoreReady === 16,
         'fixture must encode the 307 + 90 raw / 8 + 8 score-ready production sequence');
 
-      const backend = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const backend = readJobsSource('recoveryHandlers');
       const resumeStart = backend.indexOf("logger.info(`[Jobs][${nodeId}] Resuming Indeed:");
       const resumeEnd = backend.indexOf("// Renderer calls this after it merges captcha-resolve", resumeStart);
       const resume = backend.slice(resumeStart, resumeEnd);
@@ -8782,7 +8784,7 @@ export default [
 {
     name: 'Job search: all country-inapplicable selections fail before mutating prior results',
     run: () => {
-      const backend = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const backend = readJobsSources('jobs', 'searchHandlers');
       const policyStart = backend.indexOf('const sourceCountryPolicies = summarizeJobSourceCountryPolicies');
       const runStart = backend.indexOf('const runStartedAt = initialRunStartedAt;', policyStart);
       const preflight = backend.slice(policyStart, runStart);
@@ -8810,7 +8812,7 @@ export default [
     run: () => {
       const renderer = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
       const doneState = fs.readFileSync(path.resolve('src/nodes/jobsearch/JobSearchDoneState.jsx'), 'utf8');
-      const backend = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const backend = readJobsSources('jobs', 'searchHandlers');
       const sourceCard = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
       const dispositionStart = renderer.indexOf('const handlePostSearchResult = useCallback');
       const dispositionEnd = renderer.indexOf('const runPipeline = useCallback', dispositionStart);
@@ -8987,7 +8989,7 @@ export default [
 {
     name: 'seen-history: gathered jobs are deferred until results are exposed',
     run: () => {
-      const backend = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const backend = readJobsSources('jobs', 'searchHandlers');
       const evidenceFilterStart = backend.indexOf('const descriptionEvidence = filterJobsByDescriptionEvidence(kept)');
       const returnStart = backend.indexOf('return { jobs: kept', evidenceFilterStart);
       const finalDisposition = backend.slice(evidenceFilterStart, returnStart);
@@ -9763,7 +9765,7 @@ export default [
         && reEntered.activityCompleted === 140
         && reEntered.activityTotal === 476,
       'a post-gather LinkedIn description walk retains its distinct phase and item progress without pretending it is a new source scan');
-      const jobsSrc = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobsSrc = readJobsSources('jobs', 'searchHandlers');
       assert(jobsSrc.includes("activity: 'description-enrichment'")
         && jobsSrc.includes('activityCompleted: completed')
         && jobsSrc.includes('activityTotal: total'),
@@ -9866,11 +9868,12 @@ export default [
         && sourceCard.includes('(!hasWarn || warningBlocksScoring)')
         && sourceCard.includes('replaceMatchingItems'),
       'a derived source warning keeps an actionable exact-retry control on its source card');
-      const jobsBackend = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
-      const scraper = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
-      assert(scraper.includes("phase: 'detail-external-page-text'")
-        && scraper.includes('never clicks Apply, fills fields, logs in, or')
-        && scraper.includes("document.body?.innerText || ''")
+      const jobsBackend = readJobsSources('jobs', 'searchHandlers');
+      const detailParsingSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper/detailParsing.js'), 'utf8');
+      const navigationSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper/expandByNavigation.js'), 'utf8');
+      assert(navigationSource.includes("phase: 'detail-external-page-text'")
+        && detailParsingSource.includes('never clicks Apply, fills fields, logs in, or')
+        && navigationSource.includes("document.body?.innerText || ''")
         && jobsBackend.includes('filterJobsByDescriptionEvidence')
         && jobsBackend.includes('not scored or marked seen'),
       'ZipRecruiter external listing URLs are read once for text without any application-form automation');
@@ -9914,14 +9917,14 @@ export default [
       assert(sourceCard.includes('const providerBoundaryMatches = providerGatheredRunId === jobRunId;')
         && sourceCard.includes("detail: `Waiting to resolve (${position})…`"),
       'a provider-boundary Solve retains the click behind the shared job-workflow lane while downstream handoffs finish, rather than rejecting it as a stale pre-return run');
-      const jobsIpc = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobsIpc = [readJobsSource('jobs'), readJobsSource('searchHandlers'), readJobsSource('recoveryHandlers')].join('\n');
       assert(jobsIpc.includes("if (canvasFilePath && !providerPhaseOnly) {")
         && jobsIpc.includes('const providerGathered = await markProviderGathered(canvasFilePath, Date.now(), {')
         && jobsIpc.includes('requiredSourceIds: activeSourceIds')
-        && jobsIpc.includes('providerGathered: providerGatheredAtForManifest(state.manifest) != null')
-        && jobsIpc.includes("if (state.manifest.stage === 'gathered') return { authorized: true, reason: 'gathered' };")
+        && readJobsSource('coreHandlers').includes('providerGathered: providerGatheredAtForManifest(state.manifest) != null')
+        && readJobsSource('telemetry').includes("if (state.manifest.stage === 'gathered') return { authorized: true, reason: 'gathered' };")
         && jobsIpc.includes('rows have not yet crossed the deterministic age/history/preference')
-        && jobsIpc.includes("return { authorized: false, reason: 'provider-boundary-awaiting-final-checkpoint' };"),
+        && readJobsSource('telemetry').includes("return { authorized: false, reason: 'provider-boundary-awaiting-final-checkpoint' };"),
       'the provider receipt admits a same-run Solve to the shared queue, while the backend requires the normal post-filter gathered checkpoint before mutation');
       assert(jobsIpc.includes("sourceActionAuthorization.reason === 'provider-boundary-awaiting-final-checkpoint'")
         && jobsIpc.includes("'live-run-checkpoint-not-ready'"),
@@ -10138,7 +10141,7 @@ export default [
       const tree = fs.readFileSync(path.resolve('src/nodes/jobsearch/buildJobTree.js'), 'utf8');
       const snapshot = fs.readFileSync(path.resolve('electron/ipc/bugReport/jobsSnapshot.js'), 'utf8');
       const serialization = fs.readFileSync(path.resolve('src/utils/serializationUtils.js'), 'utf8');
-      const jobsBackend = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobsBackend = readJobsSource('recoveryHandlers');
 
       const scoreCalls = search.split('window.electronAPI.scoreJobs({').slice(1);
       const snapshotWrites = search.split('saveJobAnalysisSnapshot?.({').slice(1);
@@ -12920,7 +12923,7 @@ export default [
       // Two properties a rebase can silently destroy, both invisible to a
       // behavioural test: an inert fix (branch ordered after the drop) and an
       // infinite loop (budget counter reset by `i--; continue;`).
-      const scraperSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
+      const scraperSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper/expandByNavigation.js'), 'utf8');
       assert(scraperSource.includes('let errorShellRetryIndex = -1;')
         && scraperSource.indexOf('let errorShellRetryIndex = -1;') < scraperSource.indexOf('for (let i = 0; i < enhanced.length; i++)'),
       'the error-shell retry budget is declared outside the detail loop so `i--; continue;` cannot reset it');
@@ -13566,7 +13569,7 @@ export default [
       const issueReporterSource = fs.readFileSync(path.resolve('src/hooks/useIssueReporter.js'), 'utf8');
       const jobsSnapshotSource = fs.readFileSync(path.resolve('electron/ipc/bugReport/jobsSnapshot.js'), 'utf8');
       const jobSearchSource = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
-      const jobsBackendSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobsBackendSource = readJobsSources('jobs', 'searchHandlers');
       assert(boardSource.includes('const completedModules = useMemo')
         && boardSource.includes('() => boardInputSignature(completedModules, connectedModules)')
         && boardSource.includes('const allConnectedModulesDone =')
@@ -14595,8 +14598,8 @@ export default [
         assert(events.length === 1 && events[0].repeats === 200,
           'repeated activity progress folds into one bounded main-process trail row');
 
-        const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
-        const scraperSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
+        const jobsSource = readJobsSources('jobs', 'searchHandlers');
+        const scraperSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper/listWalk.js'), 'utf8');
         assert(scraperSource.includes("activityKey: 'google-preload'"),
           'Google scroll-loop overlay paints use one stable activity key and are renderer-throttled');
         assert(jobsSource.includes('const terminalManualSourceIds = new Set();')
@@ -14653,12 +14656,12 @@ export default [
           && records[1].warning?.code === 'http-429'
           && records[2].terminalStatus === 'done',
         'each source keeps only its three latest run receipts while retaining a terminal warning that preceded a clean retry');
-        const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+        const jobsSource = `${readJobsSources('jobs', 'searchHandlers')}\n${readJobsSource('collection')}`;
         assert(jobsSource.includes('recordJobSourceDispatch(sourceId);')
           && jobsSource.includes('recordJobSourceDispatch(sid, activeRunId);')
           && jobsSource.includes('recordJobSourceDispatch(sourceId, jobRunId);')
-          && jobsSource.includes('dispatchedAt')
-          && jobsSource.includes('terminalAt'),
+          && readJobsSource('telemetry').includes('dispatchedAt')
+          && readJobsSource('telemetry').includes('terminalAt'),
         'timing receipts distinguish a UI searching announcement from actual HTTP/browser dispatch and terminal completion');
         assert(report.includes('### Source Scheduling & Throttle History')
           && /hub `#[a-f0-9]{10}` \/ `google`/.test(report)
@@ -14791,7 +14794,7 @@ export default [
         assert(persistenceFailure?.outcome === 'failed'
           && persistenceFailure?.checkpoint === 'failed'
           && persistenceFailure?.warning?.code === 'description-recovery-persist-failed'
-          && fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8').includes("recordGenericResolvePass('failed', warning, 'failed');"),
+          && readJobsSource('recoveryHandlers').includes("recordGenericResolvePass('failed', warning, 'failed');"),
         'checkpoint persistence failure is a retained fixed-state Solve outcome, including after queue-consumption persistence fails');
         const visibleWindowFailure = __recordJobSourceResolvePassForTests('ziprecruiter', {
           outcome: 'failed',
@@ -14800,7 +14803,7 @@ export default [
           error: secret,
           url: `https://example.invalid/${secret}`,
         }, { nodeId: 'solve-trail-owner', jobRunId: 'solve-trail-run' });
-        const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+        const jobsSource = readJobsSource('recoveryHandlers');
         assert(visibleWindowFailure?.outcome === 'failed'
           && visibleWindowFailure?.warning?.code === 'description-detail-error'
           && visibleWindowFailure?.checkpoint === 'unchanged'
@@ -15406,7 +15409,7 @@ export default [
     name: 'browser scrape: the un-enriched row count and in-scraper duplicate drop are actually produced and merged, not just rendered',
     run: () => {
       const scraperSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
-      const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobsSource = readJobsSources('jobs', 'searchHandlers');
 
       assert(scraperSource.includes("sourceDetailUnenriched += enhanced.filter(j => j?.descriptionDeferredReason).length;"),
         'the scraper counts deferred rows from the rows themselves, so the page that TRIGGERS a block is counted too');
@@ -15416,7 +15419,7 @@ export default [
       'the recovery-surviving block fields reach the per-source result');
       assert(scraperSource.includes('providerDuplicatesDropped: Math.max(0, sourcePhysicalCards - providerSeen.size),'),
         'the shed-card count reaches the per-source result (its load-more semantics are pinned by its own test)');
-      assert(scraperSource.includes('if (enhanced[i] != null) unavailableDetailDropped += 1;')
+      assert(fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper/expandByNavigation.js'), 'utf8').includes('if (enhanced[i] != null) unavailableDetailDropped += 1;')
         && scraperSource.includes('unavailableDetailDropped: sourceUnavailableDetailDropped,'),
       'a confirmed unavailable detail page is counted exactly when it is removed, separately from candidate identities');
 
@@ -15428,12 +15431,12 @@ export default [
         'the duplicate-drop count reaches the telemetry the bug report reads');
       assert(jobsSource.includes('sourceResults[sourceId].unavailableDetailDropped =')
         && jobsSource.includes('if (data.unavailableDetailDropped) bySource[sid].unavailableDetailDropped = data.unavailableDetailDropped;')
-        && jobsSource.includes('unavailableDetailDropped: source?.unavailableDetailDropped,'),
+        && readJobsSource('telemetry').includes('unavailableDetailDropped: source?.unavailableDetailDropped,'),
       'the unavailable-detail aggregate survives source merge, live telemetry, and terminal-receipt construction');
       assert(scraperSource.includes('locationScopeUnenforced: nationTierCaveatRecorded,')
         && jobsSource.includes('if (result.locationScopeUnenforced === true)')
         && jobsSource.includes('if (data.locationScopeUnenforced === true) bySource[sid].locationScopeUnenforced = true;')
-        && jobsSource.includes('locationScopeUnenforced: source?.locationScopeUnenforced === true,'),
+        && readJobsSource('telemetry').includes('locationScopeUnenforced: source?.locationScopeUnenforced === true,'),
       'the nation-tier scope caveat reaches both live telemetry and the durable receipt without occupying the source-warning slot');
       return { ok: true };
     },
@@ -15445,7 +15448,7 @@ export default [
     name: 'browser scrape: the in-scraper duplicate count measures shed cards, not the load-more list being re-scanned',
     run: () => {
       const src = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
-      assert(!src.includes('sourceDuplicateCards'),
+      assert(!readManualScraperSources().includes('sourceDuplicateCards'),
         'the per-re-encounter counter is gone — on a cumulative list it counted re-scans');
       assert(src.includes('sourcePhysicalCards += loadMoreSelector')
         && src.includes('? Math.max(0, extracted.length - loadMorePrevCount)')
@@ -15642,14 +15645,14 @@ export default [
 
       // queryFanOut is the hop that dropped them first; the wrapper below reads
       // them straight off its return value.
-      const jobsSrc = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobsSrc = readJobsSource('collection');
       assert(jobsSrc.includes('return { items, warning, gathered, providerGathered, providerTotal, truncated,'),
         'queryFanOut returns the corpus-coverage facts its caller reads');
-      assert(jobsSrc.includes('if (data.providerTotal != null) bySource[sid].providerTotal = data.providerTotal;'),
+      assert(readJobsSources('jobs', 'searchHandlers').includes('if (data.providerTotal != null) bySource[sid].providerTotal = data.providerTotal;'),
         'per-source telemetry carries providerTotal for API sources, the twin of claimedTotal for browser sources');
-      assert(jobsSrc.includes('export function capPlatformJobsAfterWindow')
+      assert(readJobsSource('sourceRules').includes('export function capPlatformJobsAfterWindow')
         && jobsSrc.includes('const jobs = rawJobs;')
-        && jobsSrc.includes("data.stopReasons.add(autoJobsPerPlatform ? 'auto-jobs-per-platform' : 'jobs-per-platform');"),
+        && readJobsSources('jobs', 'searchHandlers').includes("data.stopReasons.add(autoJobsPerPlatform ? 'auto-jobs-per-platform' : 'jobs-per-platform');"),
       'the per-platform cap is measured after window/source-dedup admission, not by an earlier API fan-out slice');
       const indeedSrc = fs.readFileSync(path.resolve('electron/extractors/indeedBrowser.js'), 'utf8');
       assert(jobsSrc.includes('const usajobsRowBudget = resolveJobsPerPlatform(limits);')
@@ -15976,14 +15979,14 @@ export default [
       // The backend must resolve the cause to a label rather than reporting
       // the shared sentinel as if every cancellation were a deleted node.
       const ipcUtilsSource = fs.readFileSync(path.resolve('electron/ipc/ipcUtils.js'), 'utf8');
-      const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobsSource = readJobsSources('jobs', 'searchHandlers');
       const jobSearchSource = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
       assert(ipcUtilsSource.includes("Object.assign(new Error(message), { name: 'AbortError' })")
         && ipcUtilsSource.includes("return cancellationError('Node deleted', cause);"),
         'the cancel sentinel keeps its load-bearing message while identifying itself as an abort');
       assert(jobsSource.includes('CANCEL_CAUSE_LABELS[reason?.cancelCause]')
-        && jobsSource.includes("'user-reset': 'Cancelled by user — clicked Reset on this hub'")
-        && jobsSource.includes("'job-source-card-removed': 'Source card removed — saved checkpoint retained for Resume'"),
+        && readJobsSource('analysisStore').includes("'user-reset': 'Cancelled by user — clicked Reset on this hub'")
+        && readJobsSource('analysisStore').includes("'job-source-card-removed': 'Source card removed — saved checkpoint retained for Resume'"),
         'the pipeline stage error prefers the stated cause over the shared sentinel, including a checkpoint-preserving source-card removal');
       assert(/cancellationReason = preserveRecovery\s*\? 'user-stopped'\s*:\s*\(reanalysisRestoreRef\.current\s*\? 'reanalysis-cancelled'\s*:\s*'user-reset'\)/.test(jobSearchSource)
         && jobSearchSource.includes('cancelNodeTask?.(id, cancellationReason)')
@@ -17332,7 +17335,7 @@ export default [
     run: () => {
       const hub = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
       const sourceCard = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
-      const jobs = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobs = readJobsSource('boardHandlers');
       const progressStart = hub.indexOf('const [scoringProgress, setScoringProgress] = useState(null);');
       const progressEnd = hub.indexOf('const scheduleCleanSourceCardDismiss', progressStart);
       const progress = hub.slice(progressStart, progressEnd);

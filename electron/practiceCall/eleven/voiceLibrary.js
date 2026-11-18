@@ -7,8 +7,8 @@
  * Every call is injected (fetch, fs) so tests never touch the network or the disk.
  */
 import fsPromises from 'node:fs/promises';
-import path from 'node:path';
 import { SUBSCRIPTION_URL } from './dialogueVoice.js';
+import { atomicWriteFile } from '../../utils/atomicWrite.js';
 import { classifyFailure, redact, voiceError } from './voiceErrors.js';
 import {
   hasKnownGender, isEnglishVoice, isStandardPrice, languageOf, normalizeGender, rateOf, textOf,
@@ -249,11 +249,15 @@ export function createVoicePoolStore({ filePath, fs = fsPromises } = {}) {
       }
     },
     async save(state) {
-      const temp = `${filePath}.tmp`;
       const data = `${JSON.stringify(cleanState(state), null, 2)}\n`;
-      await fs.mkdir(path.dirname(filePath), { recursive: true });
-      await fs.writeFile(temp, data, { mode: 0o600 });
-      await fs.rename(temp, filePath);
+      await atomicWriteFile(filePath, data, {
+        fs,
+        mkdir: true,
+        encoding: null,
+        flag: null,
+        tempPath: `${filePath}.tmp`,
+        cleanup: false,
+      });
     },
   };
 }

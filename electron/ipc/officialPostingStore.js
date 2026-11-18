@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { atomicWriteFile } from '../utils/atomicWrite.js';
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { googleJobsDocumentId } from '../../src/utils/jobListingUrl.js';
 import { atomicWriteJson, ensureDirectoryWithinRoot } from '../utils/pathSafety.js';
@@ -215,11 +216,9 @@ export function createOfficialPostingStore(rootDir, { now = Date.now } = {}) {
     await prepare();
     const destination = textFile(contentHash);
     await regularFileOrAbsent(destination);
-    const temporary = path.join(textsDir, `.${contentHash}.${crypto.randomUUID()}.tmp`);
-    try {
-      await fs.promises.writeFile(temporary, description, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-      await fs.promises.rename(temporary, destination);
-    } finally { await fs.promises.unlink(temporary).catch(() => {}); }
+    await atomicWriteFile(destination, description, {
+      tempPath: () => path.join(textsDir, `.${contentHash}.${crypto.randomUUID()}.tmp`),
+    });
   };
   const restoreText = (contentHash, description) => serializeWrite(() => writeText(contentHash, description));
   const save = (job, { officialPosting, description, expectedRecord } = {}) => serializeWrite(async () => {

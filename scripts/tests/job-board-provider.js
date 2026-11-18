@@ -1,4 +1,5 @@
 import { assert } from './testHelpers.js';
+import { readAllJobsSources, readJobsSource, readJobsSources } from './jobsSourceFixture.mjs';
 import path from 'node:path';
 import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 import { readFileSync } from 'node:fs';
@@ -103,9 +104,9 @@ export default [
         assert(list.get('ic-tab-role').textContent === '' && list.get('ic-count').textContent === '20');
         assert(detail.get('ic-count').textContent === '12', 'a retired detail page receives no further paints');
       } finally { unlink(); for (const dom of doms) dom.window.close(); }
-      const source = readFileSync(new URL('../../electron/ipc/browser/manualScraper.js', import.meta.url), 'utf8');
-      const cleanupStart = source.indexOf('      detailPacing.lastNavigationAt = lastDetailNavigationAt;');
-      const cleanupEnd = source.indexOf('    // If the main page was used as fallback', cleanupStart);
+      const source = readFileSync(new URL('../../electron/ipc/browser/manualScraper/expandByNavigation.js', import.meta.url), 'utf8');
+      const cleanupStart = source.indexOf('    detailPacing.lastNavigationAt = lastDetailNavigationAt;');
+      const cleanupEnd = source.indexOf('  // If the main page was used as fallback', cleanupStart);
       const cleanup = source.slice(cleanupStart, cleanupEnd);
       assert(cleanupStart > 0 && cleanup.indexOf('unlinkDetailOverlays();') < cleanup.indexOf('await detailPage?.close()'),
         'the detail group retires before its tab closes in the expansion finally block');
@@ -179,11 +180,11 @@ export default [
   {
     name: 'ZipRecruiter clearance starts its next-request cooldown after the human solve',
     async run() {
-      const source = readFileSync(new URL('../../electron/ipc/browser/manualScraper.js', import.meta.url), 'utf8');
-      const begin = source.indexOf('                const postWaitSignals = await getChallengeSignals(fetchPage);');
-      const end = source.indexOf("                recordManualScraperTelemetry({\n                  phase: 'detail-challenge', srcName:", begin);
-      const gapStart = source.indexOf("        const detailGapMs = sourceId === 'ziprecruiter'");
-      const gapEnd = source.indexOf('        await updateOverlay(interactionPage,', gapStart);
+      const source = readFileSync(new URL('../../electron/ipc/browser/manualScraper/expandByNavigation.js', import.meta.url), 'utf8');
+      const begin = source.indexOf('              const postWaitSignals = await getChallengeSignals(fetchPage);');
+      const end = source.indexOf("              recordManualScraperTelemetry({\n                phase: 'detail-challenge', srcName:", begin);
+      const gapStart = source.indexOf("      const detailGapMs = sourceId === 'ziprecruiter'");
+      const gapEnd = source.indexOf('      await updateOverlay(interactionPage,', gapStart);
       assert(begin > 0 && end > begin && gapStart > 0 && gapEnd > gapStart);
       for (const result of ['ok', 'recovered', 'abort']) {
         let listForegrounds = 0;
@@ -735,7 +736,7 @@ export default [
         && renderer.includes('let scoringCommitAccepted = false')
         && renderer.includes('if (!careerSnapshotIsStillCurrent()) return searchRunOutcome(\'superseded\', { runId: jobRunId });'),
       'a scorer started under snapshot A must retain A at IPC and reject its terminal commit if the live node changes to B');
-      const mainJobs = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      const mainJobs = `${readJobsSource('jobs')}\n${readJobsSource('searchHandlers')}\n${readJobsSource('coreHandlers')}`;
       assert(mainJobs.includes('careerSnapshotId: careerSnapshotId || null')
         && mainJobs.includes('careerSnapshotId: state.manifest.inputs?.careerSnapshotId || null'),
       'a crash-resume manifest must persist and return the exact admitted career snapshot instead of inferring one from live renderer state');
@@ -6103,7 +6104,7 @@ export default [
       // real executable code.
       const board = readFileSync(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
       const preload = readFileSync(new URL('../../electron/preload.js', import.meta.url), 'utf8');
-      const main = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      const main = readAllJobsSources();
       const combineStart = board.indexOf('const handleCombine');
       const combineEnd = board.indexOf('\n  return (', combineStart);
       const combine = board.slice(combineStart, combineEnd);
@@ -6892,7 +6893,7 @@ export default [
         retryStatus: 'blank-after-reload',
       });
       const scraper = readFileSync(new URL('../../electron/ipc/browser/manualScraper.js', import.meta.url), 'utf8');
-      const jobsIpc = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      const jobsIpc = readJobsSources('jobs', 'searchHandlers');
 
       assert(firstBlank === 'retry'
         && recovered === 'recovered'

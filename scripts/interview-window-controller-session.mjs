@@ -48,10 +48,12 @@ export async function runInterviewWindowControllerSession({ fixture = createInte
   const owner = new SyntheticBrowserWindow({ synthetic: true });
   let controller;
   const reads = { snapshot: 0, bank: 0 };
+  let audioInput = null; let turn = 0;
   try {
     const sealed = await publishInterviewAnswerBank({ bank: fixture.bank, userDataPath: root });
     if (sealed.answerBankRecordId !== fixture.answerBankRecordId) throw new Error('Synthetic answer-bank seal mismatch.');
-    controller = createInterviewWindowController({ matcherTransportFactory: () => { throw new Error('Offline fixture: AI unavailable.'); },
+    controller = createInterviewWindowController({ createAudioService: input => { audioInput = input; return { start: () => ({ status: 'listening' }), stop: () => ({ status: 'idle' }), notice() {} }; },
+      matcherTransportFactory: () => { throw new Error('Offline fixture: AI unavailable.'); },
       BrowserWindow: SyntheticBrowserWindow, ipcMain: {}, registerIpc: false,
       appInstance: { getPath: () => root },
       isAuthorizedOwner: candidate => candidate === owner,
@@ -73,12 +75,12 @@ export async function runInterviewWindowControllerSession({ fixture = createInte
     const session = [...controller.sessions.values()][0];
     const event = { sender: session.child.webContents };
     const rows = [];
-    for (const scenario of fixture.questions) {
-      if (!scenario.followUp) controller.nextQuestion(event);
+    // The listening path declines a multi-part spoken question, so that scenario has no card to measure.
+    for (const scenario of fixture.questions.filter(item => item.id !== 'multipart')) {
       const started = performance.now();
-      const display = await (scenario.followUp
-        ? controller.followUpQuestion(event, scenario.question)
-        : controller.submitQuestion(event, scenario.question));
+      controller.startListening(event);
+      await audioInput.onQuestion({ text: scenario.question, id: ++turn }, () => true);
+      const display = controller.getBrief(event);
       const latencyMs = performance.now() - started;
       const actualKind = display.answerCard ? 'card' : display.plan?.status === 'supported' ? 'cue' : 'abstain';
       const actualCardId = display.answerCard?.id ?? null;
@@ -96,7 +98,7 @@ export async function runInterviewWindowControllerSession({ fixture = createInte
       });
     }
     return {
-      measurement: 'Node controller only, using injected approved snapshot/brief/bundle and a freshly sealed answer bank reloaded from an isolated temporary store on each question. Excludes browser paint, native Electron IPC, career snapshot disk validation and refresh contention.',
+      measurement: 'Node controller only, using injected approved snapshot/brief/bundle and a freshly sealed answer bank read once from an isolated temporary store at launch, with each question delivered through the listening path. Excludes browser paint, native Electron IPC, career snapshot disk validation and refresh contention.',
       fixture: { roles: fixture.snapshot.profile.roles.length, achievements: fixture.snapshot.profile.achievements.length,
         cards: fixture.bank.cards.length, answerBankRecordId: sealed.answerBankRecordId },
       summary: { count: rows.length, correct: rows.filter(row => row.correct).length,
@@ -109,7 +111,7 @@ export async function runInterviewWindowControllerSession({ fixture = createInte
   } finally {
     controller?.cleanupOwner(owner);
     owner.close();
-    await fs.rm(root, { recursive: true, force: true });
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 }
 

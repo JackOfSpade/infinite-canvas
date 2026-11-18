@@ -214,14 +214,72 @@ function finishedQueryList(value) {
   return out;
 }
 
+const MAX_READ_KEYS_PER_SOURCE = 2000;
+const MAX_READ_KEY_LENGTH = 400;
+const MAX_UNREAD_LISTINGS_PER_SOURCE = 200;
+const MAX_UNREAD_FIELD_LENGTH = 500;
+
 /**
- * Normalize the saved per-platform query progress at the trust boundary.
+ * What a platform's read listings were judged under. A listing read by a
+ * blocked run was kept or dropped by that run's job preferences; once the
+ * preferences change it has to be read and judged again, so read listings are
+ * only reused under the same key. A short fingerprint, never the text itself.
+ */
+export function sourceReadContextKey(jobPreferences) {
+  const text = String(jobPreferences ?? '').replace(/\s+/gu, ' ').trim();
+  let hash = 5381;
+  for (let index = 0; index < text.length; index++) hash = ((hash * 33) ^ text.charCodeAt(index)) >>> 0;
+  return `p${text.length}-${hash.toString(36)}`;
+}
+
+function readContextKeyOf(value) {
+  return typeof value === 'string' && value.length <= 64 ? value : '';
+}
+
+/** Listing keys, newest last. Over the limit the oldest are dropped. */
+function readKeyList(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  for (const key of value) {
+    if (typeof key !== 'string' || !key || key.length > MAX_READ_KEY_LENGTH) continue;
+    seen.delete(key);
+    seen.add(key);
+  }
+  const out = [...seen];
+  return out.length > MAX_READ_KEYS_PER_SOURCE ? out.slice(out.length - MAX_READ_KEYS_PER_SOURCE) : out;
+}
+
+function unreadListingList(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const out = [];
+  const text = raw => (typeof raw === 'string' ? raw.slice(0, MAX_UNREAD_FIELD_LENGTH) : '');
+  for (const entry of value) {
+    if (!isPlainRecord(entry)) continue;
+    const key = typeof entry.key === 'string' && entry.key.length <= MAX_READ_KEY_LENGTH ? entry.key : '';
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ key, title: text(entry.title), company: text(entry.company), url: text(entry.url) });
+    if (out.length >= MAX_UNREAD_LISTINGS_PER_SOURCE) break;
+  }
+  return out;
+}
+
+/**
+ * Normalize the saved per-platform progress at the trust boundary.
  *
- * A platform blocked part-way through its queries keeps the ones it finished:
- * `finishedQueries` are the exact query texts, `bookmarkAt` is the platform's
- * bookmark those walks started from (null when it had none), `oldestStartedAt`
- * is the earliest run start among the walks that finished them, and
- * `locationKey` is the search location they were run for.
+ * A platform blocked part-way keeps both halves of its work until its date
+ * moves:
+ * - done: `finishedQueries` are the exact query texts whose walk finished, and
+ *   `readKeys` are the listings whose description was read, so the next scan
+ *   opens neither again;
+ * - not done: every other query, and `unreadListings`, the listings that came
+ *   back with no readable description (key, title, company, link).
+ * `bookmarkAt` is the platform's bookmark those walks started from (null when
+ * it had none), `oldestStartedAt` is the earliest run start among them, and
+ * `locationKey` is the search location they were run for. `readKeys` and
+ * `unreadListings` are present only when they hold something, and
+ * `readContextKey` names the job preferences the read listings were judged under.
  */
 export function normalizeSourceQueryProgress(raw) {
   const normalized = {};
@@ -231,13 +289,18 @@ export function normalizeSourceQueryProgress(raw) {
     const entry = raw[sourceId];
     if (!isPlainRecord(entry)) continue;
     const finishedQueries = finishedQueryList(entry.finishedQueries);
+    const readKeys = readKeyList(entry.readKeys);
+    const unreadListings = unreadListingList(entry.unreadListings);
     const oldestStartedAt = normalizeCompletionTimestamp(entry.oldestStartedAt);
-    if (finishedQueries.length === 0 || oldestStartedAt == null) continue;
+    if (oldestStartedAt == null) continue;
+    if (finishedQueries.length === 0 && readKeys.length === 0 && unreadListings.length === 0) continue;
     normalized[sourceId] = {
       finishedQueries,
       oldestStartedAt,
       bookmarkAt: normalizeCompletionTimestamp(entry.bookmarkAt),
       locationKey: typeof entry.locationKey === 'string' ? entry.locationKey : '',
+      ...(readKeys.length > 0 ? { readKeys, readContextKey: readContextKeyOf(entry.readContextKey) } : {}),
+      ...(unreadListings.length > 0 ? { unreadListings } : {}),
     };
   }
   return normalized;
@@ -266,7 +329,27 @@ export function sourceFinishedQueriesForRun(data, sourceIds, searchLocationText)
   const out = {};
   for (const sourceId of uniqueSourceIds(sourceIds)) {
     if (!hasOwn(progress, sourceId) || progress[sourceId].locationKey !== locationKey) continue;
+    if (progress[sourceId].finishedQueries.length === 0) continue;
     out[sourceId] = [...progress[sourceId].finishedQueries];
+  }
+  return out;
+}
+
+/**
+ * Listings each platform already read since its bookmark, for the next run to
+ * leave unopened. Same ownership rules as `sourceFinishedQueriesForRun`.
+ */
+export function sourceReadKeysForRun(data, sourceIds, searchLocationText, readContextKey = '') {
+  const locationKey = String(searchLocationText || '').trim();
+  const contextKey = readContextKeyOf(readContextKey);
+  const progress = currentSourceQueryProgress(data);
+  const out = {};
+  for (const sourceId of uniqueSourceIds(sourceIds)) {
+    if (!hasOwn(progress, sourceId) || progress[sourceId].locationKey !== locationKey) continue;
+    if (!progress[sourceId].readKeys?.length) continue;
+    // Read under other job preferences: every listing is read and judged again.
+    if (progress[sourceId].readContextKey !== contextKey) continue;
+    out[sourceId] = [...progress[sourceId].readKeys];
   }
   return out;
 }
@@ -288,6 +371,7 @@ export function buildSourceCoverageCommitPatch(
     knownSourceIds,
     sourceQueryProgress,
     locationKey,
+    readContextKey,
   },
   nodeId,
 ) {
@@ -336,14 +420,28 @@ export function buildSourceCoverageCommitPatch(
   for (const sourceId of Object.keys(reported)) {
     if (!isSafeSourceId(sourceId) || completedIds.includes(sourceId)) continue;
     const finished = finishedQueryList(reported[sourceId]?.finishedQueries);
-    if (finished.length === 0) continue;
+    const read = readKeyList(reported[sourceId]?.readKeys);
+    const unread = unreadListingList(reported[sourceId]?.unreadListings);
+    if (finished.length === 0 && read.length === 0 && unread.length === 0) continue;
     const prior = hasOwn(priorProgress, sourceId) ? priorProgress[sourceId] : null;
     const sameLocation = prior && prior.locationKey === String(locationKey || '').trim();
+    // Listings read by an earlier blocked run stay read. The not-done list is
+    // this run's own: it re-walked the unfinished queries, so anything an
+    // earlier run could not read was either read now or came back unread again.
+    // ...unless the job preferences changed: this run then read every listing
+    // again, and only what it read itself was judged under the new ones.
+    const contextKey = readContextKeyOf(readContextKey);
+    const sameContext = sameLocation && prior.readContextKey === contextKey;
+    const readKeys = readKeyList([...(sameContext ? prior.readKeys || [] : []), ...read]);
+    const readSet = new Set(readKeys);
+    const unreadListings = unread.filter(listing => !readSet.has(listing.key));
     nextProgress[sourceId] = {
       finishedQueries: finishedQueryList([...(sameLocation ? prior.finishedQueries : []), ...finished]),
       oldestStartedAt: sameLocation ? Math.min(prior.oldestStartedAt, start) : start,
       bookmarkAt: null,
       locationKey: String(locationKey || '').trim(),
+      ...(readKeys.length > 0 ? { readKeys, readContextKey: contextKey } : {}),
+      ...(unreadListings.length > 0 ? { unreadListings } : {}),
     };
   }
   // An unfinished platform's bookmark does not move in this commit, though the

@@ -101,7 +101,9 @@ class Window extends EventEmitter {
 }
 async function launch({ loadAnswerBank, loadSnapshot = async () => fixtureSnapshot() } = {}) {
   const owner = new Window(); const brief = fixtureBrief(); const bank = fixtureBank(brief);
-  const controller = createInterviewWindowController({ matcherTransportFactory: () => { throw new Error('Offline fixture: AI unavailable.'); }, BrowserWindow: Window, ipcMain: {}, registerIpc: false,
+  let audioInput = null; let turn = 0; const notices = [];
+  const controller = createInterviewWindowController({ createAudioService: input => { audioInput = input; return { start: () => ({ status: 'listening' }), stop: () => ({ status: 'idle' }), notice: message => notices.push(message) }; },
+    matcherTransportFactory: () => { throw new Error('Offline fixture: AI unavailable.'); }, BrowserWindow: Window, ipcMain: {}, registerIpc: false,
     appInstance: { getPath: () => '/synthetic-user-data' }, isAuthorizedOwner: value => value === owner,
     loadPreparedBrief: async () => brief,
     loadBundle: async () => ({ artifactId: brief.inputs.applicationArtifactId, applicationArtifactDigest: brief.inputs.applicationArtifactDigest }),
@@ -109,7 +111,15 @@ async function launch({ loadAnswerBank, loadSnapshot = async () => fixtureSnapsh
   await controller.launch({ sender: owner.webContents }, { nodeId: 'interview_fixture', snapshotId: SNAPSHOT,
     jobUrl: JOB_URL, briefRecordId: interviewPreparedBriefRecordId(brief), brief, plan: null, currentStep: 0 });
   const session = [...controller.sessions.values()][0];
-  return { owner, controller, session, event: { sender: session.child.webContents }, bank, brief };
+  const event = { sender: session.child.webContents };
+  // One detected question, delivered the way the listening path delivers it;
+  // resolves to the display the child now holds.
+  const ask = async question => {
+    controller.startListening(event);
+    await audioInput.onQuestion({ text: question, id: ++turn }, () => true);
+    return controller.getBrief(event);
+  };
+  return { owner, controller, session, event, ask, notices, bank, brief };
 }
 
 export default [
@@ -121,18 +131,16 @@ export default [
       const cards = original.cards.slice(1);
       const used = new Set(cards.flatMap(card => [card.headline, ...card.bullets, card.example].flatMap(claim => claim.evidenceIds)));
       const degraded = { ...original, cards, evidence: original.evidence.filter(item => used.has(item.id)), droppedQuestions: [dropped.question] };
-      const { controller, session, event } = await launch({ loadAnswerBank: async () => degraded });
+      const { controller, session, event, ask } = await launch({ loadAnswerBank: async () => degraded });
       try {
         const briefing = controller.getBrief(event).briefing;
         assert(briefing.preparedQuestions.length === 11 && !briefing.preparedQuestions.includes(dropped.question), 'degraded bank remains available and offers only retained prepared questions');
         for (const question of [dropped.question, ...dropped.variants]) {
-          controller.nextQuestion(event);
-          const result = await controller.submitQuestion(event, question);
+          const result = await ask(question);
           assert(result.answerCard === null, 'a dropped intent must never select another retained spoken card');
           if (result.plan.status === 'supported') assert(result.plan.steps.some(step => step.cue === ONBOARDING_SOURCE), 'supported fallback must display the entire exact saved source');
         }
-        controller.nextQuestion(event);
-        const result = await controller.submitQuestion(event, dropped.question);
+        const result = await ask(dropped.question);
         assert(result.plan.status === 'supported' && result.plan.steps.some(step => step.cue === ONBOARDING_SOURCE), 'the dropped leadership question uses exact verified career cues');
       } finally { session.child.close(); }
     },
@@ -161,15 +169,14 @@ export default [
     },
   },
   {
-    name: 'interview answer live: trailing unmatched questions use the honest cue fallback',
+    name: 'interview answer live: trailing unmatched spoken questions abstain with a notice instead of showing an earlier answer',
     async run() {
-      const { controller, session, event } = await launch();
+      const { session, ask, notices } = await launch();
       try {
         for (const [question, latest] of TRAILING_QUESTIONS) {
-          controller.nextQuestion(event);
-          const result = await controller.submitQuestion(event, question);
-          assert(result.answerCard === null && result.plan.status === 'unsupported' && !session.locked, 'an unmatched trailing request must abstain instead of displaying an earlier prepared answer');
-          assert(result.plan.question === latest, 'the fallback must identify the trailing question honestly');
+          const seen = notices.length; const result = await ask(question);
+          assert(result.answerCard === null && result.plan === null && !session.locked && notices.length === seen + 1,
+            `an unmatched trailing request must abstain with a notice instead of displaying an earlier prepared answer: ${latest}`);
         }
       } finally { session.child.close(); }
     },
@@ -219,114 +226,92 @@ export default [
     },
   },
   {
-    name: 'interview answer live: prepared card locks instantly and explicit replacements retain honest local fallback',
+    name: 'interview answer live: a detected prepared question locks its card and later questions replace it with honest local fallback',
     async run() {
-      const { controller, session, event, bank } = await launch();
+      const { controller, session, event, bank, ask } = await launch();
       try {
-        assert(controller.getBrief(event).briefing.preparedQuestions.length === 12, 'all prepared questions must be available before typing');
-        const result = await controller.submitQuestion(event, bank.cards[0].question);
+        assert(controller.getBrief(event).briefing.preparedQuestions.length === 12, 'all prepared questions must be available before listening');
+        const result = await ask(bank.cards[0].question);
         assert(result.answerCard?.id === 'onboarding' && result.plan.status === 'supported' && session.locked, 'matching card should lead while retaining literal evidence rail');
-        const replacement = await controller.submitQuestion(event, 'How do you manage budgets?');
+        const replacement = await ask('How do you manage budgets?');
         assert(replacement !== result && replacement.answerCard === null && replacement.plan.status === 'unsupported'
           && replacement.question === 'How do you manage budgets?' && !session.locked,
-        'an explicit replacement must be honoured without silently retaining the previous card or inventing an answer');
-        await controller.submitQuestion(event, bank.cards[0].question);
-        const continued = await controller.followUpQuestion(event, 'What did you learn?');
+        'a later detected question must replace the card without silently retaining it or inventing an answer');
+        await ask(bank.cards[0].question);
+        const continued = await ask('What did you learn?');
         assert(continued.answerCard === null && continued.plan.missingComponents.includes('lesson'), 'follow-up must use exact story cues and disclose missing details, never reuse authored card as a new answer');
-        const next = controller.nextQuestion(event);
-        assert(next.answerCard === null && next.plan === null && !session.locked, 'Next explicitly clears the card and story');
-        const unknown = await controller.submitQuestion(event, 'How do you manage budgets?');
+        const unknown = await ask('How do you manage budgets?');
         assert(unknown.answerCard === null && unknown.plan.status === 'unsupported' && !session.locked, 'unmatched question keeps existing honest unsupported behavior');
-        const cardOnly = await controller.submitQuestion(event, bank.cards[0].variants[1]);
+        const cardOnly = await ask(bank.cards[0].variants[1]);
         assert(cardOnly.answerCard?.id === 'onboarding' && cardOnly.plan === null && session.locked, 'prepared intent variant can show a verified card even when career lexical rail abstains');
         assert(controller.getBrief(event).answerCard.id === 'onboarding', 'renderer reload must retain the main-owned card');
       } finally { session.child.close(); }
     },
   },
   {
-    name: 'interview answer live: each unlocked question revalidates and missing or stale banks fall back',
+    name: 'interview answer live: a missing or stale bank at launch falls back to newly validated exact cues',
     async run() {
-      let bankReads = 0; let mode = 'valid';
       const brief = fixtureBrief(); const bank = fixtureBank(brief);
-      const { controller, session, event } = await launch({ loadAnswerBank: async ({ snapshot, brief: inputBrief, bundle }) => {
-        bankReads += 1;
-        assert(snapshot.snapshotId === SNAPSHOT && inputBrief.briefId === brief.briefId && bundle.applicationArtifactDigest === brief.inputs.applicationArtifactDigest, 'loader receives verified pin and exact captured artifact binding');
-        if (mode === 'missing') return null;
-        if (mode === 'stale') return { ...bank, inputs: { ...bank.inputs, briefId: 'f'.repeat(64) } };
-        return bank;
-      } });
-      try {
-        assert(bankReads === 1, 'launch validates answer bank once');
-        const first = await controller.submitQuestion(event, bank.cards[0].question);
-        assert(first.answerCard && bankReads === 2, 'question performs authoritative local reload, with no generation');
-        for (mode of ['missing', 'stale']) {
-          controller.nextQuestion(event);
-          const result = await controller.submitQuestion(event, bank.cards[0].question);
-          assert(result.answerCard === null && result.plan.status === 'supported', 'invalidated bank must fall back to newly validated exact cues');
-        }
-        assert(bankReads === 4, 'every unlocked question must revalidate the bank');
-      } finally { session.child.close(); }
+      for (const mode of ['missing', 'stale']) {
+        const { session, ask } = await launch({ loadAnswerBank: async ({ snapshot, brief: inputBrief, bundle }) => {
+          assert(snapshot.snapshotId === SNAPSHOT && inputBrief.briefId === brief.briefId && bundle.applicationArtifactDigest === brief.inputs.applicationArtifactDigest, 'loader receives verified pin and exact captured artifact binding');
+          return mode === 'missing' ? null : { ...bank, inputs: { ...bank.inputs, briefId: 'f'.repeat(64) } };
+        } });
+        try {
+          const result = await ask(bank.cards[0].question);
+          assert(result.answerCard === null && result.plan.status === 'supported', `an invalidated (${mode}) bank must fall back to newly validated exact cues`);
+        } finally { session.child.close(); }
+      }
     },
   },
   {
     name: 'interview answer live: job-aware example cannot inherit a different source-order story for follow-ups',
     async run() {
-      const { controller, session, event, bank } = await launch();
+      const { controller, session, event, bank, ask } = await launch();
       try {
         const card = bank.cards.find(item => item.question === 'Tell me about your relevant experience.');
-        const answer = await controller.submitQuestion(event, card.question);
+        const answer = await ask(card.question);
         assert(answer.answerCard.id === card.id && answer.answerCard.example.text === 'I tested the revised guide against the staff access checklist.', 'prepared job-aware example should remain the selected answer');
         assert(answer.plan === null && session.anchorPlan === null && session.locked, 'source-order role A cues must not be offered as role B card continuation');
-        const rejected = await controller.followUpQuestion(event, 'What did you learn?').then(() => false, () => true);
-        assert(rejected && controller.getBrief(event).answerCard.id === card.id, 'dependent follow-up must preserve the usable card while rejecting an unrelated anchor');
+        await ask('What did you learn?');
+        assert(controller.getBrief(event).answerCard.id === card.id, 'dependent follow-up must preserve the usable card while refusing an unrelated anchor');
       } finally { session.child.close(); }
     },
   },
   {
     name: 'interview answer live: controller rejects altered statement shapes and changed approved source text',
     async run() {
-      const original = fixtureBank(); let mode = 'valid';
-      const { controller, session, event } = await launch({
-        loadSnapshot: async () => {
-          const snapshot = fixtureSnapshot();
-          if (mode === 'source-changed') snapshot.profile.achievements[0].claim = ONBOARDING_SOURCE.replace('simpler', 'new');
-          return snapshot;
-        },
-        loadAnswerBank: async () => {
-          if (mode !== 'shape-changed') return original;
-          const altered = structuredClone(original); altered.cards[0].headline.text += ' by 90%';
-          return altered;
-        },
-      });
-      try {
-        for (mode of ['shape-changed', 'source-changed']) {
-          controller.nextQuestion(event);
-          const result = await controller.submitQuestion(event, original.cards[0].question);
+      const original = fixtureBank();
+      for (const mode of ['shape-changed', 'source-changed']) {
+        const { controller, session, event, ask } = await launch({
+          loadSnapshot: async () => {
+            const snapshot = fixtureSnapshot();
+            if (mode === 'source-changed') snapshot.profile.achievements[0].claim = ONBOARDING_SOURCE.replace('simpler', 'new');
+            return snapshot;
+          },
+          loadAnswerBank: async () => {
+            if (mode !== 'shape-changed') return original;
+            const altered = structuredClone(original); altered.cards[0].headline.text += ' by 90%';
+            return altered;
+          },
+        });
+        try {
+          const result = await ask(original.cards[0].question);
           assert(result.answerCard === null && result.plan.status === 'supported', 'untrusted or stale prepared prose must never cross the projection; exact newly checked evidence remains available');
-        }
-        const fresh = controller.getBrief(event);
-        assert(fresh.plan.steps.some(step => step.cue === ONBOARDING_SOURCE.replace('simpler', 'new')), 'fallback must use newly checked exact text, never the stale bank quote');
-      } finally { session.child.close(); }
+          if (mode === 'source-changed') {
+            assert(controller.getBrief(event).plan.steps.some(step => step.cue === ONBOARDING_SOURCE.replace('simpler', 'new')), 'fallback must use newly checked exact text, never the stale bank quote');
+          }
+        } finally { session.child.close(); }
+      }
     },
   },
   {
-    name: 'interview answer live: bank-read races cannot overwrite Next and live code has no model call',
-    async run() {
-      let launched = false; let release;
-      const bank = fixtureBank();
-      const { controller, session, event } = await launch({ loadAnswerBank: async () => launched ? new Promise(resolve => { release = resolve; }) : bank });
-      launched = true;
-      try {
-        const pending = controller.submitQuestion(event, bank.cards[0].question);
-        for (let spin = 0; !release && spin < 20; spin += 1) await new Promise(resolve => setImmediate(resolve));
-        assert(typeof release === 'function', 'question reached local bank load');
-        controller.nextQuestion(event); release(bank); await pending;
-        assert(controller.getBrief(event).answerCard === null && !session.locked, 'late bank reload cannot resurrect an advanced card');
-        const source = fs.readFileSync(new URL('../../electron/interviewWindow.js', import.meta.url), 'utf8');
-        const live = source.slice(source.indexOf('const answerQuestion ='), source.indexOf('const close ='));
-        const matcher = fs.readFileSync(new URL('../../src/utils/interviewAnswerMatching.js', import.meta.url), 'utf8');
-        assert(!/callLLM|requestNonApiAi|fetch\(|https?:|buildInterviewBrief|interviewAnswerBankPrompt/u.test(live + matcher), 'live matching must contain no generation, network or bridge fallback');
-      } finally { session.child.close(); }
+    name: 'interview answer live: live matching code has no model call of its own',
+    run() {
+      const source = fs.readFileSync(new URL('../../electron/interviewWindow.js', import.meta.url), 'utf8');
+      const live = source.slice(source.indexOf('const answerQuestion ='), source.indexOf('const audioFor ='));
+      const matcher = fs.readFileSync(new URL('../../src/utils/interviewAnswerMatching.js', import.meta.url), 'utf8');
+      assert(live.length > 1000 && !/callLLM|requestNonApiAi|fetch\(|https?:|buildInterviewBrief|interviewAnswerBankPrompt/u.test(live + matcher), 'live matching must contain no generation, network or bridge fallback');
     },
   },
 ];

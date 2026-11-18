@@ -54,8 +54,8 @@ export function buildJobSearchDateHistory(nodes) {
       const queryProgress = normalizeSourceQueryProgress(data.sourceQueryProgress);
       const progressSourceIds = Object.keys(queryProgress).sort();
       if (progressSourceIds.length) {
-        lines.push(`  - Queries finished by blocked runs (skipped next run): ${progressSourceIds
-          .map(sourceId => `${sourceId} ${queryProgress[sourceId].finishedQueries.length} finished · oldest run start ${timestamp(queryProgress[sourceId].oldestStartedAt)} · ${
+        lines.push(`  - Work kept from blocked runs (finished queries and read listings are skipped next run; unread listings are still owed): ${progressSourceIds
+          .map(sourceId => `${sourceId} ${queryProgress[sourceId].finishedQueries.length} finished · ${queryProgress[sourceId].readKeys?.length || 0} listing(s) read · ${queryProgress[sourceId].unreadListings?.length || 0} unread · oldest run start ${timestamp(queryProgress[sourceId].oldestStartedAt)} · ${
             queryProgress[sourceId].bookmarkAt === (sourceCoverage[sourceId]?.coverageStartedAt ?? null) ? 'current' : 'stale (date has moved)'}`)
           .join('; ')}.`);
       }

@@ -7,6 +7,7 @@
  * First-time setup: open Settings → Job Platform Logins → Indeed and log in.
  */
 
+import { partitionAlreadyReadJobs } from '../ipc/browser/manualScraper/walkRules.js';
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import path from 'path';
@@ -939,7 +940,7 @@ export function resolveIndeedPageBudgets(queryCount, collectionLimits, resumePag
  * @param {number|null} [collectionStartTimestamp] — posted-since cutoff for this run
  * @returns {Promise<{ items: object[], warning: object|null, gathered: number }>}
  */
-export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0, onPageJobs = null, location = '', collectionLimits = null, resumePageBudgets = null, isResume = false, originalQueryIndexes = null, collectionStartTimestamp = null) {
+export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0, onPageJobs = null, location = '', collectionLimits = null, resumePageBudgets = null, isResume = false, originalQueryIndexes = null, collectionStartTimestamp = null, isAlreadyRead = null) {
   if (isBackgroundE2E()) {
     const disabled = backgroundE2EDisabledError('Indeed browser extraction');
     return {
@@ -1191,6 +1192,10 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     const officialClosedKeys = new Set();
     const seenKeys = new Set();
     const providerSeenKeys = new Set();
+    // Cards left unopened because an earlier run already read or showed them,
+    // and the part of that count an earlier blocked Indeed run read.
+    let alreadyReadSkipped = 0;
+    let readEarlierSkipped = 0;
     let pagesWalked = 0;
     let autoPageBudgetReached = false;
     let explicitPageBudgetReached = false;
@@ -1383,10 +1388,16 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           pageProviderKeys.add(key);
           newProviderCandidates.push({ key, job });
         }
-        const pageJobs = filterJobsByPostedSince(
+        // A listing an earlier run already read, or already showed, is not
+        // opened again and is left out of this run's rows (same rule as the
+        // other browser platforms).
+        const alreadyRead = partitionAlreadyReadJobs(filterJobsByPostedSince(
           newProviderCandidates.map(candidate => candidate.job),
           collectionStartTimestamp,
-        ).slice(0, Math.max(0, resultCap - queryCollected));
+        ), isAlreadyRead);
+        alreadyReadSkipped += alreadyRead.readEarlier + alreadyRead.shownEarlier;
+        readEarlierSkipped += alreadyRead.readEarlier;
+        const pageJobs = alreadyRead.open.slice(0, Math.max(0, resultCap - queryCollected));
 
         // Soft block: Indeed returns a tiny near-empty page instead of a hard challenge.
         // Normal search pages are ~1500KB; anything under 150KB with 0 jobs is suspect.
@@ -1715,6 +1726,8 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       gathered: inWindow.length,
       unavailableDetailDropped: officialClosedKeys.size,
       providerGathered: providerSeenKeys.size,
+      alreadyReadSkipped,
+      readEarlierSkipped,
       pagesFetched: pagesWalked,
       stopReasons: [
         ...(autoPageBudgetReached ? ['auto-page-budget'] : []),

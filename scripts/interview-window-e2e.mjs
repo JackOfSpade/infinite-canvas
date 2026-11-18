@@ -90,8 +90,9 @@ export async function runInterviewWindowE2E({ outputDir, label = 'session', asse
     const sealed = await publishInterviewAnswerBank({ bank: fixture.bank, userDataPath: bundleDir });
     await publishInterviewPreparedBrief({ brief: fixture.brief, userDataPath: bundleDir });
     owner = new IsolatedWindow();
-    let snapshotReads = 0; let bankReads = 0;
-    controller = createInterviewWindowController({ matcherTransportFactory: () => { throw new Error('Offline fixture: AI unavailable.'); }, BrowserWindow: IsolatedWindow, ipcMain: {}, registerIpc: false,
+    let snapshotReads = 0; let bankReads = 0; let audioInput = null; let turn = 0;
+    controller = createInterviewWindowController({ createAudioService: input => { audioInput = input; return { start: () => ({ status: 'listening' }), stop: () => ({ status: 'idle' }), notice() {} }; },
+      matcherTransportFactory: () => { throw new Error('Offline fixture: AI unavailable.'); }, BrowserWindow: IsolatedWindow, ipcMain: {}, registerIpc: false,
       appInstance: { getPath: () => bundleDir }, isAuthorizedOwner: candidate => candidate === owner,
       loadSnapshot: async () => { snapshotReads++; return structuredClone(fixture.snapshot); },
       loadBundle: async () => structuredClone(fixture.bundle), loadPreparedBrief: request => loadInterviewPreparedBrief({ ...request, userDataPath: bundleDir }),
@@ -99,6 +100,8 @@ export async function runInterviewWindowE2E({ outputDir, label = 'session', asse
     await controller.launch({ sender: owner.webContents }, { nodeId: 'synthetic_e2e', snapshotId: fixture.snapshot.snapshotId,
       jobUrl: fixture.canonicalJobUrl, briefRecordId: fixture.briefRecordId, brief: fixture.brief, plan: null, currentStep: 0 });
     const session = [...controller.sessions.values()][0]; const event = { sender: session.child.webContents };
+    // The listening path declines a multi-part spoken question, so that scenario has no card to measure.
+    const questions = fixture.questions.filter(scenario => scenario.id !== 'multipart');
     const executablePath = await chromeExecutable();
     stage = 'chromium-launch';
     browser = await chromium.launch({ executablePath, headless: true, timeout: 20000,
@@ -120,21 +123,20 @@ export async function runInterviewWindowE2E({ outputDir, label = 'session', asse
         return controller.getBrief(event);
       });
       session.child.webContents.publish = () => {};
-      controller.nextQuestion(event);
       await page.addInitScript(installBrowserBridge);
       await page.goto(url); await page.locator('main.cue-card').waitFor({ state: 'attached' });
       await page.waitForFunction(() => window.__interviewProbe.listening.includes('start'));
       listening[`${size}:startsOnOpen`] = true;
       const blankAtOpen = await page.evaluate(() => document.querySelector('main.cue-card').textContent === '' && !document.querySelector('button, input, textarea, select, a, details, nav'));
       if (!blankAtOpen) failures.push(`${size}: the card must open blank with no controls`);
-      for (const [index, scenario] of fixture.questions.entries()) {
+      for (const [index, scenario] of questions.entries()) {
         try {
           stage = `${size}/${scenario.id}`;
-          // Questions arrive from the call, never from the card: drive the
-          // sealed controller directly and publish what it would send.
-          let result;
-          if (scenario.followUp) result = await controller.followUpQuestion(event, scenario.question);
-          else { controller.nextQuestion(event); result = await controller.submitQuestion(event, scenario.question); }
+          // Questions arrive from the call, never from the card: deliver each
+          // one through the listening path and publish what it would send.
+          controller.startListening(event);
+          await audioInput.onQuestion({ text: scenario.question, id: ++turn }, () => true);
+          const result = controller.getBrief(event);
           if (!result || result.ignored) { rows.push({ size, ...scenario, actualKind: 'unavailable', correct: false }); continue; }
           const measurement = await page.evaluate(async display => {
             const start = performance.now();
@@ -169,7 +171,6 @@ export async function runInterviewWindowE2E({ outputDir, label = 'session', asse
           const screenshot = path.join(directory, `${size}-${scenario.id}-failure.png`);
           try { await page.screenshot({ path: screenshot }); screenshots.push(screenshot); } catch { /* the page may already be closed; the original failure is already recorded */ }
           rows.push({ size, ...scenario, actualKind: 'error', correct: false });
-          controller.nextQuestion(event);
         }
       }
       await page.goto('about:blank');
@@ -188,7 +189,7 @@ export async function runInterviewWindowE2E({ outputDir, label = 'session', asse
     await fs.writeFile(path.join(directory, 'report.json'), JSON.stringify(report, null, 2));
     if (assertQuality) {
       assert.deepEqual(failures, [], 'Browser session must complete without errors');
-      assert.equal(rows.length, fixture.questions.length * 2, 'Every question must be measured at both sizes');
+      assert.equal(rows.length, questions.length * 2, 'Every question must be measured at both sizes');
       assert.ok(rows.every(row => Number.isFinite(row.renderMs)), 'Every session question must finish rendering');
       assert.equal(report.accuracy.correct, report.accuracy.total, 'All expected prepared matches, honest cues and abstentions must agree');
       assert.ok(Object.values(listening).every(Boolean), 'Listening must start when the card opens');
@@ -204,7 +205,7 @@ export async function runInterviewWindowE2E({ outputDir, label = 'session', asse
   } finally {
     controller?.cleanupOwner(owner); owner?.close();
     await browser?.close();
-    await fs.rm(bundleDir, { recursive: true, force: true });
+    await fs.rm(bundleDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 }
 

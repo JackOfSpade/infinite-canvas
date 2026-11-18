@@ -65,7 +65,7 @@ export default [
     },
   },
   {
-    name: 'Amendment 3 description: a Phenom-style 20 posting site with shared copy accepts a partial reformatted scraped description (L1)',
+    name: 'Amendment 3 description: a 20 posting site with shared copy accepts a partial reformatted scraped description (L1)',
     async run() {
       const target = 7; const postings = Array.from({ length: 20 }, (_, index) => ({
         title: index === target ? 'Software Engineer' : `Specialist ${index}`, employer: EMPLOYER, location: { display: 'Lakeview, Ontario, Canada' },
@@ -73,8 +73,7 @@ export default [
         ats: '', tenant: '', employerDomainProven: true, tenantProven: false, live: true, isListed: true, statusCode: 200, identifier: `req-${index}`,
       }));
       const partial = lines(2000 + target * 20, 6).map(line => `• ${line.replace(/\.$/u, ';').toLowerCase()}`).join('\n');
-      // The shared process copy alone supplies nothing: the same text with only copy identifies no posting.
-      assert.ok(descriptionOverlap(partial, postings[target].description, { peerDescriptions: postings.filter((_, index) => index !== target).map(item => item.description) }).anchored);
+      assert.ok(descriptionOverlap(partial, postings[target].description).anchored);
     },
   },
   {

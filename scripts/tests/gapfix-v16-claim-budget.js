@@ -14,19 +14,16 @@
 // What changed, and what each group below proves:
 //   owed       only the FIRST proof-bearing paragraph owes a claim span
 //              (MAX_EXPLICIT_CLAIM_PARAGRAPHS is one), counted by one function
-//              the gate and the drafting-stage reporter both read
+//              the gate reads
 //   gate       a first proof paragraph without a claim fails; a later one
 //              without a claim passes; a later claim that is malformed still
 //              fails; a later claim that is well formed (standalone or inline in
 //              the proof sentence) passes
-//   reporter   paragraphArgumentSpanGaps never reports a claim gap the gate
-//              would accept, and reports every one the gate cannot accept
 //   mutation   the constant, rewritten to two in a temporary copy of the
-//              module, moves the gate, the reporter and the printed rule
+//              module, moves the gate and the printed rule
 //   rule       the printed claim rule says a claim may be a short inline phrase
 //              naming the capability with the nouns of the cited evidence, the
-//              grammar it closes over is unchanged, and vacuous text still has
-//              no claim span (the cue was NOT widened)
+//              grammar it closes over is unchanged
 //   employer   a prior employer introduced by a role noun ("<modifiers> role at
 //              X") is accepted, a bare "At X, I ..." is still rejected, and
 //              removing the role noun brings the rejection back
@@ -43,7 +40,7 @@ import { pathToFileURL } from 'node:url';
 import { assert } from './testHelpers.js';
 import {
   ARGUMENT_CLAIM_SPAN_RULE, EXPLICIT_CLAIM_BUDGET_RULE, EXPLICIT_TRANSFER_BUDGET_RULE, MAX_EXPLICIT_CLAIM_PARAGRAPHS, MAX_EXPLICIT_TRANSFER_PARAGRAPHS,
-  OWING_CLAIM_PARAGRAPHS, checkParagraphArgumentLinks, checkPriorEmployerOpening, explicitClaimOwed, explicitTransferOwed, paragraphArgumentSpanGaps,
+  OWING_CLAIM_PARAGRAPHS, checkParagraphArgumentLinks, checkPriorEmployerOpening, explicitClaimOwed, explicitTransferOwed,
 } from '../../electron/ipc/coverLetterChecks.js';
 
 // ---------------------------------------------------------------------------
@@ -360,67 +357,7 @@ export default [
     },
   },
   {
-    name: 'Claim reporter: the drafting-stage reporter never reports a claim gap the gate would accept, and every gap it reports is one no claim span could close (subset, brute force over every word run, four domains)',
-    run() {
-      // Every contiguous run of words of a paragraph, as a candidate claim.
-      const wordRuns = paragraph => {
-        const words = paragraph.split(/\s+/u).filter(Boolean);
-        const runs = [];
-        for (let start = 0; start < words.length; start += 1) {
-          for (let end = start + 1; end <= words.length; end += 1) runs.push(words.slice(start, end).join(' '));
-        }
-        return runs;
-      };
-      const claimObservation = verdict => /argumentMapping\.claim\b/u.test(verdict.detail);
-      for (const domain of DOMAINS) {
-        const proof = domain.proofs[1];
-        const variants = { noCue: paragraphOf(proof, 'bare'), standalone: paragraphOf(proof, 'standalone'), inline: paragraphOf(proof, 'inline') };
-        // Where the variant stands decides whether it owes a claim: after the paragraph that owes it, or first.
-        const lettersFor = variant => ({
-          later: [domain.opening, paragraphOf(domain.proofs[0], 'first'), variant, domain.closing],
-          first: [domain.opening, variant, domain.closing],
-        });
-        for (const [shape, variant] of Object.entries(variants)) {
-          for (const [where, paragraphs] of Object.entries(lettersFor(variant))) {
-            const at = paragraphs.indexOf(variant);
-            const owes = explicitClaimOwed(paragraphs)[at];
-            assert(owes === (where === 'first'), `${domain.key}/${shape}/${where}: the count puts the obligation where the variant stands (${owes})`);
-            const gaps = paragraphArgumentSpanGaps(variant, domain.posting, { owesTransfer: false, owesClaim: owes });
-            const claimGap = gaps.some(gap => gap.field === 'claim');
-            // The reporter speaks only for a paragraph with no capability phrase at all, and only when that paragraph owes a claim.
-            assert(claimGap === (owes && shape === 'noCue'), `${domain.key}/${shape}/${where}: the reporter reports a claim gap exactly when the paragraph owes one and offers none (${JSON.stringify(gaps.map(gap => gap.field))})`);
-            if (claimGap) assert(gaps.find(gap => gap.field === 'claim').rule === ARGUMENT_CLAIM_SPAN_RULE, `${domain.key}: the claim gap carries the printed claim rule`);
-            // Subset: whenever the reporter reports it, the gate rejects EVERY claim a response could record, and the absent one.
-            const mappingFor = claim => {
-              const mapping = { proof: proof.proof, relevance: proof.proof, jobNeedQuote: proof.quote };
-              if (claim !== undefined) mapping.claim = claim;
-              const plan = { paragraphs: paragraphs.map((_, index) => ({ argumentMapping: index === at ? mapping : (paragraphs[index] === paragraphOf(domain.proofs[0], 'first') ? mappingOf(domain.proofs[0], 'first') : null) })) };
-              return checkParagraphArgumentLinks({ plan, paragraphs, jobText: domain.posting });
-            };
-            if (claimGap) {
-              assert(/argumentMapping\.claim is missing/u.test(mappingFor(undefined).detail), `${domain.key}/${shape}/${where}: with the gap reported, an absent claim is rejected by the gate`);
-              for (const run of wordRuns(variant)) {
-                assert(claimObservation(mappingFor(run)), `${domain.key}/${shape}/${where}: with the gap reported, the gate rejects the claim “${run}”`);
-              }
-            } else if (!owes) {
-              // And the converse that makes the budget real: nothing is asked of a later paragraph, whatever it offers.
-              assert(!claimObservation(mappingFor(undefined)), `${domain.key}/${shape}/${where}: the gate asks nothing of a later paragraph's claim (${mappingFor(undefined).detail})`);
-            }
-          }
-        }
-        // The default of the reporter is the OLD behaviour (every paragraph owes one), so a caller that does not pass the count is never
-        // more lenient than the gate; passing false is the only way to ask less.
-        const noCue = variants.noCue;
-        assert(paragraphArgumentSpanGaps(noCue, domain.posting, { owesTransfer: false }).some(gap => gap.field === 'claim'), `${domain.key}: without the count the reporter still asks for a claim`);
-        assert(paragraphArgumentSpanGaps(noCue, domain.posting).some(gap => gap.field === 'claim'), `${domain.key}: with no options at all the reporter still asks for a claim`);
-        assert(!paragraphArgumentSpanGaps(noCue, domain.posting, { owesTransfer: false, owesClaim: false }).some(gap => gap.field === 'claim'), `${domain.key}: only an explicit false relaxes it`);
-        // A paragraph with no proof of its own owes no mapping at all, whatever the flags say.
-        assert(paragraphArgumentSpanGaps(domain.opening, domain.posting, { owesClaim: true }).length === 0 && paragraphArgumentSpanGaps(domain.closing, domain.posting, { owesClaim: true }).length === 0, `${domain.key}: an opening and a closing owe nothing`);
-      }
-    },
-  },
-  {
-    name: 'Claim mutation: rewriting the constant to two in a temporary copy of the module moves the gate, the reporter and the printed rule together, and the real module is unchanged (A/B/C)',
+    name: 'Claim mutation: rewriting the constant to two in a temporary copy of the module moves the gate and the printed rule together, and the real module is unchanged (A/B)',
     async run() {
       const source = fs.readFileSync(path.resolve('electron/ipc/coverLetterChecks.js'), 'utf8');
       const declaration = 'export const MAX_EXPLICIT_CLAIM_PARAGRAPHS = 1;';
@@ -449,11 +386,6 @@ export default [
             `${domain.key}/B: the second paragraph's claim is owed at two and not at one (${detailOf(verdictTwo)})`);
           const supplied = letterOf(domain, ['first', 'standalone', 'bare']);
           assert(two.checkParagraphArgumentLinks({ plan: supplied.plan, paragraphs: supplied.paragraphs, jobText: domain.posting }).passed, `${domain.key}/B: supplying the second claim passes at two`);
-          // C: the reporter follows the count the caller reads from the same module, and the printed rule follows the number.
-          const bare = letter.paragraphs[2];
-          const reportedOne = control.paragraphArgumentSpanGaps(bare, domain.posting, { owesTransfer: false, owesClaim: control.explicitClaimOwed(letter.paragraphs)[2] });
-          const reportedTwo = two.paragraphArgumentSpanGaps(bare, domain.posting, { owesTransfer: false, owesClaim: two.explicitClaimOwed(letter.paragraphs)[2] });
-          assert(!reportedOne.some(gap => gap.field === 'claim') && reportedTwo.some(gap => gap.field === 'claim'), `${domain.key}/C: the reporter reports the second paragraph at two and not at one`);
         }
         assert(control.OWING_CLAIM_PARAGRAPHS === 'the first proof-bearing paragraph of the letter' && control.EXPLICIT_CLAIM_BUDGET_RULE.startsWith('only the first proof-bearing paragraph of the letter owes a claim span'),
           `the real number prints as one paragraph (${control.EXPLICIT_CLAIM_BUDGET_RULE})`);
@@ -471,7 +403,7 @@ export default [
     },
   },
   {
-    name: 'Claim rule: the printed rule says a claim may be a short inline phrase that names the capability with the cited evidence’s own nouns, keeps the closed grammar, gives no string to copy, and the cue was not widened (A/B/C)',
+    name: 'Claim rule: the printed rule says a claim may be a short inline phrase that names the capability with the cited evidence’s own nouns, keeps the closed grammar and gives no string to copy (A)',
     run() {
       const rule = ARGUMENT_CLAIM_SPAN_RULE;
       // A: the guidance a writer needs.
@@ -500,19 +432,6 @@ export default [
       assert(EXPLICIT_CLAIM_BUDGET_RULE === `only ${OWING_CLAIM_PARAGRAPHS} owes a claim span; a later proof-bearing paragraph owes only its proof span and its jobNeedQuote, may leave the claim out, and is held to the same shape for a claim span it records`,
         `the budget rule is the constant's phrase around the fixed clauses (${EXPLICIT_CLAIM_BUDGET_RULE})`);
 
-      // B: the cue was NOT widened. A paragraph whose only candidate-facing sentences are vacuous has no claim span, whatever its length.
-      const posting = DOMAINS[0].posting;
-      const proofSentence = `${DOMAINS[0].proofs[0].proof} ${DOMAINS[0].proofs[0].natural}`;
-      for (const vacuous of ['I am a dedicated team player.', 'I bring energy and enthusiasm to everything I touch.', 'Quality matters deeply to me.', 'I thrive in fast-paced settings and enjoy hard problems.',
-        'I am passionate about public infrastructure and about the people who rely on it.', 'I have always cared about doing the job right.']) {
-        const gaps = paragraphArgumentSpanGaps(`${vacuous} ${proofSentence}`, posting, { owesClaim: true });
-        assert(gaps.some(gap => gap.field === 'claim'), `a vacuous sentence is no claim span (${vacuous})`);
-      }
-      // C: and a concrete one is, flipping only that sentence.
-      for (const concrete of ['My culvert inspection practice began on a county road crew.', 'I have hands-on experience with drainage inspections.', 'My crossing checklist work spans three counties.']) {
-        const gaps = paragraphArgumentSpanGaps(`${concrete} ${proofSentence}`, posting, { owesClaim: true });
-        assert(!gaps.some(gap => gap.field === 'claim'), `a concrete capability sentence is a claim span (${concrete})`);
-      }
     },
   },
   {

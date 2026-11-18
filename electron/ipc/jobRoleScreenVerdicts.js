@@ -24,6 +24,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import electronPkg from 'electron';
 import { createFifoLock } from './asyncMutex.js';
+import { atomicWriteFile } from '../utils/atomicWrite.js';
 
 const FILE_NAME = 'job-role-screen-verdicts.json';
 // 3: the screen also removes test/placeholder postings, so a 'match' saved
@@ -122,15 +123,14 @@ export function createJobRoleScreenVerdictStore(dir, { maxEntries = ROLE_SCREEN_
       entries.clear();
       for (const [key, value] of rows) entries.set(key, value);
     }
-    await fs.mkdir(path.dirname(file), { recursive: true });
-    const temp = `${file}.${process.pid}.${++tempSequence}.tmp`;
     const doc = { version: VERSION, entries: rows.map(([key, value]) => [key, value.outcome, value.reason, value.usedAt, value.companies]) };
-    try {
-      await fs.writeFile(temp, `${JSON.stringify(doc)}\n`, { encoding: 'utf8', mode: 0o600 });
-      await fs.rename(temp, file);
-    } finally {
-      await fs.rm(temp, { force: true }).catch(() => {});
-    }
+    await atomicWriteFile(file, `${JSON.stringify(doc)}\n`, {
+      fs,
+      mkdir: true,
+      flag: null,
+      tempPath: () => `${file}.${process.pid}.${++tempSequence}.tmp`,
+      cleanup: 'rm',
+    });
   }
 
   // Returns Map(normalizedTitle -> {outcome, reason}) for saved titles that

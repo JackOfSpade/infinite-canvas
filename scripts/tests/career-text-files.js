@@ -1,5 +1,6 @@
 import { assert } from './testHelpers.js';
 import { readFileSync } from 'node:fs';
+import { readJobsSource } from './jobsSourceFixture.mjs';
 import {
   CAREER_TEXT_EXTENSIONS,
   careerFileNotTextError,
@@ -61,7 +62,7 @@ export default [
       assert(/!isCareerTextFileName\(p\)/.test(source), 'admission refuses a non-text path');
       assert(source.includes('accept=".txt,.md,text/plain,text/markdown"'), 'the Mac file picker offers only text files');
       assert(!/PDF, DOCX/.test(source), 'no copy still invites PDF or Word files');
-      const jobs = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      const jobs = readJobsSource('careerInput');
       assert(jobs.includes("throw careerFileNotTextError(name, 'extension')"), 'the main process refuses non-text files too');
     },
   },

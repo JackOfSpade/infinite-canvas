@@ -31,7 +31,7 @@
 //
 // Nothing in production names any of the fixtures.
 import { assert } from './testHelpers.js';
-import { checkParagraphArgumentLinks, paragraphArgumentSpanGaps } from '../../electron/ipc/coverLetterChecks.js';
+import { checkParagraphArgumentLinks } from '../../electron/ipc/coverLetterChecks.js';
 
 const DOMAINS = Object.freeze([
   {
@@ -178,15 +178,12 @@ export default [
         const distinct = gate(domain, first, laterParagraph(domain, domain.posting[1]));
         assert(distinct.passed, `${domain.key}/C: bound to a different posting sentence the letter passes (${detailOf(distinct)})`);
         assert(!gate(domain, first, laterParagraph(domain, domain.posting[0])).passed, `${domain.key}/C: and bound to the first paragraph's span again it fails`);
-        // D: only the degenerate case is read. A proof that shares no word with the sentence it is bound to stays writable, a paragraph that records no mapping is not counted, and the drafting stage, which cannot see a quote, is told nothing about it.
+        // D: only the degenerate case is read. A proof that shares no word with the sentence it is bound to stays writable, a paragraph that records no mapping is not counted.
         const unrelated = gate(domain, first, laterParagraph(domain, domain.posting[2]));
         assert(unrelated.passed, `${domain.key}/D: a quote bound to a paragraph by the writer alone is not this gate's concern (${detailOf(unrelated)})`);
         if (sharedWords(laterParagraph(domain).body, domain.posting[2]).length === 0) disjoint += 1;
         const unmappedOpeningAndClosing = gate(domain, first, laterParagraph(domain, domain.posting[1]), { mappings: [null, first.mapping, { ...laterParagraph(domain, domain.posting[1]).mapping }, null] });
         assert(unmappedOpeningAndClosing.passed, `${domain.key}/D: paragraphs without a mapping are not counted (${detailOf(unmappedOpeningAndClosing)})`);
-        const owes = [{ owesTransfer: true, owesClaim: true, owesRelevance: true }, { owesTransfer: false, owesClaim: false, owesRelevance: false }];
-        const reported = [first.body, laterParagraph(domain).body].map((body, index) => paragraphArgumentSpanGaps(body, domain.posting.join(' '), owes[index]));
-        assert(reported.every(gaps => gaps.length === 0), `${domain.key}/D: the drafting-stage reporter says nothing about a quote (${JSON.stringify(reported)})`);
       }
       assert(disjoint >= 2, `D: at least two domains bind a paragraph to a posting sentence it shares no content word with, and still pass (${disjoint})`);
     },

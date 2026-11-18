@@ -16,6 +16,7 @@ import {
 } from './canvasRecoveryPaths.js';
 import { getCurrentIpcRequestContext } from './ipcUtils.js';
 import { fsyncDirectory } from '../utils/pathSafety.js';
+import { atomicWriteFile } from '../utils/atomicWrite.js';
 import { createKeyedLock } from './asyncMutex.js';
 
 const VERSION = 1;
@@ -292,36 +293,23 @@ async function atomicWrite(filePath, value, options = {}) {
   if (Buffer.byteLength(serialized, 'utf8') > MAX_JSON_BYTES) {
     throw new Error('Marketplace recovery checkpoint is too large to persist safely.');
   }
-  const temp = `${filePath}.${process.pid}.${tmpSequence++}.${crypto.randomBytes(12).toString('hex')}.tmp`;
-  let handle = null;
-  try {
-    const flags = fs.constants.O_CREAT
+  await atomicWriteFile(filePath, serialized, {
+    syncFile: true,
+    openFlags: fs.constants.O_CREAT
       | fs.constants.O_EXCL
       | fs.constants.O_WRONLY
-      | (fs.constants.O_NOFOLLOW || 0);
-    handle = await fs.promises.open(temp, flags, 0o600);
-    await handle.writeFile(serialized, 'utf8');
-    await handle.sync();
-    await handle.close();
-    handle = null;
-    if (options.signal?.aborted) {
-      const error = options.signal.reason instanceof Error
-        ? options.signal.reason
+      | (fs.constants.O_NOFOLLOW || 0),
+    syncDirectory: 'strict',
+    tempPath: () => `${filePath}.${process.pid}.${tmpSequence++}.${crypto.randomBytes(12).toString('hex')}.tmp`,
+    signal: options.signal,
+    abortError: signal => {
+      const error = signal.reason instanceof Error
+        ? signal.reason
         : new Error('Marketplace recovery checkpoint aborted before commit.');
       if (!error.name || error.name === 'Error') error.name = 'AbortError';
-      throw error;
-    }
-    await fs.promises.rename(temp, filePath);
-    // rename durability is a directory metadata property. Best effort on
-    // filesystems that reject directory fsync, but never skip the file fsync.
-    const directory = await fs.promises.open(path.dirname(filePath), 'r').catch(() => null);
-    if (directory) {
-      try { await directory.sync(); } finally { await directory.close(); }
-    }
-  } finally {
-    if (handle) await handle.close().catch(() => {});
-    await fs.promises.unlink(temp).catch(() => {});
-  }
+      return error;
+    },
+  });
 }
 
 async function readUnlocked(scope) {

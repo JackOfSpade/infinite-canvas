@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
+import { readJobsSource } from './jobsSourceFixture.mjs';
 import vm from 'node:vm';
 import { createOfficialPostingRecoveryPassResolver, officialPostingDedup, resolveOfficialPostings } from '../../electron/ipc/officialPostingService.js';
 import { scoreSafeRowsWithBoardClosed } from '../../electron/ipc/officialPostingBoardClosed.js';
@@ -15,7 +15,7 @@ function result(rows, telemetry = null) {
   return { jobs: dedup.kept, officialPosting: telemetry, officialDedupDropped: dedup.dropped.length, officialDedupDrops: dedup.dropped };
 }
 function actualGenericGlue(resolveRows, row, checkpoints) {
-  const source = fs.readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+  const source = readJobsSource('recoveryHandlers');
   const generic = source.indexOf('const runGenericResolve = async () =>');
   const init = source.indexOf('const resolveGenericPostings =', generic);
   const persist = source.indexOf('const persistSourceRecoveryJobs = async', generic);

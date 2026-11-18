@@ -85,7 +85,7 @@ output context restricts font availability.
 |--------------|-----------|--------|---------------------|----------|----------------------|
 | `--fs-display` | 28pt    | 600    | `--lh-display` 1.05 | -0.012em | candidate name       |
 | `--fs-h1`      | 18pt    | —      | —                   | —        | (reserved — no component uses it) |
-| `--fs-h2`      |  9pt    | 500    | `1` (tight box, so the hairline rule sits at cap mid) | 0.14em uppercase | section headers (Experience, Skills…) |
+| `--fs-h2`      |  9pt    | 500    | `1` (tight box, so the hairline rule sits at cap mid) | normal, uppercase | section headers (Experience, Skills…) |
 | `--fs-h3`      | 11pt    | 600    | inherited (`--lh-body` 1.45) | -0.005em | role title, company, project name |
 | `--fs-body`    | 10.25pt | 400    | `--lh-body` 1.45    |  0       | bullets, paragraphs |
 | `--fs-small`   | 9.5pt   | 400    | inherited 1.45; Skills `dd` uses `--lh-snug` 1.35 |  0 | dates, locations, role meta, Skills |
@@ -116,7 +116,7 @@ figure.
 
 - `h1` is unused in the published template. Reserved for "document
   title" if a future variant adds one.
-- `h2` is **always** uppercase, tracked +0.14em, and paired with a
+- `h2` is **always** uppercase, untracked (so the PDF text stays contiguous), and paired with a
   hairline rule that fills the remainder of the line. Never bold.
   Never coloured. Never larger than 9pt. The visual quietness is the
   point.

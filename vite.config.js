@@ -89,10 +89,10 @@ export default defineConfig({
                 // contract while making the entry auditable.
                 manualChunks(id) {
                   const normalized = id.replaceAll('\\', '/');
-                  if (normalized.endsWith('/electron/ipc/jobs.js')) return 'jobs';
+                  if (normalized.endsWith('/electron/ipc/jobs.js') || normalized.includes('/electron/ipc/jobs/')) return 'jobs';
                   if (normalized.endsWith('/electron/ipc/localAiApplication.js')) return 'local-application';
                   if (normalized.endsWith('/electron/ipc/bugReport/jobsSnapshot.js')) return 'bug-report-jobs';
-                  if (normalized.endsWith('/electron/ipc/browser/manualScraper.js')) return 'manual-scraper';
+                  if (normalized.endsWith('/electron/ipc/browser/manualScraper.js') || normalized.includes('/electron/ipc/browser/manualScraper/')) return 'manual-scraper';
                   return undefined;
                 },
               },

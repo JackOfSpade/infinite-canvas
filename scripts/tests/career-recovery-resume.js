@@ -13,6 +13,7 @@
 // content-bound identity and honest recovery.
 import { __allowDurableTaskIdsForTests } from '../../electron/ipc/nonApiAi.js';
 import { execFileSync } from 'node:child_process';
+import { readJobsSource } from './jobsSourceFixture.mjs';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
@@ -458,7 +459,7 @@ export default [
   {
     name: 'career recovery: parse-career-data records its binding before the first handoff and cached snapshots never create a durable run',
     run: () => {
-      const jobsSource = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      const jobsSource = readJobsSource('coreHandlers');
       const handler = jobsSource.slice(jobsSource.indexOf("handleSafe('parse-career-data'"));
       const miss = handler.indexOf("cacheTelemetry.outcome = 'miss'");
       const bind = handler.indexOf('await bindCareerCompileRun(');

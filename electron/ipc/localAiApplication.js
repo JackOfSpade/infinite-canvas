@@ -28,8 +28,8 @@ import { renderPdf as productionRenderPdf, applyDualPdf, renderedPageLayoutIssue
 import { replaceApplicationBundleAtomically } from './applicationFileTransaction.js';
 import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC, APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION, APPLICATION_PDF_RECONCILE_REVISION, APPLICATION_PDF_VARIANT_REVISION, GENERATION_AUDIT_VERSION, applicationVariantAttrsForJob, assertRetainedResumeRoleBullets, evaluateResumeProseChecks, extractResumeEvidence, formatTypeAreaUtilization, getApplicationTelemetry, isPendingApplicationWorkspaceSaveInFlight, normalizeApplicationAdditionalNotes, normalizeCoverLetterParagraphs, recordApplicationTelemetry, registerPendingApplicationWorkspace, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, resumeTypeAreaUtilization, targetPageCountForJob, withUnregisteredApplicationWorkspacePruneClaim } from './jobApplication.js';
 import { applicationConvergenceInstruction, expectedApplicationQualityDecision, isApplicationQualityDecision } from './applicationConvergence.js';
-import { authorCoverLetterEnvelope, checkEvidenceGrounding, checkMappingNarrativeStructure, checkParagraphArgumentLinks, checkRoleThesis, evaluateCoverLetterChecks, findUnsupportedDurationClaim, formatCoverLetterDate, LETTER_PROPORTION_RULE, MAX_ARGUMENT_MAPPING_FIELD_CHARS, MIN_STANDALONE_SENTENCE_PARAGRAPH_ALLOWANCE, OWING_PROOF_PARAGRAPHS, MAX_LETTER_FIGURES, sentenceSegments, TRANSFER_BENEFIT_SUPPORT_RULE } from './coverLetterChecks.js';
-import { checkDisposition, partitionCheckResults } from './coverLetterChecks.js';
+import { authorCoverLetterEnvelope, checkEvidenceGrounding, checkParagraphArgumentLinks, checkRoleThesis, evaluateCoverLetterChecks, findUnsupportedDurationClaim, formatCoverLetterDate, LETTER_PROPORTION_RULE, MAX_ARGUMENT_MAPPING_FIELD_CHARS, MIN_STANDALONE_SENTENCE_PARAGRAPH_ALLOWANCE, OWING_PROOF_PARAGRAPHS, MAX_LETTER_FIGURES, sentenceSegments, TRANSFER_BENEFIT_SUPPORT_RULE } from './coverLetterChecks.js';
+import { partitionCheckResults } from './coverLetterChecks.js';
 import { RESUME_CHECK_DISPOSITIONS, partitionResumeCheckResults } from './resumeCheckDispositions.js';
 import { atomicWriteJson, ensureDirectoryWithinRoot, isWithinDirectory } from '../utils/pathSafety.js';
 import { logger } from '../logger.js';
@@ -3682,8 +3682,6 @@ export const MAX_CORRECTION_STAGE_PROMPT_SHARE = 0.5;
 // runs. A missing entry is exactly how the defect above reached a user, so it
 // must never degrade into a silent empty brief again.
 export const PASTE_CHECK_PROSE_UNITS = Object.freeze({
-  'additive-seam': 'prose-unit',
-  'adjacent-employer-repetition': 'prose-unit',
   'anchor-relevance': 'prose-unit',
   // Counts the letter's body paragraphs, not one paragraph's wording, and the
   // repair is to fold or drop the extra point: prose, in the same unit as its
@@ -3695,26 +3693,16 @@ export const PASTE_CHECK_PROSE_UNITS = Object.freeze({
   // subject of the action — so it scopes to the same unit as its siblings.
   'candidate-agency': 'prose-unit',
   'claimed-equivalence': 'prose-unit',
-  'company-specificity': 'prose-unit',
   'compound-hyphenation': 'prose-unit',
   'containerization-technology-roles': 'prose-unit',
-  // A demonstrative noun no earlier sentence of its paragraph used; the repair
-  // rewrites the sentence it names.
-  'dangling-demonstrative': 'prose-unit',
-  'dangling-paragraph-transition': 'prose-unit',
-  'detached-relevance-claim': 'prose-unit',
-  'direct-welcome-closing': 'prose-unit',
   // Reads a rendered paragraph's employer/title framing against the rendered
   // résumé's explicit dates. Rewording that paragraph is the only repair.
   'ended-role-current-employment': 'prose-unit',
-  'entailed-premise': 'prose-unit',
-  'experience-infinitive-grammar': 'prose-unit',
   // Reads the letter's figures against the frozen résumé bullet the argument
   // quotes, but the repair is always in the prose that states the figure.
   'figure-discipline': 'prose-unit',
   'generic-phrases': 'prose-unit',
   'interest-framing': 'prose-unit',
-  'introductory-workplace-comma': 'prose-unit',
   // Grades how the whole letter is cut (paragraph count, standalone sentences,
   // first-person share, paragraphs per quote), not one paragraph's wording. The
   // repair is still prose: merging, appending or deleting paragraphs, which is
@@ -3725,13 +3713,9 @@ export const PASTE_CHECK_PROSE_UNITS = Object.freeze({
   // scopes a rewrite it does not need; that branch fires only on a plan field
   // this stage does not write, and the paragraph branch is what it reports.
   'logistics-exclusion': 'prose-unit',
-  'low-information-tool-build': 'prose-unit',
   'modifier-attachment': 'prose-unit',
-  'migration-object-clarity': 'prose-unit',
   'named-artifact-introduction': 'prose-unit',
   'opening-artifact-context': 'prose-unit',
-  'opening-demonstrative': 'prose-unit',
-  'opening-employer-shorthand': 'prose-unit',
   'opening-posting-restatement': 'prose-unit',
   'opening-job-summary-scaffolding': 'prose-unit',
   'parallel-structure': 'prose-unit',
@@ -3742,7 +3726,6 @@ export const PASTE_CHECK_PROSE_UNITS = Object.freeze({
   // the rules a rewrite is measured by are the ones this item may need.
   'paragraph-argument-links': 'prose-unit',
   'paragraph-openers': 'prose-unit',
-  'plain-register': 'prose-unit',
   'posting-reference': 'prose-unit',
   'prior-employer-opening': 'prose-unit',
   // Names the paragraph that writes part of an employer's name; writing the
@@ -3757,17 +3740,11 @@ export const PASTE_CHECK_PROSE_UNITS = Object.freeze({
   // always rewriting one of the sentences it names, so it scopes to the same
   // prose unit its siblings do.
   'repeated-phrase': 'prose-unit',
-  'repeated-sentence-shape': 'prose-unit',
-  // Reads consecutive paragraphs' transfer carriers against each other, and the
-  // repair is rewriting the carrier in one of the paragraphs it names.
-  'repeated-transfer-carrier': 'prose-unit',
-  'responsibility-transition': 'prose-unit',
   'resume-bullet-focus': 'prose-unit',
   'resume-bullet-length': 'prose-unit',
   'resume-bullet-opening-variety': 'prose-unit',
   'resume-bullet-self-containment': 'prose-unit',
   'resume-role-bullet-budget': 'prose-unit',
-  'salient-phrase-echo': 'prose-unit',
   'sentence-length': 'prose-unit',
   // Counts the usable body paragraphs, so its one failure — a letter with
   // none — is repaired by writing them.
@@ -3780,23 +3757,14 @@ export const PASTE_CHECK_PROSE_UNITS = Object.freeze({
   // A prospective sentence that names another employer is repaired in that
   // sentence; it is not an envelope or argument-plan mismatch.
   'target-company-binding': 'prose-unit',
-  'tool-calls-garden-path': 'prose-unit',
   // A sentence of a proof-bearing paragraph names a benefit that the
   // paragraph's proof sentences and cited quotes never state; the repair
   // rewrites the sentence it names.
   'transfer-benefit-support': 'prose-unit',
-  // More paragraphs carry a stock transfer frame than the letter's budget
-  // allows; the repair rewrites the ending of the paragraphs it names.
-  'transfer-carrier-budget': 'prose-unit',
-  'vague-domain-work-label': 'prose-unit',
-  'visual-reference-precision': 'prose-unit',
   // Grades coverLetterArgument.<slot>.evidence against the frozen résumé
   // bullets. It names a mapping, never a paragraph, and is repaired by quoting
   // the bullet the argument actually argues from.
   'evidence-grounding': 'field',
-  // Grades the argument plan's narrative shape: which mapping is primary and
-  // how a second one relates to it.
-  'mapping-narrative-structure': 'field',
   // Grades coverLetter.roleThesis, which is one field and no paragraph.
   'role-thesis': 'field',
 });
@@ -3925,8 +3893,8 @@ function pasteCorrectionItemProsePart(stage, item, unmapped) {
 // Per-check OBSERVATION FINGERPRINT: a short, stable, privacy-safe digest that
 // tells apart WHICH BRANCH of a check fired, not merely which check id did.
 // This exists because one check id can name several structurally different
-// failures with different repairs — coverLetterChecks.js's
-// checkDirectWelcomeClosing alone has four (a conditional/deferential modal
+// failures with different repairs — the since-retired
+// direct-welcome-closing check alone had four (a conditional/deferential modal
 // opener, conversation-or-learning intent without contribution, an
 // employer-choice question, and a direct invitation without contribution) —
 // and a receipt that prints only the id cannot tell a reader whether a run of
@@ -3958,7 +3926,7 @@ function pasteCorrectionItemProsePart(stage, item, unmapped) {
 //
 // The digest is truncated to FINGERPRINT_HEX_CHARS hex characters. Eight is
 // far more than needed to tell apart the handful of branches any one check in
-// this module has (four, on checkDirectWelcomeClosing, is the most measured),
+// this module has (four, on the since-retired direct-welcome-closing check, was the most measured),
 // and truncating this short is deliberate, not merely compact: a short digest
 // is weak BY CONSTRUCTION, which is the point — it must never be strong enough
 // to let a reader confirm a guess at the letter's actual wording by hashing
@@ -5691,15 +5659,14 @@ function pasteAcceptedAdvisories(state, response, input) {
 // A check added to the battery reaches the totality test without a second
 // edit, which is what keeps PASTE_CHECK_PROSE_UNITS total as the pipeline
 // grows.
-function pasteCoverLetterChecks({ plan, paragraphs, evidence, jobText, researchText, companyName, postedBy = '', referenceDate = null, paragraphCitations = null, citationPhase = 'draft', v2 = false }, { activeOnly = true } = {}) {
+function pasteCoverLetterChecks({ plan, paragraphs, evidence, jobText, researchText, companyName, postedBy = '', referenceDate = null, paragraphCitations = null, citationPhase = 'draft', v2 = false }) {
   if (Array.isArray(paragraphs) && paragraphs.length) recordApplicationCitationFlow({
     phase: citationPhase, paragraphs, citations: paragraphCitations, v2,
   });
   return [
     checkRoleThesis(plan),
-    ...(activeOnly && checkDisposition('mapping-narrative-structure') === 'off' ? [] : [checkMappingNarrativeStructure(plan)]),
     checkEvidenceGrounding(plan, evidence),
-    ...evaluateCoverLetterChecks({ plan, paragraphs, evidence, jobText, researchText, companyName, forbiddenNames: postedBy ? [postedBy] : [], referenceDate, paragraphCitations, activeOnly }),
+    ...evaluateCoverLetterChecks({ plan, paragraphs, evidence, jobText, researchText, companyName, forbiddenNames: postedBy ? [postedBy] : [], referenceDate, paragraphCitations }),
   ];
 }
 
@@ -5760,7 +5727,7 @@ export function pasteReportableCheckIds() {
   return [...new Set([
     ...pasteCoverLetterChecks({
       plan: {}, paragraphs: [], evidence: {}, jobText: '', researchText: '', companyName: '',
-    }, { activeOnly: false }).map(check => check.id),
+    }).map(check => check.id),
     // Appended by the completion gate alone, where the job's frozen contract
     // records argumentMappings at all, and reported on a review round behind
     // the cover-letter document name.
@@ -6283,11 +6250,9 @@ function pasteResumeCompletionTwinErrors(resume, state, input, { includeDuration
 
 // checkParagraphArgumentLinks is the one completion rule whose inputs are
 // written by two different stages: the audit by the review, the paragraphs
-// three stages earlier. paragraphArgumentSpanGaps() reports only the half the
-// letter alone decides, so it can never reject a letter the gate accepts — but
-// it fires only where that gate runs at all. Both conditions are read off this
-// job's own frozen contract, the same fields completedResultValidationOptions
-// resolves: an audit contract the job never carried means no audit is written,
+// three stages earlier. It runs only where this job's frozen contract records
+// argumentMappings at all, which two conditions decide, read off the same
+// fields completedResultValidationOptions resolves: an audit contract the job never carried means no audit is written,
 // and a checklist below version 3 means no argumentMapping is recorded, and in
 // either state the completion gate asks nothing of these paragraphs.
 // Whether this job's frozen contract makes the review record argumentMappings
@@ -9400,17 +9365,17 @@ const COVER_LETTER_PROPORTION_REVISION_RULE = `For the cover letter, ${LETTER_PR
 // give fit feedback stable identifiers and only the rule text whose measured
 // check actually failed.
 const COVER_LETTER_CORRECTIVE_RULES = Object.freeze([
-  { id: 'CL-COHESION', rule: COVER_LETTER_COHESION_REVISION_RULE, checks: /(?:redundan|generic|interest|shape|transition|seam|responsibility|repeated|dangling|plain-register|entailed)/u },
-  { id: 'CL-COPY', rule: COVER_LETTER_COPY_PRECISION_RULE, checks: /(?:punctuation|compound|parallel|modifier|migration|closing|visual|comma|infinitive)/u },
+  { id: 'CL-COHESION', rule: COVER_LETTER_COHESION_REVISION_RULE, checks: /(?:redundan|generic|interest|shape|repeated)/u },
+  { id: 'CL-COPY', rule: COVER_LETTER_COPY_PRECISION_RULE, checks: /punctuation/u },
   { id: 'CL-RELEVANCE', rule: COVER_LETTER_RELEVANCE_LINK_RULE, checks: /(?:anchor|scope|relevance|prospective|equivalence)/u },
-  { id: 'CL-TRANSFER', rule: COVER_LETTER_TRANSFER_RULE, checks: /(?:tool|container|equivalence|scope|anchor|^transfer-)/u },
+  { id: 'CL-TRANSFER', rule: COVER_LETTER_TRANSFER_RULE, checks: /(?:container|equivalence|scope|anchor|^transfer-)/u },
   { id: 'CL-OPENING', rule: COVER_LETTER_OPENING_CONTEXT_RULE, checks: /(?:opening|posting-reference|interest|prior-employer|artifact)/u },
   { id: 'CL-AGENCY', rule: COVER_LETTER_CANDIDATE_AGENCY_RULE, checks: /candidate-agency/u },
   { id: 'CL-PROPORTION', rule: COVER_LETTER_PROPORTION_REVISION_RULE, checks: /letter-proportion/u },
-  { id: 'CL-WARRANT', rule: COVER_LETTER_WARRANT_RULE, checks: /(?:detached|entailed|relevance)/u },
-  { id: 'CL-SENTENCE', rule: COVER_LETTER_SENTENCE_FLEXIBILITY_RULE, checks: /(?:sentence|parallel|shape)/u },
+  { id: 'CL-WARRANT', rule: COVER_LETTER_WARRANT_RULE, checks: /relevance/u },
+  { id: 'CL-SENTENCE', rule: COVER_LETTER_SENTENCE_FLEXIBILITY_RULE, checks: /(?:sentence|shape)/u },
   { id: 'CL-PRIOR-CONTEXT', rule: COVER_LETTER_PRIOR_WORK_CONTEXT_RULE, checks: /(?:prior-employer|opening|artifact)/u },
-  { id: 'CL-REFERENTS', rule: COVER_LETTER_BOUNDARY_REFERENCE_RULE, checks: /(?:reference|demonstrative|employer|transition)/u },
+  { id: 'CL-REFERENTS', rule: COVER_LETTER_BOUNDARY_REFERENCE_RULE, checks: /(?:reference|employer)/u },
 ]);
 
 function localizedCoverLetterCorrectiveGuidance(checks) {
@@ -14311,7 +14276,7 @@ function localCoverLetterPlan(argument) {
 // the wrong half, so their repair is the letter document rather than its
 // prose. Every other check in that battery reads the paragraphs alone.
 const ARGUMENT_GRADED_COVER_CHECK_IDS = new Set([
-  'role-thesis', 'mapping-narrative-structure', 'evidence-grounding',
+  'role-thesis', 'evidence-grounding',
   'shape', 'figure-discipline', 'logistics-exclusion', 'target-claim-scope',
 ]);
 

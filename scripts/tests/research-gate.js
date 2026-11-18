@@ -41,10 +41,10 @@ import { officialPostingDisplay } from '../../src/utils/officialPostingDisplay.j
 import { collectOfficialPostingReport } from '../../src/utils/officialPostingReport.js';
 import { projectOfficialPostingGenerationJob } from '../../src/utils/officialPostingPreparation.js';
 import { carryBoardRescores, runBoardResearchStage } from '../../src/nodes/jobboard/jobBoardResearchStage.js';
+import { readAllJobsSources, readJobsSource, readJobsSources } from './jobsSourceFixture.mjs';
 
 const AT = '2026-10-25T12:00:00.000Z';
 const PIN = 'b'.repeat(64);
-const readSource = relative => fs.readFileSync(new URL(`../../${relative}`, import.meta.url), 'utf8');
 const between = (source, start, end) => {
   const from = source.indexOf(start);
   assert.ok(from >= 0, `missing source marker ${start}`);
@@ -262,7 +262,7 @@ export default [
   {
     name: 'research gate [3 resolve-job-source generic Solve]: the real generic recovery glue settles through the scrape settler only',
     async run() {
-      const source = readSource('electron/ipc/jobs.js');
+      const source = readJobsSource('recoveryHandlers');
       const generic = between(source, 'const runGenericResolve = async () =>', "checkpointContinuationBeforeReply('resolve-job-source')");
       assert.doesNotMatch(generic, RESEARCH_IDENTIFIERS, 'the generic Solve branch names no research function');
       const init = source.indexOf('const resolveGenericPostings =', source.indexOf('const runGenericResolve = async () =>'));
@@ -303,7 +303,7 @@ export default [
   {
     name: 'research gate [4 resolve-job-source LinkedIn Solve]: the admitForScoring wiring settles through the scrape settler only',
     async run() {
-      const source = readSource('electron/ipc/jobs.js');
+      const source = readJobsSource('recoveryHandlers');
       const linked = between(source, 'const isLinkedInReEnrich =', "// Use the source's ordinary list extractor");
       assert.doesNotMatch(linked, RESEARCH_IDENTIFIERS, 'the LinkedIn Solve branch names no research function');
       const admitStart = linked.indexOf('const admitForScoring =');
@@ -363,7 +363,7 @@ export default [
   {
     name: 'research gate [6 resume-job-source native resume]: the Indeed resume slice settles scraped rows without research',
     async run() {
-      const source = readSource('electron/ipc/jobs.js');
+      const source = readJobsSource('recoveryHandlers');
       const handler = between(source, "handleSafe('resume-job-source',", "checkpointContinuationBeforeReply('resume-job-source')");
       assert.doesNotMatch(handler, RESEARCH_IDENTIFIERS, 'the whole resume handler names no research function');
       const slice = between(handler, 'const result = await withSharedProfileLock(() => fetchIndeedListingsBrowser(', 'const enrichment = {');
@@ -395,17 +395,18 @@ export default [
   {
     name: 'research gate: every research call in jobs.js lives inside settle-board-research, and no search path reads the lookup dependency',
     run() {
-      const source = readSource('electron/ipc/jobs.js');
-      const research = between(source, "handleSafe('settle-board-research',", "handleSafe('confirm-job-location-consolidations',");
-      const outside = source.replace(research, '');
+      const source = readJobsSources('jobs', 'searchHandlers');
+      const boardSource = readJobsSource('boardHandlers');
+      const research = between(boardSource, "handleSafe('settle-board-research',", "handleSafe('confirm-job-location-consolidations',");
+      const outside = `${source}\n${boardSource.replace(research, '')}\n${readJobsSource('coreHandlers')}`;
       // Imports and the helper definition are the only other mentions.
       const calls = outside.split('\n').filter(line => !/^\s*(import |\/\/|\*)/u.test(line)
         && /\b(recheckPendingListings|officialPostingDedup|researchDeferredJobPreferences|createListingLivenessSearchSession|resolveOfficialPostings|refreshOfficialPostingEntries)\s*\(/u.test(line));
       assert.deepEqual(calls, [], 'no research function is called outside the Board research handler');
-      assert.equal([...outside.matchAll(/rescoreMaterialOfficialText\(/gu)].length, 1, 'the rescore helper is defined once and called only inside the handler');
-      assert.doesNotMatch(source, /resolveScoreSafePostings|dependencies\.resolveOfficialPostings|Finding official postings/u);
-      for (const [start, end] of [["handleSafe('search-jobs',", "handleSafe('peek-job-run',"], ["handleSafe('score-jobs',", "handleSafe('settle-board-research',"]]) {
-        assert.doesNotMatch(between(source, start, end), RESEARCH_IDENTIFIERS, `${start} names no research function`);
+      assert.equal([...`${outside}\n${readJobsSource('scoring')}`.matchAll(/rescoreMaterialOfficialText\(/gu)].length, 1, 'the rescore helper is defined once and called only inside the handler');
+      assert.doesNotMatch(readAllJobsSources(), /resolveScoreSafePostings|dependencies\.resolveOfficialPostings|Finding official postings/u);
+      for (const [text, start, end] of [[source, "handleSafe('search-jobs',", "handleSafe('search-jobs-single-source',"], [boardSource, "handleSafe('score-jobs',", "handleSafe('settle-board-research',"]]) {
+        assert.doesNotMatch(between(text, start, end), RESEARCH_IDENTIFIERS, `${start} names no research function`);
       }
     },
   },

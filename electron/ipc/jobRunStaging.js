@@ -674,6 +674,8 @@ function sanitizeReceiptSource(rawSource) {
     // Dated cards the collection window dropped inside the scraper. Without it the
     // traversed → retained gap reads as unexplained loss.
     ...(receiptNumber(source.windowDropped) > 0 ? { windowDropped: receiptNumber(source.windowDropped) } : {}),
+    // Cards left unopened because an earlier run already read or showed them.
+    ...(receiptNumber(source.alreadyReadSkipped) > 0 ? { alreadyReadSkipped: receiptNumber(source.alreadyReadSkipped) } : {}),
     // Which field checks failed, as known field names and counts only.
     ...(healthFailures.length > 0 ? { healthFailures } : {}),
     ...(receiptNumber(source.sponsoredDropped) > 0 ? { sponsoredDropped: receiptNumber(source.sponsoredDropped) } : {}),

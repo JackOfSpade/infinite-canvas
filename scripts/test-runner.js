@@ -11,6 +11,7 @@ import job_board_reporting from './tests/job-board-reporting.js';
 import job_board_official_posting_refresh from './tests/job-board-official-posting-refresh.js';
 import fs from 'node:fs';
 import base64 from './tests/base64.js';
+import atomic_write from './tests/atomic-write.js';
 import marketplace_monitor from './tests/marketplace-monitor.js';
 import ai_models from './tests/ai-models.js';
 import fixtures_canvas from './tests/fixtures-canvas.js';
@@ -315,12 +316,10 @@ import gapfix_v16_claim_budget from './tests/gapfix-v16-claim-budget.js';
 import gapfix_v16_prompts from './tests/gapfix-v16-prompts.js';
 import gapfix_v16_resume_dates from './tests/gapfix-v16-resume-dates.js';
 import gapfix_v16_verb_fidelity from './tests/gapfix-v16-verb-fidelity.js';
-import gapfix_v16b_closing_authorship from './tests/gapfix-v16b-closing-authorship.js';
 import gapfix_v16b_contract_consistency from './tests/gapfix-v16b-contract-consistency.js';
 import gapfix_v16b_letter_truthfulness from './tests/gapfix-v16b-letter-truthfulness.js';
 import gapfix_v16b_relevance_budget from './tests/gapfix-v16b-relevance-budget.js';
 import gapfix_v16b_verb_fidelity from './tests/gapfix-v16b-verb-fidelity.js';
-import gapfix_v16c_closing_gate from './tests/gapfix-v16c-closing-gate.js';
 import gapfix_v16c_letter_binding from './tests/gapfix-v16c-letter-binding.js';
 import gapfix_v16c_letter_functions from './tests/gapfix-v16c-letter-functions.js';
 import gapfix_v16c_requirement_modality from './tests/gapfix-v16c-requirement-modality.js';
@@ -345,6 +344,7 @@ const testGroups = [
   ['job-board-reporting.js', job_board_reporting],
   ['job-board-official-posting-refresh.js', job_board_official_posting_refresh],
   ['base64.js', base64],
+  ['atomic-write.js', atomic_write],
   ['marketplace-monitor.js', marketplace_monitor],
   ['ai-models.js', ai_models],
   ['fixtures-canvas.js', fixtures_canvas],
@@ -658,12 +658,10 @@ const testGroups = [
   ['gapfix-v16-prompts.js', gapfix_v16_prompts],
   ['gapfix-v16-resume-dates.js', gapfix_v16_resume_dates],
   ['gapfix-v16-verb-fidelity.js', gapfix_v16_verb_fidelity],
-  ['gapfix-v16b-closing-authorship.js', gapfix_v16b_closing_authorship],
   ['gapfix-v16b-contract-consistency.js', gapfix_v16b_contract_consistency],
   ['gapfix-v16b-letter-truthfulness.js', gapfix_v16b_letter_truthfulness],
   ['gapfix-v16b-relevance-budget.js', gapfix_v16b_relevance_budget],
   ['gapfix-v16b-verb-fidelity.js', gapfix_v16b_verb_fidelity],
-  ['gapfix-v16c-closing-gate.js', gapfix_v16c_closing_gate],
   ['gapfix-v16c-letter-binding.js', gapfix_v16c_letter_binding],
   ['gapfix-v16c-letter-functions.js', gapfix_v16c_letter_functions],
   ['gapfix-v16c-requirement-modality.js', gapfix_v16c_requirement_modality],

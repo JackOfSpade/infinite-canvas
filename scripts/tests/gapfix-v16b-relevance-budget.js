@@ -30,10 +30,8 @@
 //              rejected, and an exhaustive search of its word runs finds no span the
 //              gate would have accepted: the deletion was not merely discouraged, it
 //              was unanswerable
-//   reporter   paragraphArgumentSpanGaps never reports a relevance gap the gate
-//              would not report, and reports none for a paragraph that owes none
-//   mutation   the constant, rewritten in a temporary copy, moves the gate, the
-//              reporter and the printed rule together, and the transfer budget stays
+//   mutation   the constant, rewritten in a temporary copy, moves the gate and
+//              the printed rule together, and the transfer budget stays
 //   rules      the printed budget sentences are built from the constants, say the
 //              same thing as one another, and no function recounts the paragraphs
 //
@@ -49,7 +47,7 @@ import { assert } from './testHelpers.js';
 import {
   ARGUMENT_LATER_RELEVANCE_SPAN_RULE, ARGUMENT_RELEVANCE_SPAN_RULE, ARGUMENT_SPAN_BUDGET_RULES, EXPLICIT_CLAIM_BUDGET_RULE, EXPLICIT_RELEVANCE_BUDGET_RULE,
   EXPLICIT_TRANSFER_BUDGET_RULE, MAX_EXPLICIT_RELEVANCE_PARAGRAPHS, MAX_EXPLICIT_TRANSFER_PARAGRAPHS, OWING_RELEVANCE_PARAGRAPHS, checkParagraphArgumentLinks,
-  explicitClaimOwed, explicitRelevanceOwed, explicitTransferOwed, paragraphArgumentSpanGaps,
+  explicitClaimOwed, explicitRelevanceOwed, explicitTransferOwed,
 } from '../../electron/ipc/coverLetterChecks.js';
 
 // ---------------------------------------------------------------------------
@@ -398,40 +396,7 @@ export default [
     },
   },
   {
-    name: 'Relevance reporter: the drafting-stage reporter reports no relevance gap for a paragraph that owes none, and every gap it reports is one no relevance span could close (subset, brute force over every word run, four domains)',
-    run() {
-      for (const domain of DOMAINS) {
-        const proof = domain.proofs[1];
-        const trimmed = paragraphOf(proof, 'trimmed');
-        const echoed = paragraphOf(proof, 'echo');
-        const relevanceGap = (paragraph, options) => paragraphArgumentSpanGaps(paragraph, domain.posting, options).some(gap => gap.field === 'relevance');
-        // A: a later paragraph owes nothing, whatever it offers: neither shape is reported when the count says it owes none.
-        const owed = { owesTransfer: false, owesClaim: false, owesRelevance: false };
-        assert(!relevanceGap(trimmed, owed) && !relevanceGap(echoed, owed), `${domain.key}/A: a paragraph that owes no relevance span is never reported for one`);
-        assert(paragraphArgumentSpanGaps(trimmed, domain.posting, owed).length === 0, `${domain.key}/A: and has no gap of any field`);
-        // B: the default is the old behaviour, so a caller that does not pass the count is never more lenient than the gate; only an explicit false relaxes it.
-        const posting = 'Water the ficus on Thursdays. Polish the brass handles.';
-        assert(paragraphArgumentSpanGaps(trimmed, posting, { owesTransfer: false, owesClaim: false }).some(gap => gap.field === 'relevance'), `${domain.key}/B: without the count the reporter still asks a later paragraph for a span that names something`);
-        assert(paragraphArgumentSpanGaps(trimmed, posting).some(gap => gap.field === 'relevance'), `${domain.key}/B: with no options at all it still asks`);
-        assert(!paragraphArgumentSpanGaps(trimmed, posting, { owesTransfer: false, owesClaim: false, owesRelevance: false }).some(gap => gap.field === 'relevance'), `${domain.key}/B: only an explicit false relaxes it`);
-        // C: the subset relation. Whenever the reporter, asked as the gate would ask (the paragraph owes a span), reports a gap, the gate rejects EVERY relevance span
-        // the paragraph could offer with the posting itself as the quote (the strongest quote there is); and when it reports none, one of them passes.
-        for (const [shape, paragraph] of [['trimmed', trimmed], ['echo', echoed]]) {
-          const gaps = paragraphArgumentSpanGaps(paragraph, domain.posting, { owesTransfer: false, owesClaim: false, owesRelevance: true }).filter(gap => gap.field === 'relevance');
-          const accepted = wordRuns(paragraph).filter(run => laterSpanAccepted({ checkParagraphArgumentLinks }, domain, shape, run).passed);
-          assert((gaps.length > 0) === (accepted.length === 0), `${domain.key}/C/${shape}: the reporter's verdict (${gaps.length} gap) matches the gate's search (${accepted.length} legal spans)`);
-          if (gaps.length) assert(gaps[0].rule === ARGUMENT_LATER_RELEVANCE_SPAN_RULE, `${domain.key}/C/${shape}: a gap in a paragraph that owes a span but not the sentence carries the later rule`);
-        }
-        // D: a paragraph that owes the sentence apart from its proof is held to the stricter rule, whatever the span budget says.
-        const owing = paragraphArgumentSpanGaps(proof.proof, domain.posting, { owesTransfer: true, owesClaim: false, owesRelevance: true }).filter(gap => gap.field === 'relevance');
-        assert(owing.length === 1 && owing[0].rule === ARGUMENT_RELEVANCE_SPAN_RULE, `${domain.key}/D: a lone proof sentence owes the sentence apart from itself (${JSON.stringify(owing.map(gap => gap.field))})`);
-        // An opening and a closing owe nothing, whatever the flags say.
-        assert(paragraphArgumentSpanGaps(domain.opening, domain.posting, { owesRelevance: true }).length === 0 && paragraphArgumentSpanGaps(domain.closing, domain.posting, { owesRelevance: true }).length === 0, `${domain.key}: an opening and a closing owe nothing`);
-      }
-    },
-  },
-  {
-    name: 'Relevance mutation: rewriting the constant to two in a temporary copy of the module moves the gate, the reporter and the printed rule together, and the transfer budget and the real module stay (A/B/C)',
+    name: 'Relevance mutation: rewriting the constant to two in a temporary copy of the module moves the gate and the printed rule together, and the transfer budget and the real module stay (A/B)',
     async run() {
       const source = fs.readFileSync(path.resolve('electron/ipc/coverLetterChecks.js'), 'utf8');
       const declaration = 'export const MAX_EXPLICIT_RELEVANCE_PARAGRAPHS = MAX_EXPLICIT_TRANSFER_PARAGRAPHS;';
@@ -459,12 +424,6 @@ export default [
             `${domain.key}/B: the second paragraph's relevance is owed at two and not at one (${detailOf(verdictTwo)})`);
           const supplied = letterOf(domain, ['first', 'echo', 'trimmed']);
           assert(two.checkParagraphArgumentLinks({ plan: supplied.plan, paragraphs: supplied.paragraphs, jobText: domain.posting }).passed, `${domain.key}/B: supplying the second relevance passes at two`);
-          // C: the reporter follows the count the caller reads from the same module.
-          const bare = letter.paragraphs[2];
-          const unrelated = 'Water the ficus on Thursdays. Polish the brass handles.';
-          const reportedOne = control.paragraphArgumentSpanGaps(bare, unrelated, { owesTransfer: false, owesClaim: false, owesRelevance: control.explicitRelevanceOwed(letter.paragraphs)[2] });
-          const reportedTwo = two.paragraphArgumentSpanGaps(bare, unrelated, { owesTransfer: false, owesClaim: false, owesRelevance: two.explicitRelevanceOwed(letter.paragraphs)[2] });
-          assert(!reportedOne.some(gap => gap.field === 'relevance') && reportedTwo.some(gap => gap.field === 'relevance'), `${domain.key}/C: the reporter reports the second paragraph at two and not at one`);
         }
         assert(control.OWING_RELEVANCE_PARAGRAPHS === 'the first proof-bearing paragraph of the letter' && control.EXPLICIT_RELEVANCE_BUDGET_RULE.startsWith('only the first proof-bearing paragraph of the letter owes a relevance span'),
           `the real number prints as one paragraph (${control.EXPLICIT_RELEVANCE_BUDGET_RULE})`);

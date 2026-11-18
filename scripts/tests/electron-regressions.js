@@ -1,4 +1,5 @@
 import { attachRendererRecovery, hasStoppedRenderer, recordRendererCrash, readRendererCrashes, buildRendererCrashMarkdown } from '../../electron/rendererRecovery.js';
+import { readJobsSources } from './jobsSourceFixture.mjs';
 import { estimateUndoSnapshotBytes, undoHistoryLimit, UNDO_MEMORY_BUDGET_BYTES } from '../../src/utils/undoMemoryBudget.js';
 import { EventEmitter } from 'node:events';
 import { pathToFileURL } from 'node:url';
@@ -1601,7 +1602,7 @@ export default [
       const registrationLogs = getRecentLogs().filter(entry => (
         entry.level === 'info' && entry.message.includes(`channel ${channel}`)
       ));
-      const jobs = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobs = fs.readFileSync(path.resolve('electron/ipc/jobs/coreHandlers.js'), 'utf8');
       const peekStart = jobs.indexOf("handleSafe('peek-job-run'");
       const peekEnd = jobs.indexOf("handleSafe('pause-job-run'", peekStart);
       const peekHandler = jobs.slice(peekStart, peekEnd);
@@ -2612,7 +2613,7 @@ export default [
     // crashed again. Both initializers must therefore agree on the shape.
     name: 'job search: recovered-staging seed and manual-result init agree on the sourceResults shape',
     run: () => {
-      const src = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const src = readJobsSources('jobs', 'searchHandlers');
       const inits = [...src.matchAll(/sourceResults\[\w+\]\s*=\s*\{([^}]*)\}/g)].map(m => m[1]);
       assert(inits.length >= 2,
         `expected at least the seed and the manual-result initializer, found ${inits.length}`);

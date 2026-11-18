@@ -428,7 +428,7 @@ else, **IBM Plex Mono** for inline `<code>` and the project-metrics
 line. Body at **10.25 pt** / 1.45 / ~70–75 chars per line (that figure is
 running prose — a bullet's own renderer-verified budget, one number
 for every bullet whether annotated or not, is `STYLE.md §5.4`).
-Section headers are 9 pt uppercase tracked +0.14 em with a hairline
+Section headers are 9 pt uppercase, untracked, with a hairline
 rule filling the line. 4 pt spacing grid. **No icons, no skill bars, no
 progress dots, no photo, no cards, no shadows on the page, no
 gradients, no rounded corners, no emoji.** The only typographic

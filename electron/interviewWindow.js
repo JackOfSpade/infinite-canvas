@@ -3,7 +3,7 @@ import electronPkg from 'electron';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { buildInterviewPlan, buildInterviewFollowUpPlan, isDependentInterviewFollowUp, canonicalInterviewJobUrl, INTERVIEW_HELPER_MAX_STEPS } from '../src/utils/interviewHelper.js';
+import { buildInterviewPlan, buildInterviewFollowUpPlan, canonicalInterviewJobUrl, INTERVIEW_HELPER_MAX_STEPS } from '../src/utils/interviewHelper.js';
 import { createInterviewAiMatcher, interviewAiMatcherConfigFromEnv } from './interviewAiMatcher.js';
 import { prepareInterviewExtensionCandidates } from './ipc/interviewAnswerExtensions.js';
 import { loadInterviewPreparationBundle, loadInterviewPreparedBrief, loadInterviewPreparedAnswerBank } from './ipc/interviewPreparation.js';
@@ -16,7 +16,7 @@ import { createInterviewSpeculativeMatcher } from './interviewSpeculativeMatcher
 import { stableJson } from '../src/utils/stableJson.js';
 
 // Live-call notices are read mid-interview at a glance: a few words, never a
-// sentence. "Use this question" beside the transcript is the action they name.
+// sentence. They are written to the session log; the cue card itself shows cues only.
 const AUDIO_NOTICES = Object.freeze({
   tooLong: 'Too long · type it',
   multipart: 'Multi-part · pick one',
@@ -35,7 +35,6 @@ const MAX_BRIEF_SOURCES = MAX_BRIEF_ITEMS * 2;
 const MAX_CITATION_URL = 2_048;
 const MAX_CITATION_DATE = 80;
 const MAX_QUESTION = 2_000;
-const CARD_ID = /^[A-Za-z0-9_-]{1,64}$/u;
 // These mirror the persisted rail grammar in InterviewHelperNode.  The
 // renderer verifies a canonical plan before saving it, and this boundary
 // verifies it again before looking up the main-process snapshot.  Keeping the
@@ -551,8 +550,7 @@ export function createInterviewWindowController({
   };
   const matchingState = (session, selection = null) => {
     const latency = session.matcher?.getLatency?.() || { p50Ms: null, latencyMode: 'recall' };
-    return { ...(selection || {}), mode: session.latencyMode,
-      effectiveMode: session.latencyMode === 'auto' ? latency.latencyMode : session.latencyMode,
+    return { ...(selection || {}), mode: 'auto', effectiveMode: latency.latencyMode,
       p50Ms: latency.p50Ms };
   };
   const talkingPointsFactory = typeof createTalkingPoints === 'function' ? createTalkingPoints : null;
@@ -728,13 +726,13 @@ export function createInterviewWindowController({
         throw new Error('Another Interview Helper on this canvas has an active interview rail.');
       }
       if (existing.nodeId !== args.nodeId || existing.snapshotId !== args.snapshotId || existing.briefRecordId !== args.briefRecordId) existing.audio?.stop();
-      // Any supported rail is child-owned until that child explicitly
-      // advances. A parent relaunch must never erase or replace active
+      // Any supported rail is child-owned until the next detected question
+      // replaces it. A parent relaunch must never erase or replace active
       // interview state, regardless of whether its plan first came from the
       // canvas or a child submission.
       if (existing.locked) {
         // The rail stays child-owned, but the newer brief and snapshot must
-        // not be lost: they take effect when the child explicitly advances.
+        // not be lost: they take effect when the next detected question replaces the rail.
         existing.pendingParent = { brief, snapshotId: args.snapshotId, briefRecordId: args.briefRecordId, bundle: prepared.bundle, answerBank: prepared.answerBank, snapshot: prepared.snapshot };
       }
       if (!existing.locked) {
@@ -790,7 +788,7 @@ export function createInterviewWindowController({
         // resurrecting a retired companion.
         return launchFor(event, args, owner, ticket);
       }
-      if (selectIncoming) await answerQuestion({ sender: existing.child.webContents }, args.plan.analysis.transcript, false, { cached: true, replace: true });
+      if (selectIncoming) await answerQuestion({ sender: existing.child.webContents }, args.plan.analysis.transcript);
       return { ok: true, reused: true };
     }
     const child = new BrowserWindow({
@@ -816,11 +814,7 @@ export function createInterviewWindowController({
       locked: !!display.answerCard || display.plan?.status === 'supported', questionSequence: 0, initialLoad: null,
       anchorPlan: display.plan?.status === 'supported' ? args.plan : null,
       parentPlanFingerprint: incomingPlanFingerprint, dismissedPlanFingerprint: null, pendingParent: null,
-      // The pin is native-window state that outlives the child page; main
-      // records it so a reloaded page can restore its checkbox. A companion
-      // opens pinned, so the native and recorded truth start at true.
-      alwaysOnTop: true,
-      latencyMode: 'auto', matcher: null, matcherKey: null, questionAbort: null, questionOrigin: null,
+      matcher: null, matcherKey: null, questionAbort: null, questionOrigin: null,
       // closing: the window began closing ('close' precedes the abort Electron
       // reports for a pending load). crashed: its renderer process died.
       closing: false, crashed: false,
@@ -893,18 +887,16 @@ export function createInterviewWindowController({
       return RETIRED_RESULT;
     }
     if (args.plan && session.answerBank && sessions.get(ownerId) === session && !session.closing) {
-      await answerQuestion({ sender: child.webContents }, args.plan.analysis.transcript, false, { cached: true, replace: true });
+      await answerQuestion({ sender: child.webContents }, args.plan.analysis.transcript);
     }
     return { ok: true, reused: false };
   };
 
   const getBrief = event => {
     const session = getForChild(event?.sender);
-    // The pin is read on this call only: a reloaded page restores its checkbox
-    // from here, and no other display payload carries it.
-    return session ? { ...session.display, alwaysOnTop: session.alwaysOnTop } : null;
+    return session ? session.display : null;
   };
-  const answerQuestion = async (event, question, followUp = false, { cached = false, isCurrent = () => true, replace = false, origin = 'user', speculativeSelection = null, allowApproximate = () => true, onIgnored = null, onSelection = () => undefined, resumed = false, resumedFrom = null } = {}) => {
+  const answerQuestion = async (event, question, { isCurrent = () => true, origin = 'user', speculativeSelection = null, allowApproximate = () => true, onIgnored = null, onSelection = () => undefined, resumed = false, resumedFrom = null } = {}) => {
     const session = getForChild(event?.sender);
     if (!session) throw new Error('Interview session is not available.');
     if (typeof question !== 'string' || question.length > MAX_QUESTION || !question.trim()) throw new Error('Interview question is invalid.');
@@ -915,13 +907,10 @@ export function createInterviewWindowController({
       session.audio?.notice('Your submitted question is being matched. This audio turn is available in the transcript.');
       return session.display;
     }
-    if (followUp) {
-      if (!session.locked || !(session.anchorPlan || session.display.answerCard)) return ignoredQuestion('no-selected-story', 'Choose an answer before submitting a follow-up.');
-    } else if (session.locked && !replace) return session.display;
     // Audio advancement is transactional: retain the old card, lock and pin
     // until a complete new display can be committed. Failure/Stop never leaves
     // main cleared while the renderer still shows the previous answer.
-    let pendingParent = replace ? session.pendingParent : null;
+    let pendingParent = session.pendingParent;
     let target = pendingParent || session;
     const previousQuestion = session.display.question || session.display.plan?.question || '';
     const previousCardId = session.display.answerCard?.id || null;
@@ -940,7 +929,7 @@ export function createInterviewWindowController({
     session.questionOrigin = origin;
     session.audioQuestion = origin === 'audio' ? { event, question, isCurrent, allowApproximate, onIgnored, onSelection, retired: retiredAudio } : null;
     const resumeRetired = () => (retiredAudio && retiredAudio.isCurrent() && current()
-      ? answerQuestion(retiredAudio.event, retiredAudio.question, false, { cached: true, replace: true, origin: 'audio', resumed: true, resumedFrom: retiredAudio,
+      ? answerQuestion(retiredAudio.event, retiredAudio.question, { origin: 'audio', resumed: true, resumedFrom: retiredAudio,
         isCurrent: retiredAudio.isCurrent, allowApproximate: retiredAudio.allowApproximate, onIgnored: retiredAudio.onIgnored, onSelection: retiredAudio.onSelection })
       : null);
     const current = () => isCurrent() && sessions.get(session.ownerId) === session
@@ -951,17 +940,13 @@ export function createInterviewWindowController({
     try {
       let snapshot;
       try {
-        snapshot = cached ? (target.snapshot || target.listeningSnapshot) : await loadSafely(loadSnapshot,
-          { snapshotId: target.snapshotId, owner: session.owner, nodeId: session.nodeId, userDataPath: userDataPath() },
-          'Interview Window snapshot is unavailable.');
+        snapshot = target.snapshot || target.listeningSnapshot;
       } catch (error) { if (!current()) return superseded(); throw error; }
       if (!current()) return superseded();
       if (!snapshot || snapshot.snapshotId !== target.snapshotId || !snapshot.profile) throw new Error('Interview Window snapshot is unavailable.');
       let loadedBank;
       try {
-        loadedBank = cached ? await refreshLiveCards(target.answerBank, session.nodeId) : await loadSafely(loadLiveAnswerBank(session.nodeId),
-          { brief: target.brief, briefRecordId: target.briefRecordId, snapshot, bundle: target.bundle, userDataPath: userDataPath() },
-          'Interview Window prepared answers are unavailable.');
+        loadedBank = await refreshLiveCards(target.answerBank, session.nodeId);
       } catch (error) { if (!current()) return superseded(); throw error; }
       if (!current()) return superseded();
       let answerBank = bankMatchesBrief(loadedBank, target.brief, target.snapshotId, snapshot) ? loadedBank : null;
@@ -1000,11 +985,11 @@ export function createInterviewWindowController({
           onIgnored?.();
           return session.display;
         }
-        // A user has explicitly asked to use this text. AI abstention may leave
+        // The canvas explicitly supplied this question. AI abstention may leave
         // us with no prepared answer, but cannot veto the saved-evidence lookup.
-        selection = { ...selection, kind: followUp ? 'follow-up' : 'question', cardId: followUp ? previousCardId || 'none' : 'none' };
+        selection = { ...selection, kind: 'question', cardId: 'none' };
       }
-      followUp = followUp || selection.kind === 'follow-up' || approximateFollowUp;
+      const followUp = selection.kind === 'follow-up' || approximateFollowUp;
       if (followUp && pendingParent) {
         // A queued parent update belongs to the next question. A continuation
         // must keep the locked card's original validated pin and evidence.
@@ -1022,7 +1007,7 @@ export function createInterviewWindowController({
         if (!validPlan(canonical, target.snapshotId) || !isSameJson(canonical, anchorPlan)) throw new Error('Interview Window snapshot is unavailable.');
         plan = buildInterviewFollowUpPlan({ question, anchorPlan: canonical, previousQuestion });
         if (!plan) {
-          // The AI (or the user's follow-up form) chose continuation. For wording
+          // The AI chose continuation. For wording
           // outside the offline component grammar, retain the exact saved cues;
           // never let a lexical lookup select a different story or invent facts.
           const transcript = `${previousQuestion} ${question}`.trim();
@@ -1063,7 +1048,7 @@ export function createInterviewWindowController({
         // A relaunch during the lookup may have queued a newer parent; keep it.
         if (session.pendingParent === pendingParent) session.pendingParent = null;
       }
-      if (replace && session.parentPlanFingerprint !== null) session.dismissedPlanFingerprint = session.parentPlanFingerprint;
+      if (session.parentPlanFingerprint !== null) session.dismissedPlanFingerprint = session.parentPlanFingerprint;
       session.display = display;
       session.answerBank = answerBank;
       session.listeningSnapshot = snapshot;
@@ -1085,101 +1070,6 @@ export function createInterviewWindowController({
       }
     }
   };
-  const submitQuestion = (event, question) => answerQuestion(event, question, false, { replace: true });
-  const followUpQuestion = (event, question) => answerQuestion(event, question, true);
-  const selectPreparedCard = async (event, cardId) => {
-    const session = getForAudio(event);
-    if (!session || typeof cardId !== 'string' || !CARD_ID.test(cardId)
-      || !cardsOf(session.answerBank).some(card => card.id === cardId)) throw new Error('Interview prepared answer is unavailable.');
-    // A click names an already displayed card, so it retains that display's
-    // pin. It supersedes any semantic lookup immediately without waiting for
-    // a provider reply or changing the visible answer until validation passes.
-    cancelQuestion(session);
-    const sequence = session.questionSequence;
-    const current = () => sessions.get(session.ownerId) === session
-      && session.questionSequence === sequence && !session.closing;
-    const snapshot = await loadSafely(loadSnapshot,
-      { snapshotId: session.snapshotId, owner: session.owner, nodeId: session.nodeId, userDataPath: userDataPath() },
-      'Interview Window snapshot is unavailable.');
-    if (!current()) return session.display;
-    if (!snapshot || snapshot.snapshotId !== session.snapshotId || !snapshot.profile) throw new Error('Interview Window snapshot is unavailable.');
-    const answerBank = await loadSafely(loadLiveAnswerBank(session.nodeId),
-      { brief: session.brief, briefRecordId: session.briefRecordId, snapshot, bundle: session.bundle, userDataPath: userDataPath() },
-      'Interview Window prepared answers are unavailable.');
-    if (!current()) return session.display;
-    if (!bankMatchesBrief(answerBank, session.brief, session.snapshotId, snapshot)) throw new Error('Interview prepared answer is unavailable.');
-    const answerCard = cardsOf(answerBank).find(card => card.id === cardId);
-    if (!answerCard) throw new Error('Interview prepared answer is unavailable.');
-    const matching = matchingState(session, { source: 'manual', method: 'manual', approximate: false,
-      label: 'Prepared answer selected', kind: 'question', cardId, confidence: 1, reason: null });
-    const display = projectInterviewDisplay({ brief: session.brief, snapshotId: session.snapshotId,
-      question: answerCard.question, currentStep: 0, answerBank, answerCard, matching });
-    if (!current()) return session.display;
-    if (session.parentPlanFingerprint !== null) session.dismissedPlanFingerprint = session.parentPlanFingerprint;
-    session.display = display;
-    session.answerBank = answerBank;
-    session.listeningSnapshot = snapshot;
-    session.locked = true;
-    session.anchorPlan = null;
-    noteShown(session);
-    pushDisplay(session, display);
-    return display;
-  };
-  const advanceQuestion = (event, notify = true) => {
-    const session = getForChild(event?.sender);
-    if (!session) return null;
-    // Also invalidates an in-flight unlocked lookup before clearing state.
-    cancelQuestion(session);
-    // The canvas may still retain this older submitted plan. Keep its exact
-    // canonical fingerprint suppressed until a genuinely different parent
-    // plan arrives, so advancing in the child is durable within this session.
-    if (session.parentPlanFingerprint !== null) session.dismissedPlanFingerprint = session.parentPlanFingerprint;
-    session.locked = false;
-    session.anchorPlan = null;
-    if (session.pendingParent) {
-      session.brief = session.pendingParent.brief;
-      session.snapshotId = session.pendingParent.snapshotId;
-      session.briefRecordId = session.pendingParent.briefRecordId;
-      session.bundle = session.pendingParent.bundle;
-      session.answerBank = session.pendingParent.answerBank;
-      session.listeningSnapshot = session.pendingParent.snapshot;
-      session.pendingParent = null;
-    }
-    ensureMatcher(session, session.answerBank);
-    session.display = projectInterviewDisplay({ brief: session.brief, snapshotId: session.snapshotId, currentStep: 0, answerBank: session.answerBank, matching: matchingState(session) });
-    if (notify) { noteShown(session); pushDisplay(session, session.display); }
-    return session.display;
-  };
-  const nextQuestion = event => advanceQuestion(event);
-  const close = event => { const session = getForChild(event?.sender); if (!session) return false; session.child.close?.(); return true; };
-  const setAlwaysOnTop = (event, value) => {
-    const session = getForChild(event?.sender);
-    if (!session || typeof value !== 'boolean') return false;
-    // Pinning restores the glanceable overlay level (above full-screen call
-    // apps); unpinning stops being always-on-top and leaves the current
-    // workspace only. Content protection is never relaxed: the interviewer
-    // must not see this window either way.
-    if (value) {
-      session.child.setAlwaysOnTop?.(true, 'floating');
-      session.child.setVisibleOnAllWorkspaces?.(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
-    } else {
-      session.child.setAlwaysOnTop?.(false);
-      session.child.setVisibleOnAllWorkspaces?.(false);
-    }
-    session.alwaysOnTop = value;
-    return true;
-  };
-  const setLatencyMode = (event, value) => {
-    const session = getForAudio(event);
-    // Keep-going cues are a measured-latency fallback, never a forced layout.
-    if (!session || !['auto', 'recall'].includes(value)) throw new Error('Interview display mode is invalid.');
-    session.latencyMode = value;
-    session.display = Object.freeze({ ...session.display, matching: Object.freeze(matchingState(session, session.display.matching)) });
-    noteShown(session);
-    pushDisplay(session, session.display);
-    return session.display;
-  };
-
   const audioFor = session => {
     if (session.audio) return session.audio;
     session.audio = createAudioService({
@@ -1234,7 +1124,7 @@ export function createInterviewWindowController({
           return;
         }
         const childEvent = { sender: session.child.webContents };
-        await answerQuestion(childEvent, selection.question, false, { cached: true, isCurrent, replace: true, origin: 'audio',
+        await answerQuestion(childEvent, selection.question, { isCurrent, origin: 'audio',
           speculativeSelection,
           onSelection: reportSelection,
           onIgnored: () => {
@@ -1261,11 +1151,6 @@ export function createInterviewWindowController({
     });
     return session.audio;
   };
-  const getListeningState = event => {
-    const session = getForAudio(event);
-    if (!session) throw new Error('Interview session is not available.');
-    return session.audio?.getState() || idleInterviewListeningState();
-  };
   const startListening = event => {
     const session = getForAudio(event);
     if (!session) throw new Error('Interview session is not available.');
@@ -1279,15 +1164,6 @@ export function createInterviewWindowController({
     if (session.questionOrigin === 'audio') cancelQuestion(session);
     return session.audio?.stop() || idleInterviewListeningState();
   };
-  const useTranscriptQuestion = async event => {
-    const session = getForAudio(event);
-    if (!session) throw new Error('Interview session is not available.');
-    const question = session.audio?.getQuestion();
-    if (typeof question !== 'string' || !question.trim() || question.length > MAX_QUESTION) throw new Error('Interview question is invalid.');
-    const followUp = isDependentInterviewFollowUp(question) && session.locked && !!(session.anchorPlan || session.display.answerCard);
-    return answerQuestion(event, question, followUp, { replace: !followUp });
-  };
-
   if (registerIpc) {
     ipcMain.handle('interview-window:launch', launch);
     ipcMain.handle('interview-window:get-brief', getBrief);
@@ -1328,5 +1204,5 @@ export function createInterviewWindowController({
     }
   };
 
-  return Object.freeze({ launch, getBrief, submitQuestion, followUpQuestion, selectPreparedCard, nextQuestion, close, setAlwaysOnTop, setLatencyMode, getListeningState, startListening, stopListening, useTranscriptQuestion, isInterviewChildWebContents: contents => !!getForChild(contents), cleanupBySenderAndNode, cleanupOwner, sessionCount: () => sessions.size, sessions });
+  return Object.freeze({ launch, getBrief, startListening, stopListening, isInterviewChildWebContents: contents => !!getForChild(contents), cleanupBySenderAndNode, cleanupOwner, sessionCount: () => sessions.size, sessions });
 }

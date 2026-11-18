@@ -251,15 +251,9 @@ function roleDescription(value, { metadata = false, strict = false } = {}) {
   return metadata ? { retained, hadCompanyRegion } : retained;
 }
 const descriptionGrams = words => new Set(words.slice(0, -4).map((_, index) => words.slice(index, index + 5).join(' ')));
-// Amendment 3, section 2. A gram is boilerplate when it occurs in at least
-// max(3, 20%) of the fetched peer postings on the host or tenant. Fewer than
-// four peers cannot estimate that, so only the recognized sections go.
-const BOILERPLATE_MIN_PEERS = 4;
-const BOILERPLATE_MIN_COUNT = 3;
 const ANCHOR_CONTAINMENT = 0.85;
 const WEAK_CONTAINMENT = 0.6;
-// Every evaluation re-derives the grams of the whole fetched peer pool, so the cache must hold a full board: a cache smaller than the
-// pool is worthless under a cyclic scan (the oldest entry is always the next one needed). Memory stays bounded by BOTH an entry count
+// The cache holds a full board of postings (a cache smaller than the pool is worthless under a cyclic scan). Memory stays bounded by BOTH an entry count
 // and a total weight (grams plus the retained source string), and the least recently used entries leave first.
 const GRAM_CACHE_MAX_ENTRIES = 4096;
 const GRAM_CACHE_MAX_WEIGHT = 1_500_000;
@@ -283,30 +277,19 @@ function roleGrams(value) {
   }
   return grams;
 }
-/** The frequency estimate and whether the pool can support one: a peer that contributes no five-word run (a stub, a cleared text) is not a peer. */
-function boilerplateEstimate(peerTexts) {
-  const peers = (Array.isArray(peerTexts) ? peerTexts : []).map(roleGrams).filter(grams => grams.size);
-  if (peers.length < BOILERPLATE_MIN_PEERS) return { grams: new Set(), estimable: false };
-  const threshold = Math.max(BOILERPLATE_MIN_COUNT, Math.ceil(peers.length / 5));
-  const counts = new Map();
-  for (const grams of peers) for (const gram of grams) counts.set(gram, (counts.get(gram) || 0) + 1);
-  return { grams: new Set([...counts].filter(([, count]) => count >= threshold).map(([gram]) => gram)), estimable: true };
-}
-const boilerplateGrams = peerTexts => boilerplateEstimate(peerTexts).grams;
 /** Containment of the SCRAPED text's distinctive grams in the official text.
  * There is no bilateral minimum: Google often shows a partial or reformatted
  * description. A short official stub still cannot contain a full scraped text. */
-function scoreDescription(scrapedText, officialText, boilerplate) {
-  const distinctive = grams => new Set([...grams].filter(run => !boilerplate.has(run)));
-  const x = distinctive(roleGrams(scrapedText)); const y = distinctive(roleGrams(officialText));
+function scoreDescription(scrapedText, officialText) {
+  const x = roleGrams(scrapedText); const y = roleGrams(officialText);
   const shared = [...x].filter(run => y.has(run)).length;
   const containment = x.size ? shared / x.size : 0; const coverageRight = y.size ? shared / y.size : 0;
   const sufficient = normalizedDescription(scrapedText).length >= 40 && normalizedDescription(officialText).length >= 40 && shared >= 12;
   return { score: containment, containment, shared, coverageLeft: containment, coverageRight,
     anchored: sufficient && containment >= ANCHOR_CONTAINMENT, weak: sufficient && containment >= WEAK_CONTAINMENT };
 }
-export function descriptionOverlap(left, right, { peerDescriptions = [] } = {}) {
-  return scoreDescription(left, right, boilerplateGrams(peerDescriptions));
+export function descriptionOverlap(left, right) {
+  return scoreDescription(left, right);
 }
 // Quote normalization. A host-fetched official text arrives as converter output ("* item", "1. item", upper-cased headings) while the
 // model quotes plain prose, so BOTH texts and BOTH quotes are compared in the same plain form. Only presentation is removed: leading list

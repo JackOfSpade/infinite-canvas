@@ -8,59 +8,38 @@ import {
   BANNED_GENERIC_PATTERNS,
   buildResumeDocument,
   buildCoverLetterDocument,
-  checkAdditiveSeam,
   checkAnchorRelevance,
   checkClaimedEquivalence,
-  checkCompanySpecificity,
   checkCompoundHyphenation,
   checkContainerizationTechnologyRoles,
-  checkDanglingParagraphTransition,
-  checkDetachedRelevanceClaim,
-  checkDirectWelcomeClosing,
   checkEvidenceGrounding,
-  checkExperienceInfinitiveGrammar,
   checkFigureDiscipline,
   checkGenericPhrases,
   checkInterestFraming,
-  checkIntroductoryWorkplaceComma,
   checkLogisticsExclusion,
-  checkLowInformationToolBuild,
   checkModifierAttachment,
-  checkMigrationObjectClarity,
   checkNamedArtifactIntroduction,
   checkOpeningArtifactContext,
-  checkOpeningDemonstrative,
-  checkAdjacentEmployerRepetition,
-  checkOpeningEmployerShorthand,
   checkOpeningPostingRestatement,
   checkOpeningJobSummaryScaffolding,
-  checkEntailedPremise,
   checkParallelStructure,
   checkParagraphArgumentLinks,
   ARGUMENT_MAPPING_REQUIRED_RULE,
-  paragraphArgumentSpanGaps,
   checkCandidateAgency,
   paragraphHasCandidatePastProof,
-  checkPlainRegister,
   checkPostingReference,
   checkPriorEmployerOpening,
   checkRepeatedPhrase,
-  checkRepeatedSentenceShape,
   checkPunctuationStyle,
   checkProspectiveContributionTense,
   checkRedundancy,
   checkResumeBulletFocus,
   checkReferenceClarity,
-  checkResponsibilityTransition,
-  checkSalientPhraseEcho,
   checkRoleThesis,
   checkSentenceLength,
   checkShape,
   checkTargetClaimScope,
   checkTargetCompanyBinding,
-  checkToolCallsGardenPath,
-  checkVagueDomainWorkLabel,
-  checkVisualReferencePrecision,
   COMPOUND_HYPHENATION_RULES,
   evaluateCoverLetterChecks,
   extractResumeEvidence,
@@ -72,10 +51,7 @@ import {
   MIN_ANCHOR_RELEVANCE_CORPUS_WORDS,
   MIN_CROSS_PARAGRAPH_REPEAT_WORDS,
   MIN_SAME_PARAGRAPH_REPEAT_WORDS,
-  MIN_SHARED_SHAPE_PARAGRAPHS,
-  SENTENCE_SHAPE_FRAME_WORDS,
   path,
-  sharedSentenceShapeCeiling,
   sentences,
   STACK_TOOL_LEXICON,
 } from '../test-dependencies.js';
@@ -87,8 +63,8 @@ import {
 // relevance-span rule whose CHOICE of carriers settles the one apparent
 // contradiction in this pair of checks.
 import {
-  ARGUMENT_RELEVANCE_SPAN_RULE, checkBodyPointCount, checkDanglingDemonstrative, checkParagraphOpeners, checkPriorEmployerShortForm, checkRepeatedTransferCarrier, COVER_LETTER_SALIENT_ECHO_PHRASES,
-  DANGLING_DEMONSTRATIVE_RULE, checkDisposition, MIN_REPEAT_CONTENT_WORDS, REPEATED_PHRASE_RULE, REPEATED_TRANSFER_CARRIER_RULE,
+  ARGUMENT_RELEVANCE_SPAN_RULE, checkBodyPointCount, checkParagraphOpeners, checkPriorEmployerShortForm,
+  checkDisposition, MIN_REPEAT_CONTENT_WORDS, REPEATED_PHRASE_RULE,
 } from '../../electron/ipc/coverLetterChecks.js';
 
 function loadFixture(name) {
@@ -216,13 +192,10 @@ const PROXIMAL_AND_ORDINARY_ROLE_PROSE = [
 
 // A generated letter that cleared the whole battery: no check in
 // coverLetterChecks.js compared a paragraph to itself or to another paragraph.
-// checkRedundancy and checkSalientPhraseEcho measure the letter against the
-// RESUME, checkRepeatedSentenceShape erased every content word before it
-// compared, and every other n-gram site takes its needle from the resume, the
-// plan or a fixed list. So the same six words appeared twice in paragraph 1 and
-// nothing said anything. Three tests read it, from three sides: the runs it
-// repeats, the shapes its consecutive paragraphs share, and the one place those
-// two checks answer differently about the same sentences.
+// checkRedundancy measures the letter against the RESUME, a since-retired shape
+// check erased every content word before it compared, and every other n-gram
+// site takes its needle from the resume, the plan or a fixed list. So the same
+// six words appeared twice in paragraph 1 and nothing said anything.
 const LETTER_THAT_RESTATES_ITSELF = [
   "Wexcombe Structural pairs each field survey with the load calculations and ratings behind it, as well as the crew notes. My bridge inspection experience includes sway checks across the deck and abutments. As a Field Engineer at Harlow Civic Works, I developed a survey workbook for footbridge crews, and it carried load checks across the deck and abutments. The design challenge was planning for heavier traffic as future repairs changed the structure. I would apply that checking approach across deck and abutments to the planning of field surveys and the design checks behind them, as well as the sign-off forms.",
   "In that role, my survey experience includes linked instruments, strain gauge logs, and reading-triggered alerts. I assembled a gauge-logging kit that paired a handheld reader with strain gauge logs for the footbridge crews. The design challenge was keeping alerts in order when two readings arrived together. I would apply that linked-instrument experience to planning inspection routines, so each alert reaches the right crew.",
@@ -573,7 +546,7 @@ export default [
     },
   },
   {
-    name: 'cover letter harness: résumé echo is graded by the measured run floor and by wording the current résumé repeats, never by a fixed phrase',
+    name: 'cover letter harness: résumé echo is graded by the measured run floor, never by a fixed phrase',
     run: () => {
       // The former short-phrase table named one candidate's three-word phrase.
       // Restating the résumé is graded by the measured run floor, in any domain.
@@ -595,64 +568,13 @@ export default [
       sources.forEach((source, index) => {
         const verbatim = checkRedundancy(copied[index], source);
         const faithful = checkRedundancy(restated[index], source);
-        const salient = checkSalientPhraseEcho(restated[index], source);
         assert(!verbatim.passed && verbatim.detail.includes('-word run'),
           `a run at the floor is rejected whatever the domain (source ${index + 1}): ${verbatim.detail}`);
-        assert(faithful.passed && salient.passed,
-          `a fact restated below the floor by a letter that repeats none of the résumé's refrains is accepted (source ${index + 1}): ${faithful.detail}; ${salient.detail}`);
+        assert(faithful.passed,
+          `a fact restated below the floor is accepted (source ${index + 1}): ${faithful.detail}`);
       });
 
-      // Below the floor the evidence decides: wording that TWO OR MORE current résumé
-      // bullets already share is that résumé's refrain, and the letter picking it up
-      // again is an echo. Three unrelated domains, so no phrase of any one
-      // candidate's file is what makes the rule fire.
-      const refrainCases = [
-        {
-          label: 'build style',
-          bullets: ['Booking portal rebuilt from the ground up for the whole network.', 'Volunteer rota tool, rebuilt from the ground up in a month.', 'Maintained the nightly export job.'],
-          echo: 'The intake form was rebuilt from the ground up for the front desk.',
-          fresh: 'I replaced the intake form entirely, starting over on a blank page for the front desk.',
-          phrase: 'rebuilt from the ground up',
-        },
-        {
-          label: 'delivery style',
-          bullets: ['Delivered the clinic rollout on time and under budget.', 'Delivered the grant portal on time and under budget.', 'Trained eleven site coordinators.'],
-          echo: 'We shipped the new scheduler on time and under budget.',
-          fresh: 'The new scheduler shipped by the promised date and cost less than planned.',
-          phrase: 'time and under budget',
-        },
-        {
-          label: 'cadence style',
-          bullets: ['Led weekly check-ins with regional program officers.', 'Ran weekly check-ins with regional site leads.', 'Reconciled the monthly invoices.'],
-          echo: 'I ran weekly check-ins with regional partners.',
-          fresh: 'I met each partner every week to review open items.',
-          phrase: 'weekly check ins with regional',
-        },
-      ];
-      for (const kase of refrainCases) {
-        const echoed = checkSalientPhraseEcho([kase.echo], { bulletTexts: kase.bullets });
-        const reworded = checkSalientPhraseEcho([kase.fresh], { bulletTexts: kase.bullets });
-        const singleBullet = checkSalientPhraseEcho([kase.echo], { bulletTexts: [kase.bullets[0], kase.bullets[2]] });
-        assert(!echoed.passed && echoed.id === 'salient-phrase-echo' && echoed.detail.includes(`“${kase.phrase}”`)
-          && echoed.detail.includes('already share'),
-        `${kase.label}: wording two résumé bullets share is an echo when the letter repeats it (${echoed.detail})`);
-        assert(reworded.passed, `${kase.label}: the same fact in the letter's own words is accepted (${reworded.detail})`);
-        assert(singleBullet.passed,
-          `${kase.label}: wording only one bullet uses is that bullet's fact, not the résumé's refrain, so it is not gated here (${singleBullet.detail})`);
-      }
-      // Excused: a refrain made only of names, or only of the posting's own words.
-      const nameRefrain = checkSalientPhraseEcho(['I run Alpha Console for Beta Ledger.'], {
-        bulletTexts: ['Ran Alpha Console for Beta Ledger.', 'Supported Alpha Console for Beta Ledger.'],
-      });
-      const postingRefrain = checkSalientPhraseEcho(['We shipped the new scheduler on time and under budget.'], {
-        bulletTexts: refrainCases[1].bullets,
-      }, 'Candidates deliver programs on time and under budget for a regional network.');
-      assert(nameRefrain.passed && postingRefrain.passed,
-        `a refrain of names, or of the posting's own words, is excused (${nameRefrain.detail}; ${postingRefrain.detail})`);
-      // The contract describes what is read; it names no phrase from any document.
-      assert(!/[“”"]/u.test(COVER_LETTER_SALIENT_ECHO_PHRASES) && !/scratch/iu.test(COVER_LETTER_SALIENT_ECHO_PHRASES),
-        `the contract wording lists no phrase: ${COVER_LETTER_SALIENT_ECHO_PHRASES}`);
-      return { floor: checkRedundancy(copied[0], sources[0]).detail, refrain: checkSalientPhraseEcho([refrainCases[0].echo], { bulletTexts: refrainCases[0].bullets }).detail };
+      return { floor: checkRedundancy(copied[0], sources[0]).detail };
     },
   },
   {
@@ -720,20 +642,6 @@ export default [
     },
   },
   {
-    name: 'cover letter harness: malformed sentence-initial experience infinitives request one grammar revision',
-    run: () => {
-      const fail = checkExperienceInfinitiveGrammar(['My experience to enforce access control policies taught me to make careful entry decisions.']);
-      assert(!fail.passed && fail.id === 'experience-infinitive-grammar'
-        && fail.detail.includes('paragraph 1') && fail.detail.includes('My experience enforcing'),
-      'the malformed exported construction must produce a specific gerund correction');
-      const toDate = checkExperienceInfinitiveGrammar(['My experience to date has taught me to make careful entry decisions.']);
-      const withNoun = checkExperienceInfinitiveGrammar(['My experience with access control policies taught me to make careful entry decisions.']);
-      assert(toDate.passed && withNoun.passed,
-        'valid experience constructions must not be mistaken for the narrow infinitive error');
-      return { fail: fail.detail, toDate: toDate.detail, withNoun: withNoun.detail };
-    },
-  },
-  {
     name: 'cover letter harness: generic duration-cliché rhetoric cannot receive a clean prose score',
     run: () => {
       const paragraphs = [
@@ -758,35 +666,6 @@ export default [
       assert(logistics.passed,
         'impersonal coverage language is not mistaken for a candidate-specific application logistics promise');
       return { generic: generic.detail, figures: figures.detail, logistics: logistics.detail };
-    },
-  },
-  {
-    name: 'cover letter harness: company specificity requires a research detail and skips honestly without research',
-    run: () => {
-      const pass = checkCompanySpecificity(['Your Northstar Dispatch program makes the incident model concrete.'], 'Northstar Dispatch expanded its regional incident program in 2024.', 'Acme');
-      assert(pass.passed, `capitalized research detail must pass: ${pass.detail}`);
-      const fail = checkCompanySpecificity(['Acme is a company I want to join.'], 'Acme announced a regional incident program.', 'Acme');
-      assert(!fail.passed, 'a bare company mention must not satisfy research specificity');
-      const multiWordCompanyOnly = checkCompanySpecificity(['Acme Global Systems is a company I want to join.'], 'Acme Global Systems announced a regional incident program.', 'Acme Global Systems');
-      assert(!multiWordCompanyOnly.passed, 'a capitalized bigram inside a multi-word company name must not satisfy research specificity');
-      const unicode = checkCompanySpecificity(['Votre Équipe Atlas rend cette direction concrète.'], 'Équipe Atlas a étendu son programme régional.', 'Acme');
-      assert(unicode.passed && unicode.detail.includes('Équipe Atlas'),
-        'Unicode capitalized research details must be recognized rather than rejected by ASCII-only word boundaries');
-      const yearOnly = checkCompanySpecificity(['Acme expanded the program in 2024.'], 'Acme expanded Northstar Dispatch in 2024.', 'Acme');
-      const figureOnly = checkCompanySpecificity(['Acme reported 32% growth.'], 'Acme reported 32% growth for Northstar Dispatch.', 'Acme');
-      assert(!yearOnly.passed && !figureOnly.passed,
-        'a research-sourced year or figure cannot substitute for the required proper-name detail');
-      const plannedMismatch = checkCompanySpecificity(
-        ['The Atlas Program makes this direction concrete.'],
-        'Northstar Dispatch and Atlas Program support distinct operations.',
-        'Acme',
-        'Northstar Dispatch',
-      );
-      assert(!plannedMismatch.passed && plannedMismatch.detail.includes('Northstar Dispatch'),
-        'prose must preserve the planned proper detail, not swap in a different research bigram');
-      const skipped = checkCompanySpecificity(['A focused argument.'], '', 'Acme');
-      assert(skipped.passed && skipped.detail.includes('skipped'), 'unavailable research must skip rather than fail');
-      return { pass: pass.detail, fail: fail.detail, multiWordCompanyOnly: multiWordCompanyOnly.detail, unicode: unicode.detail, yearOnly: yearOnly.detail, figureOnly: figureOnly.detail, plannedMismatch: plannedMismatch.detail, skipped: skipped.detail };
     },
   },
   {
@@ -891,7 +770,7 @@ export default [
     },
   },
   {
-    name: 'cover letter harness: parallel ranges, prior-employer openings, and domain labels receive concrete repairs',
+    name: 'cover letter harness: parallel ranges and prior-employer openings receive concrete repairs',
     run: () => {
       const faulty = checkParallelStructure(['I reviewed each grant from the application form through presenting findings to the board.']);
       const opaque = checkParallelStructure(['I reviewed grant proposals, running each from the application form through a findings presentation to the board.']);
@@ -915,26 +794,6 @@ export default [
         && parallel.passed,
         'a span between prose endpoints ends with to, and through survives only for an enumerable series');
 
-      // Three unrelated domains: the rule is an event-class relation (a completed
-      // acquisition entails the selection of the same thing), not one sentence.
-      const entailedCases = [
-        'Before those autoclaves were purchased, the clinic had to pick them, and I ran the trials.',
-        'Before the new curriculum was adopted, the school board had to choose it, and I drafted the rubric.',
-        'Prior to the routing tools being licensed, finance had to select them, and I built the comparison.',
-      ];
-      const entailed = checkEntailedPremise(entailedCases);
-      const informative = checkEntailedPremise([
-        'Before the clinic adopted an autoclave, I had to evaluate the market.',
-        'Before the rollout shipped, I had to map every field by hand.',
-        'Before those autoclaves were purchased, the clinic had to test them against the old workflow.',
-        'Before the board adopted the curriculum, we had to choose which grades to pilot.',
-      ]);
-      assert(!entailed.passed && entailed.id === 'entailed-premise'
-        && entailed.detail.includes('already entails the choice')
-        && (entailed.detail.match(/sets up with/gu) || []).length === entailedCases.length
-        && informative.passed,
-      `a setup clause is rejected only when the acquisition it names already entails the obligation it claims (${entailed.detail}; ${informative.detail})`);
-
       const abrupt = checkPriorEmployerOpening(
         ['At Brackenfield Freight Company, I evaluated vendor products before company-wide adoption.'],
         ['Brackenfield Freight Company'],
@@ -947,11 +806,6 @@ export default [
         && framed.passed,
       'a prior employer in the opening is contextualized for a reader who does not know the organization');
 
-      const broadDomain = checkVagueDomainWorkLabel(['My logistics work extends this evidence with software design.']);
-      const concreteDomain = checkVagueDomainWorkLabel(['My work on warehouse-slotting software extends this evidence with software design.']);
-      assert(!broadDomain.passed && broadDomain.detail.includes('name the supported software, system, or responsibility')
-        && concreteDomain.passed,
-      'cross-domain evidence names the concrete work rather than implying broad industry or operational tenure');
       const vagueActors = checkReferenceClarity([
         'I moved the billing queue across with their records.',
         'We reconciled the nightly feed against their ledgers.',
@@ -979,7 +833,7 @@ export default [
       assert(!detachedModifier.passed && detachedModifier.detail.includes('move the earlier action beside “after”')
         && attachedModifier.passed,
       'temporal modifiers remain beside the action they modify');
-      return { faulty: faulty.detail, opaque: opaque.detail, abrupt: abrupt.detail, broadDomain: broadDomain.detail, vagueActors: vagueActors.detail, detachedModifier: detachedModifier.detail };
+      return { faulty: faulty.detail, opaque: opaque.detail, abrupt: abrupt.detail, vagueActors: vagueActors.detail, detachedModifier: detachedModifier.detail };
     },
   },
   {
@@ -1129,84 +983,8 @@ export default [
     },
   },
   {
-    name: 'cover letter harness: additive seams, advertisement references, and asserted equivalences request an argumentative repair',
+    name: 'cover letter harness: advertisement references, prospective-contribution tense, and asserted equivalences request an argumentative repair',
     run: () => {
-      const seam = checkAdditiveSeam([
-        'I built an internal scheduling tool from scratch. I also wrote a claims assistant for the same company.',
-        'I built a driver notification tool too.',
-      ]);
-      assert(!seam.passed && seam.id === 'additive-seam'
-        && seam.detail.includes('paragraph 1 appends evidence with a bare additive connective (“I also wrote a claims assistant for the …”)')
-        && seam.detail.includes('paragraph 2 appends evidence with a bare additive connective (“I built a driver notification tool too.”)')
-        && seam.detail.includes('state the gap or need this evidence answers before naming the artifact'),
-      'the additive opener and the trailing “too” seam are both quoted and repaired argumentatively rather than lexically');
-      const adjacentBuild = checkAdditiveSeam([
-        'Additionally, I built the berth-booking service the broker runs every morning.',
-        'I also personally built the driver notification path.',
-      ]);
-      assert(!adjacentBuild.passed
-        && adjacentBuild.detail.includes('paragraph 1 appends evidence with a bare additive connective (“Additionally, I built the berth-booking service')
-        && adjacentBuild.detail.includes('paragraph 2 appends evidence with a bare additive connective (“I also personally built the driver notification'),
-      'the seam still fires when the build verb follows the connective subject directly or behind a single -ly adverb');
-      const midSentenceTrailer = checkAdditiveSeam([
-        'I built the intake system from scratch too, in modern tooling, covering every site.',
-      ]);
-      assert(!midSentenceTrailer.passed
-        && midSentenceTrailer.detail.includes('paragraph 1 appends evidence with a bare additive connective (“I built the intake system from scratch too,'),
-      'an additive “too” followed by a comma is the same appended proof as one that ends the sentence');
-      const connective = checkAdditiveSeam([
-        'I also learned to read incomplete incident reports quickly.',
-        'I built the scheduler because the paper process kept losing signed slips.',
-        'In addition, I supported the staff who wrote the policy.',
-        'I also saw how a poorly designed intake process created rework for the front office.',
-        'I built dashboards that were too slow to ship at first, then fixed them.',
-        'I built the intake flow as well as the reporting layer.',
-      ]);
-      assert(connective.passed,
-        `an additive opener without adjacent build evidence, build evidence without a seam, a build verb buried in a subordinate clause, a degree “too” followed by the word it modifies, and a mid-sentence “as well as” comparative are ordinary connective prose: ${connective.detail}`);
-      const opaqueResponsibilityPivot = checkResponsibilityTransition([
-        'The booking tool I extended needed role-limited views so dispatchers saw only what their depot allowed. Keeping the fleet data consistent across its tools was a different problem. I solved it with nightly integration jobs.',
-        'The same job also included assessing software the company would adopt instead of build.',
-      ]);
-      assert(!opaqueResponsibilityPivot.passed && opaqueResponsibilityPivot.id === 'responsibility-transition'
-        && opaqueResponsibilityPivot.detail.includes('paragraph 1 shifts from “Keeping the fleet data consistent across its tools …”')
-        && opaqueResponsibilityPivot.detail.includes('through an opaque problem label')
-        && opaqueResponsibilityPivot.detail.includes('paragraph 2 opens with “The same job also included assessing software the …”')
-        && opaqueResponsibilityPivot.detail.includes('shared job scope is not a bridge between responsibilities'),
-      'opaque problem-to-solution pivots and same-job paragraph openers require a substantive responsibility bridge');
-      // Bare category labels, in three unrelated domains, with no determiner,
-      // name, figure or constraint anywhere in the label: one kind of work is
-      // called broader than another without saying how.
-      const abstractCategoryPivot = checkResponsibilityTransition([
-        'Vendor onboarding extended my pharmacy purchasing work beyond contract negotiation.',
-        'Beyond shift scheduling, I used a spreadsheet to connect the rota with the payroll export.',
-      ]);
-      const otherDomainPivot = checkResponsibilityTransition([
-        'Curriculum planning also broadened my classroom practice beyond lesson preparation.',
-        'Beyond freight handling, I tracked each carrier invoice against the booking record.',
-      ]);
-      assert(!abstractCategoryPivot.passed
-        && abstractCategoryPivot.detail.includes('paragraph 1 says “Vendor onboarding extended my pharmacy purchasing work beyond contract negotiation.”')
-        && abstractCategoryPivot.detail.includes('only renames one work category as broader than another')
-        && abstractCategoryPivot.detail.includes('paragraph 2 opens evidence with a bare category transition (“Beyond shift scheduling, I used a spreadsheet to …”)')
-        && abstractCategoryPivot.detail.includes('“beyond” marks addition but does not explain the relationship')
-        && !otherDomainPivot.passed
-        && otherDomainPivot.detail.includes('only renames one work category as broader than another')
-        && otherDomainPivot.detail.includes('opens evidence with a bare category transition'),
-      `abstract work categories and bare beyond-openers cannot stand in for the relationship between proofs, in any domain (${abstractCategoryPivot.detail} | ${otherDomainPivot.detail})`);
-      const detachedRelevance = checkDetachedRelevanceClaim([
-        "As a software engineer for Brackenfield Freight Company, I shifted billing records and rate tables onto vendor-hosted software, work relevant to this role's carrier onboarding and cross-depot reporting responsibilities.",
-      ]);
-      const explainedRelevance = checkDetachedRelevanceClaim([
-        "As a software engineer for Brackenfield Freight Company, I retired the in-house billing system and wrote the changeover checks that kept rate tables aligned, which is the carrier-onboarding work this role describes.",
-        'Experience relevant to this role includes writing changeover checks and reconciliation reports for replacement software.',
-      ]);
-      assert(!detachedRelevance.passed && detachedRelevance.id === 'detached-relevance-claim'
-        && detachedRelevance.detail.includes("work relevant to this role's")
-        && detachedRelevance.detail.includes('using conditional language for work that would occur after hiring'),
-      'a trailing relevance assertion cannot make the recruiter infer the action-to-responsibility connection');
-      assert(explainedRelevance.passed,
-        `an explicit mechanism and a non-detached relevance noun phrase remain valid: ${explainedRelevance.detail}`);
       const presentContribution = checkProspectiveContributionTense([
         "That changeover experience helps me contribute to this role's carrier-onboarding responsibilities.",
       ]);
@@ -1233,57 +1011,6 @@ export default [
         `conditional target contribution and ordinary past-tense evidence remain valid: ${prospectiveContribution.detail}`);
       assert(historicalPreparation.passed,
         `readiness for documented past work at a prior employer remains valid: ${historicalPreparation.detail}`);
-      const mirroredCategoryScaffold = checkResponsibilityTransition([
-        'My clinic experience covers intake flow and records exchange. I handled intake flow by moving paper forms onto tablets. In separate records work, I addressed records exchange by connecting the front desk to the lab.',
-        'My clinic experience covers intake flow and records exchange. I handled intake flow such as moving paper forms onto tablets. I addressed the records exchange by connecting the front desk to the lab.',
-        'Her bakery chain spans sourcing and distribution. I tackled sourcing through weekly farm calls. I oversaw distribution by routing drivers to the busiest sites.',
-      ]);
-      assert(!mirroredCategoryScaffold.passed
-        && mirroredCategoryScaffold.detail.includes('paragraph 1 repeats mirrored abstract labels (“intake flow” then “records exchange”)')
-        && mirroredCategoryScaffold.detail.includes('paragraph 2 repeats mirrored abstract labels (“intake flow” then “records exchange”)')
-        && mirroredCategoryScaffold.detail.includes('paragraph 3 repeats mirrored abstract labels (“sourcing” then “distribution”)')
-        && mirroredCategoryScaffold.detail.includes('state the umbrella once, then let concrete action verbs demonstrate each branch'),
-      `an explicit umbrella must not turn the following evidence into mirrored light-verb category labels, including the “such as” variant and other domains (${mirroredCategoryScaffold.detail})`);
-      const bridgedResponsibilityPivot = checkResponsibilityTransition([
-        'The booking tool I extended needed role-limited views so dispatchers saw only what their depot allowed. Alongside that access-control work, I kept the fleet data consistent across its tools with nightly integration jobs.',
-        'That role also required me to assess software the company would adopt instead of build.',
-        'The cutover extended the catalog system to support interlibrary loans without interrupting circulation.',
-        'Beyond reshelving the branch catalog, I wrote a script to preserve borrower identifiers during cutover.',
-        'Moving operations exposed incompatible record identifiers, so I used a nightly load script to reconcile them before cutover.',
-        'My clinic experience covered two distinct needs: adapting intake flow and enabling records exchange. I moved paper forms onto tablets. Separately, I connected the front desk to the lab.',
-        // Faithful but label-adjacent: a determiner, a figure, a name, or a branch no earlier
-        // sentence stated takes each construction out of scope.
-        'Beyond scheduling the 14 night shifts, I wrote a macro to balance the overtime.',
-        'Beyond Alder Street staffing, I reconciled each carrier invoice against its booking.',
-        'Vendor onboarding also extended my Alder Street purchasing work beyond contract negotiation.',
-        'I handled the Tuesday backlog by triaging by clinic. I covered the weekend queue by rotating two drivers.',
-        'Beyond scheduling, there was little left to automate.',
-      ]);
-      assert(bridgedResponsibilityPivot.passed,
-        `supported bridges, concrete actions under one umbrella, and a minimal separation cue avoid opaque or mirrored category scaffolding: ${bridgedResponsibilityPivot.detail}`);
-      const evaluatedResponsibilityPivot = evaluateCoverLetterChecks({
-        plan: { mappings: [{}], companyHook: { detail: '' } },
-        paragraphs: ['Keeping the fleet data consistent across its tools was a separate challenge. I addressed it with nightly integration jobs.'],
-        evidence, researchText: '',
-      }).find(check => check.id === 'responsibility-transition');
-      assert(evaluatedResponsibilityPivot && !evaluatedResponsibilityPivot.passed,
-        'the complete cover-letter evaluator enforces opaque responsibility-transition repairs, not only the direct helper');
-      const evaluatedCategoryPivot = evaluateCoverLetterChecks({
-        plan: { mappings: [{}], companyHook: { detail: '' } },
-        paragraphs: ['Vendor onboarding extended my pharmacy purchasing work beyond contract negotiation. Beyond shift scheduling, I used a spreadsheet to connect the rota with payroll.'],
-        evidence, researchText: '',
-      }).find(check => check.id === 'responsibility-transition');
-      assert(evaluatedCategoryPivot && !evaluatedCategoryPivot.passed
-        && evaluatedCategoryPivot.detail.includes('only renames one work category as broader than another')
-        && evaluatedCategoryPivot.detail.includes('opens evidence with a bare category transition'),
-      'the complete evaluator routes both abstract category pivots into its single prose-revision attempt');
-      const evaluatedDetachedRelevance = evaluateCoverLetterChecks({
-        plan: { mappings: [{}], companyHook: { detail: '' } },
-        paragraphs: ["I shifted billing records and rate tables onto vendor-hosted software, experience directly relevant to this role's carrier onboarding responsibilities."],
-        evidence, researchText: '',
-      }).find(check => check.id === 'detached-relevance-claim');
-      assert(evaluatedDetachedRelevance && !evaluatedDetachedRelevance.passed,
-        'the complete evaluator routes detached relevance assertions into its single prose-revision attempt');
       const evaluatedPresentContribution = evaluateCoverLetterChecks({
         plan: { mappings: [{}], companyHook: { detail: '' } },
         paragraphs: ["That project prepared me to contribute to HPA's carrier onboarding and cross-depot reporting flows."],
@@ -1393,11 +1120,11 @@ export default [
       assert(equivalentForms.every(check => !check.passed && check.id === 'claimed-equivalence')
         && nonEquivalence.passed,
       `the asserted-equivalence family catches facets, aspects, and same-challenge-in-another-context forms without rejecting a normal transfer argument (forms=${equivalentForms.map(check => check.detail).join(' | ')}; control=${nonEquivalence.detail})`);
-      return { seam: seam.detail, posting: posting.detail, equivalence: equivalence.detail, opening: compactRestatedOpening.detail };
+      return { posting: posting.detail, equivalence: equivalence.detail, opening: compactRestatedOpening.detail };
     },
   },
   {
-    name: 'cover letter harness: candidate-first openings, exact requirement modality, evidence scope, and migration objects remain clear',
+    name: 'cover letter harness: candidate-first openings, exact requirement modality, and evidence scope remain clear',
     run: () => {
       const scaffolds = [
         'The posting requires a careful engineer for this work.',
@@ -1416,19 +1143,6 @@ export default [
         && !secondParagraphScaffold.passed && secondParagraphScaffold.detail.includes('paragraph 2')
         && supportedOpening.passed,
       `job-summary scaffolding is rejected at every paragraph opening while a candidate-first thesis remains valid (${scaffolds.map(check => check.detail).join(' | ')}; ${secondParagraphScaffold.detail}; ${supportedOpening.detail})`);
-
-      const ambiguousMigration = checkMigrationObjectClarity([
-        'The invoicing/claims-tracking systems moved to vendor-hosted software.',
-        'Claims tracking migrated after validation.',
-      ]);
-      const clearMigration = checkMigrationObjectClarity([
-        'I migrated the invoicing system, the claims-tracking system, and both sets of records to vendor-hosted software.',
-        'The sign-in / sign-out process remained available during the rollout.',
-        'The sign-in/sign-out system migrated to the new platform.',
-      ]);
-      assert(!ambiguousMigration.passed && ambiguousMigration.detail.includes('invoicing/claims-tracking systems moved')
-        && ambiguousMigration.detail.includes('tracking migrated') && clearMigration.passed,
-      `migration copy names its actual object and permits ordinary slash pairs outside migration claims (${ambiguousMigration.detail}; ${clearMigration.detail})`);
 
       const modalityQuote = 'Use the workflow platform to support review work.';
       const modalityParagraph = 'My capability designing review workflows is supported by my past work. I configured the workflow platform to improve review quality. I would integrate the workflow platform into this role’s review work.';
@@ -1506,7 +1220,7 @@ export default [
         `${kase.label}: prospective target work stays valid, a tool-assisted practice cannot become prior shipment of a product powered by that tool, and a direct build proves it (${prospective.detail}; ${overclaim.detail}; ${directBuild.detail})`);
       }
       const badScope = scopeCheck(scopeCases[0], scopeCases[0].badClaim, scopeCases[0].proof, scopeCases[0].badRelevance);
-      return { opening: scaffolds[0].detail, migration: ambiguousMigration.detail, modality: modality.detail, scope: badScope.detail };
+      return { opening: scaffolds[0].detail, modality: modality.detail, scope: badScope.detail };
     },
   },
   {
@@ -1641,7 +1355,7 @@ export default [
     },
   },
   {
-    name: 'cover letter harness: runaway sentences, semicolons, dash splices, and bureaucratic register carry plain repairs',
+    name: 'cover letter harness: runaway sentences, semicolons, and dash splices carry plain repairs',
     run: () => {
       const long = checkSentenceLength(['The scheduling rewrite began when the paper receiving log kept losing signed delivery slips, so I mapped every handoff between the dock, the yard office, and the billing desk in order to find the point where a slip could vanish without anyone noticing it had gone missing at all.']);
       assert(!long.passed && long.id === 'sentence-length'
@@ -1739,205 +1453,15 @@ export default [
           assert(advisory.passed, `the advisory check never sends a blessed colon back for revision: ${copy} -> ${advisory.detail}`);
         }
       }
-      const register = checkPlainRegister([
-        'I am in possession of a valid driver licence for the depot fleet.',
-        'I possess a valid first aid certificate for the site.',
-      ]);
-      assert(!register.passed && register.id === 'plain-register'
-        && register.detail.includes('paragraph 1 uses bureaucratic register (“in possession of”)')
-        && register.detail.includes('(“possess a valid”)'),
-      'the fixed bureaucratic formulas ask for plain first-person English');
-      const plain = checkPlainRegister(['I have a valid driver licence, and I can work weekends in the depot.']);
-      assert(plain.passed, `plain first-person logistics facts must never become revision work: ${plain.detail}`);
-      const missingIntroComma = checkIntroductoryWorkplaceComma([
-        'At the company I delivered software through manual and rule-based workflows.',
-      ]);
-      const introCommaPresent = checkIntroductoryWorkplaceComma([
-        'At the company, I delivered software through manual and rule-based workflows.',
-        'At times I chose a traditional workflow.',
-      ]);
-      const namedWorkplaceMissingComma = checkIntroductoryWorkplaceComma([
-        'At Northstar Systems I led a platform changeover.',
-      ], ['Northstar Systems']);
-      assert(!missingIntroComma.passed
-        && missingIntroComma.detail.includes('insert a comma after “At the company”')
-        && !namedWorkplaceMissingComma.passed
-        && namedWorkplaceMissingComma.detail.includes('insert a comma after “At Northstar Systems”')
-        && introCommaPresent.passed,
-      'introductory workplace phrases cover generic organization types and supplied employer names without turning every short adjunct into a mandatory-comma rule');
-      const ambiguousPoint = checkVisualReferencePrecision([
-        'An agent walking someone through an on-screen task cannot point at the control it means.',
-      ]);
-      const ambiguousVariant = checkVisualReferencePrecision([
-        'The AI assistant cannot point out which button opens the panel.',
-      ]);
-      const visualPoint = checkVisualReferencePrecision([
-        'An automated guide cannot visually point to the relevant part of the window.',
-      ]);
-      // No actor is named in the rule: any subject that cannot point at a concrete UI
-      // target gets the same repair, and a metaphorical “point to” stays untouched.
-      const anyActor = checkVisualReferencePrecision([
-        'A first-time visitor cannot point at the field they mean when the form has a dozen of them.',
-      ]);
-      const metaphoricalPoint = checkVisualReferencePrecision([
-        'I cannot point to a single metric that explains the delay.',
-      ]);
-      assert(!ambiguousPoint.passed
-        && ambiguousPoint.detail.includes('visually indicate the on-screen control')
-        && !ambiguousVariant.passed
-        && !anyActor.passed
-        && metaphoricalPoint.passed
-        && visualPoint.passed,
-      'screen-guidance prose recognizes varied actors, targets, and pointing constructions while accepting an explicit visible limitation');
-      const conditionalClose = checkDirectWelcomeClosing(['I would welcome the chance to talk about that work.']);
-      const conditionalConversation = checkDirectWelcomeClosing(['I would welcome a conversation about how that combination could support the HARBOR rebuild.']);
-      const conditionalDiscussion = checkDirectWelcomeClosing(['I’d welcome a discussion about the release path.']);
-      const deferentialVariant = checkDirectWelcomeClosing(['I would be pleased to discuss the rollout.']);
-      const directClose = checkDirectWelcomeClosing(['I welcome a conversation about how my release-workflow experience could support the team’s deployment process.']);
-      const employerChoiceClose = checkDirectWelcomeClosing(['I welcome a conversation about whether the voice assistant or browser agent should be the first prototype.']);
-      const nonClosingUse = checkDirectWelcomeClosing([
-        'I would welcome the chance to review that question during discovery.',
-        'The rollout work is the contribution I want to continue here.',
-      ]);
-      const selfDirectedClose = checkDirectWelcomeClosing([
-        'I hope to learn more about how the team approaches release review.',
-      ]);
-      const bareLookForwardClose = checkDirectWelcomeClosing([
-        'I look forward to learning more about how the team approaches release review.',
-      ]);
-      const prospectiveClose = checkDirectWelcomeClosing([
-        'I look forward to discussing how my release-workflow experience could support the team’s deployment process.',
-      ]);
-      const selfDirectedContribution = checkDirectWelcomeClosing([
-        'I hope to discuss how my operations experience could support the team’s service transition.',
-      ]);
-      const nonFinalIntent = checkDirectWelcomeClosing([
-        'I plan to discuss the implementation during onboarding. I look forward to discussing how my operations experience could support the service team.',
-      ]);
-      assert(!conditionalClose.passed
-        && conditionalClose.detail.includes('make the invitation direct')
-        && !conditionalConversation.passed && conditionalConversation.detail.includes('would welcome a conversation')
-        && !conditionalDiscussion.passed && conditionalDiscussion.detail.includes("I'd welcome a discussion")
-        && !deferentialVariant.passed
-        && directClose.passed
-        && !employerChoiceClose.passed
-        && employerChoiceClose.detail.includes('asks the employer to choose between initiatives')
-        && nonClosingUse.passed
-        && !selfDirectedClose.passed
-        && selfDirectedClose.detail.includes('ends with conversation or learning intent')
-        && !bareLookForwardClose.passed
-        && bareLookForwardClose.detail.includes('but no candidate contribution')
-        && prospectiveClose.passed
-        && selfDirectedContribution.passed
-        && nonFinalIntent.passed,
-      'the closing check catches final invitations that stop at conversation or learning while leaving contribution-connected and non-final intent alone');
-      // The observation used to name the GOAL ("direct") without the OPERATION
-      // (delete the modal), and its second clause pointed at the half of the
-      // sentence the writer had already satisfied — exactly why a real handoff
-      // enriched the contribution clause for 16 rounds and never dropped "would".
-      // The fix must name the operation, not re-present the contribution clause
-      // as the missing half, and must carry the contribution rule too, since
-      // deleting the modal moves the sentence onto DIRECT_CONVERSATION_CLOSE.
-      const conditionalOperationDetail = checkDirectWelcomeClosing(['I would welcome the chance to talk about that work.']).detail;
-      // "needs both halves" became "needs all three parts": the conditional
-      // branch grades the sentence before any of the three contribution
-      // predicates have run, so it always lists asset, action, AND target —
-      // the target half is the one a second incident (see the
-      // comment on contributionHalfRequirement) found this message never
-      // demonstrated at all, in any branch.
-      assert(conditionalOperationDetail.includes('delete that opening modal')
-        && conditionalOperationDetail.includes('make the invitation direct')
-        && conditionalOperationDetail.includes('the sentence needs all three parts')
-        && conditionalOperationDetail.includes('never a bare demonstrative')
-        && conditionalOperationDetail.includes('reach the employer’s side too')
-        && !conditionalOperationDetail.includes('name the specific work or contribution to discuss'),
-      `the conditional-close rejection must name the operation (delete the modal) and carry the full three-part contribution rule in the same round, got ${JSON.stringify(conditionalOperationDetail)}`);
-      // A closing that reuses a noun phrase an earlier paragraph already used
-      // satisfies this check and trips checkRepeatedPhrase; 5 of the incident's
-      // 16 rejections also named repeated-phrase. The remediation states that
-      // counter-pressure by reading MIN_CROSS_PARAGRAPH_REPEAT_WORDS rather than
-      // a hardcoded number, so the floor can never drift from what
-      // checkRepeatedPhrase actually enforces.
-      assert(conditionalOperationDetail.includes(`${MIN_CROSS_PARAGRAPH_REPEAT_WORDS} or more words carried verbatim`),
-      `the remediation must state the cross-paragraph repeat floor by constant, got ${JSON.stringify(conditionalOperationDetail)}`);
-      // \bI\s+(?:would|'d)\s+be\s+… forced a space before "'d" that the
-      // contraction never has, so "I'd be glad to discuss…" escaped the check
-      // entirely while "I would be glad to discuss…" was caught beside it.
-      const spacedGladVariant = checkDirectWelcomeClosing(['I would be glad to discuss the rollout.']);
-      const contractedGladVariant = checkDirectWelcomeClosing(["I'd be glad to discuss the rollout."]);
-      const curlyContractedGladVariant = checkDirectWelcomeClosing(['I’d be glad to discuss the rollout.']);
-      assert(!spacedGladVariant.passed
-        && !contractedGladVariant.passed && contractedGladVariant.detail.includes("I'd be glad to discuss")
-        && !curlyContractedGladVariant.passed,
-      'the "I would be glad/happy/pleased to" close must be caught in its contracted spelling too, straight or curly apostrophe alike');
-      // checkDirectWelcomeClosing graded only sentences(paragraph).at(-1), so a
-      // trailing courtesy sentence with no invitation and no contribution
-      // masked whatever closing sentence stood before it.
-      const conditionalMaskedByCourtesy = checkDirectWelcomeClosing([
-        'I would welcome the chance to talk about that work. Thank you for your consideration.',
-      ]);
-      const directMaskedByCourtesy = checkDirectWelcomeClosing([
-        'I welcome a conversation about that work. Thank you for your consideration.',
-      ]);
-      const goodCloseFollowedByCourtesy = checkDirectWelcomeClosing([
-        'I welcome a conversation about how my release-workflow experience could support the team’s deployment process. Thank you for your consideration.',
-      ]);
-      assert(!conditionalMaskedByCourtesy.passed
-        && conditionalMaskedByCourtesy.detail.includes('make the invitation direct')
-        && !directMaskedByCourtesy.passed
-        && directMaskedByCourtesy.detail.includes('never connects a candidate asset')
-        && goodCloseFollowedByCourtesy.passed,
-      'a trailing courtesy sentence must not mask the invitation sentence graded before it, and must not block a closing that already satisfies the rule');
-      const awkwardGap = checkPlainRegister(['I answered that gap with a native overlay.']);
-      assert(!awkwardGap.passed && awkwardGap.detail.includes('use “closed the gap” or “addressed the gap”'),
-        'unnatural gap wording must receive a plain contemporary repair');
-      const evidenceBring = checkPlainRegister(['Product evaluation, route planning, and nightly load scripts are the evidence I would bring.']);
-      assert(!evidenceBring.passed && evidenceBring.detail.includes('say what experience, skills, or work the candidate would bring'),
-        'a closing distinguishes the candidate\'s capabilities from the evidence supporting the argument');
       assert(sentences('The desk logged forms at 9 a.m. for Harbourline Inc. and closed at noon.').length === 1
         && sentences('').length === 0,
       'the shared segmenter keeps abbreviations in one sentence so every sentence-level check counts the same units');
-      return { long: long.detail, punctuation: punctuation.detail, register: register.detail, introComma: missingIntroComma.detail, visualPoint: ambiguousPoint.detail, directClose: conditionalClose.detail };
+      return { long: long.detail, punctuation: punctuation.detail };
     },
   },
   {
-    name: 'cover letter harness: garden paths, filler bridges, and deployment-role errors receive narrow repairs',
+    name: 'cover letter harness: deployment-role errors and coined equivalences receive narrow repairs',
     run: () => {
-      const gardenPath = checkToolCallsGardenPath([
-        'Rebuilding a system without recreating every existing tool calls for clear evidence about which work belongs in a custom application.',
-      ]);
-      const directPredicate = checkToolCallsGardenPath([
-        'Rebuilding a system without recreating every existing tool requires clear evidence about which work belongs in a custom application.',
-      ]);
-      assert(!gardenPath.passed
-        && gardenPath.detail.includes('garden-path reading with “tool calls for”')
-        && gardenPath.detail.includes('replace “calls for” with “requires”')
-        && directPredicate.passed,
-      'a familiar compound noun cannot conceal the intended “calls for” predicate, while a direct predicate remains legal');
-
-      // A scope phrase that names a category of built software, then a build of
-      // that same category with nothing after it, restates itself. The category
-      // is read from the sentence's own words, so it holds in any domain.
-      const fillerBridges = [
-        'For tools that remained in-house, I built software.',
-        'Where the clinic relied on desktop programs, I developed applications.',
-        'With the old billing system retired, I wrote code.',
-        'For the platforms the warehouse kept, I created systems.',
-      ].map(sentence => checkLowInformationToolBuild([sentence]));
-      const specificBridges = checkLowInformationToolBuild([
-        'For tools that remained in-house, I built the workflow that reconciled operator changes before release.',
-        'For workflows that remained manual, I built software that reconciled operator changes before release.',
-        'For systems that lacked audit trails, I built software that recorded each operator change.',
-        // The scope names something other than a software category, so the sentence carries information.
-        'For the night shift at the pharmacy, I built software.',
-        'When the grant deadline moved up, I built software.',
-        // A modifier on the object makes it a specific thing.
-        'For tools that remained in-house, I built audit software.',
-      ]);
-      assert(fillerBridges.every(check => !check.passed && check.detail.includes('only restates that the scoped thing is software'))
-        && specificBridges.passed,
-      `a terminal category-restating bridge is removed or made specific without rejecting concrete work (${fillerBridges.map(check => check.detail).join(' | ')}; ${specificBridges.detail})`);
-
       // The tool a letter credits with containerizing is judged against what the
       // current résumé credits, so the rule holds for any tool and any domain.
       const stackEvidence = {
@@ -2014,39 +1538,19 @@ export default [
         && mechanismFirst.passed,
       'a coined two-answers-to-one-decision frame cannot force nonparallel options into an equivalence');
 
-      const danglingTransition = checkDanglingParagraphTransition([
-        'The checklist kept every reviewer in control. The boundary between manual review and automated checks also shaped how I handled invoice matching at Northstar Depot.',
-        'I would bring careful architecture decisions to the target work.',
-      ]);
-      const developedTransition = checkDanglingParagraphTransition([
-        'The checklist kept every reviewer in control. At Northstar Depot, I applied the same boundary by routing flagged invoices through scripted validation.',
-        'I would bring careful architecture decisions to the target work.',
-      ]);
-      assert(!danglingTransition.passed
-        && danglingTransition.detail.includes('launching an undeveloped topic')
-        && developedTransition.passed,
-      'a non-final paragraph cannot end by launching a broad workplace claim that the letter never develops');
-
-
       const combined = evaluateCoverLetterChecks({
         plan: { mappings: [{}], companyHook: { detail: '' } },
         paragraphs: [
-          'Rebuilding a system without recreating every existing tool calls for clear evidence about which work belongs in a custom application.',
-          'For tools that remained in-house, I built software.',
           'I containerized it with Podman, Traefik, and Puma so one image could be promoted from staging to production hosts.',
-          'The boundary between manual review and automated checks also shaped how I handled invoice matching at Northstar Depot.',
           'A vendor service and an internal tool are two answers to one build-or-buy call.',
         ],
         evidence: stackEvidence,
       });
       const failures = new Map(combined.filter(check => !check.passed).map(check => [check.id, check.detail]));
-      assert(failures.has('tool-calls-garden-path')
-        && failures.has('low-information-tool-build')
-        && failures.has('containerization-technology-roles')
-        && failures.has('dangling-paragraph-transition')
+      assert(failures.has('containerization-technology-roles')
         && failures.has('claimed-equivalence'),
       `each exact regression case is part of the single-revision prose evaluation: ${[...failures.keys()].join(', ')}`);
-      return { gardenPath: gardenPath.detail, fillerBridge: fillerBridges[0].detail, mismatchedRoles: mismatchedRoles.detail, danglingTransition: danglingTransition.detail };
+      return { mismatchedRoles: mismatchedRoles.detail };
     },
   },
   {
@@ -2077,32 +1581,25 @@ export default [
         companyName: 'Harbourline Customs',
       });
       const failed = new Map(checks.filter(check => !check.passed).map(check => [check.id, check.detail]));
-      const expected = ['generic-phrases', 'compound-hyphenation', 'anchor-relevance', 'additive-seam',
-        'posting-reference', 'claimed-equivalence', 'sentence-length', 'punctuation-style', 'plain-register',
-        'opening-demonstrative'];
+      const expected = ['generic-phrases', 'anchor-relevance',
+        'posting-reference', 'claimed-equivalence', 'sentence-length', 'punctuation-style'];
       assert(expected.every(id => failed.has(id)),
         `the synthetic defect letter must fail every register check: ${expected.filter(id => !failed.has(id)).join(', ') || 'none missing'}`);
       assert(failed.get('generic-phrases').includes('downsides and trade-offs')
-        && failed.get('compound-hyphenation').includes('write “in-house”')
         && failed.get('anchor-relevance').includes('paragraph 2 names 5 stack tools')
-        && failed.get('additive-seam').includes('paragraph 3 appends evidence with a bare additive connective')
         && failed.get('posting-reference').includes('(“your posting”)')
         && failed.get('claimed-equivalence').includes('(“maps onto”)')
         && failed.get('sentence-length').includes('60-word sentence')
         && failed.get('punctuation-style').includes('paragraph 2 uses a semicolon')
-        && failed.get('punctuation-style').includes('paragraph 2 uses a dash as a clause splice')
-        && failed.get('plain-register').includes('(“in possession of”)')
-        && failed.get('opening-demonstrative').includes('paragraph 4 opens with')
-        && failed.get('opening-demonstrative').includes('“evaluation”'),
+        && failed.get('punctuation-style').includes('paragraph 2 uses a dash as a clause splice'),
       'each failure quotes the specific defective construction the one revision attempt has to repair');
       assert(checks.every(check => typeof check.id === 'string' && typeof check.passed === 'boolean' && typeof check.detail === 'string'),
         'the register checks keep the result(id, passed, detail) contract the audit line and revision prompt consume');
       const openers = checks.filter(check => check.id === 'paragraph-openers');
       assert(openers.length === 1 && typeof openers[0].passed === 'boolean',
         `the paragraph-openers check is dispatched exactly once with a boolean verdict: ${openers.length}`);
-      const hostile = [checkCompoundHyphenation, checkAnchorRelevance, checkAdditiveSeam, checkPostingReference,
-        checkClaimedEquivalence, checkSentenceLength, checkPunctuationStyle, checkPlainRegister,
-        checkOpeningDemonstrative, checkParagraphOpeners]
+      const hostile = [checkCompoundHyphenation, checkAnchorRelevance, checkPostingReference,
+        checkClaimedEquivalence, checkSentenceLength, checkPunctuationStyle, checkParagraphOpeners]
         .map(check => check(['', null, undefined, 42, { toString: () => 'in house' }], null, undefined));
       assert(hostile.every(check => check && typeof check.passed === 'boolean' && typeof check.detail === 'string'),
         'a malformed or partially persisted paragraph array must yield a check result, never a thrown application-generation failure');
@@ -2110,7 +1607,7 @@ export default [
     },
   },
   {
-    name: 'cover letter harness: application logistics are rejected and opening demonstratives must anchor in the previous paragraph',
+    name: 'cover letter harness: application logistics are rejected in the argument plan and in prose',
     run: () => {
       // Work authorization is the candidate's own business and the pipeline
       // reads none of it: a letter that answers the posting's eligibility
@@ -2158,105 +1655,7 @@ export default [
       ]);
       assert(logisticsPositiveControls.passed,
         `system availability, historical travel duties, and neutral locations are not current logistics promises: ${logisticsPositiveControls.detail}`);
-      const unanchored = checkOpeningDemonstrative([
-        'I built the nightly data integration between the depot booking system and its vendor platforms.',
-        'That evaluation practice already covers AI products.',
-      ]);
-      assert(!unanchored.passed && unanchored.id === 'opening-demonstrative'
-        && unanchored.detail.includes('paragraph 2 opens with “That evaluation practice already …”')
-        && unanchored.detail.includes('“evaluation” or “practice”'),
-      'a paragraph-opening demonstrative must find its referent in the paragraph the reader just finished');
-      const anchored = checkOpeningDemonstrative([
-        'I ran the vendor product evaluations behind the company adoption decisions.',
-        'That evaluation practice already covers AI products.',
-      ]);
-      assert(anchored.passed, `a stemmed referent in the previous paragraph anchors the demonstrative: ${anchored.detail}`);
-      const fixedPhrase = checkOpeningDemonstrative([
-        'The integration reached both directions.',
-        'That is why the company kept the contract.',
-      ]);
-      assert(fixedPhrase.passed, `pronoun and fixed-phrase demonstratives are out of scope: ${fixedPhrase.detail}`);
-      const firstParagraph = checkOpeningDemonstrative(['That evaluation practice is the subject of this letter and needs no anchor.']);
-      assert(firstParagraph.passed, 'the first paragraph has no previous paragraph to anchor to and is never flagged');
-      const shorthandEmployer = checkOpeningEmployerShorthand([
-        'At Brackenfield Freight Company, I retired the in-house invoicing and claims systems in favour of vendor-hosted software.',
-        'The company chose that software because it was cheaper to keep running than the in-house systems.',
-      ], ['Brackenfield Freight Company']);
-      const explicitEmployer = checkOpeningEmployerShorthand([
-        'At Brackenfield Freight Company, I retired the in-house invoicing and claims systems in favour of vendor-hosted software.',
-        'Brackenfield Freight Company chose that software because it was cheaper to keep running than the in-house systems.',
-      ], ['Brackenfield Freight Company']);
-      const repeatedEmployer = checkAdjacentEmployerRepetition([
-        'In my software engineering role at Brackenfield Freight Company, I wrote a gate workflow that forwarded every tag scan to the right carrier portal.',
-        'At Brackenfield Freight Company, I also assembled a dispatch board whose front end and back end were designed to take on further tools.',
-      ], ['Brackenfield Freight Company']);
-      const conciseRoleReference = checkAdjacentEmployerRepetition([
-        'In my software engineering role at Brackenfield Freight Company, I wrote a gate workflow that forwarded every tag scan to the right carrier portal.',
-        'In that role, I also assembled a dispatch board whose front end and back end were designed to take on further tools.',
-      ], ['Brackenfield Freight Company']);
-      const disambiguatedEmployers = checkAdjacentEmployerRepetition([
-        'In my software engineering role at Brackenfield Freight Company, I integrated the dispatch system with a platform from Acme.',
-        'At Brackenfield Freight Company, I also assembled a dispatch board whose front end and back end were designed to take on further tools.',
-      ], ['Brackenfield Freight Company', 'Acme']);
-      const ordinaryDefiniteDescription = checkOpeningEmployerShorthand([
-        'At Brackenfield Freight Company, I retired the in-house invoicing and claims systems in favour of vendor-hosted software.',
-        'The system validated records before the cutover.',
-      ], ['Brackenfield Freight Company']);
-      const unanchoredCompany = checkOpeningEmployerShorthand([
-        'I retired the in-house invoicing and claims systems in favour of vendor-hosted software.',
-        'The company chose that software because it was cheaper to keep running than the in-house systems.',
-      ], ['Brackenfield Freight Company']);
-      assert(!shorthandEmployer.passed && shorthandEmployer.id === 'opening-employer-shorthand'
-        && shorthandEmployer.detail.includes('“The company chose …”')
-        && shorthandEmployer.detail.includes('Brackenfield Freight Company'),
-      'a new paragraph cannot replace a just-named prior employer with organization shorthand');
-      assert(explicitEmployer.passed && ordinaryDefiniteDescription.passed && unanchoredCompany.passed,
-        `an explicit employer bridge, ordinary definite description, and a company with no prior named-employer antecedent remain allowed: ${explicitEmployer.detail}; ${ordinaryDefiniteDescription.detail}; ${unanchoredCompany.detail}`);
-      // Both messages used to hand over a literal re-entry cue as the repair,
-      // and a live letter opened two of its four paragraphs
-      // with exactly that cue. They now describe what the opening should be
-      // about, name the employer because that is what makes the observation
-      // locatable, and quote nothing else beyond the employer's own name: the
-      // only quoted span in either message that is not the employer's name is
-      // the offending opening itself.
-      const employerMessages = [shorthandEmployer.detail, repeatedEmployer.detail];
-      assert(shorthandEmployer.detail.includes('open instead on whatever this paragraph is actually about')
-        && shorthandEmployer.detail.includes('“Brackenfield Freight Company” named in full where another employer or role could be the referent'),
-      `employer-shorthand feedback describes the repair and preserves names for ambiguity: ${shorthandEmployer.detail}`);
-      assert(!repeatedEmployer.passed
-        && repeatedEmployer.detail.includes('one established employer needs no re-introduction')
-        && repeatedEmployer.detail.includes("let the opening start from this paragraph's own subject")
-        && conciseRoleReference.passed && disambiguatedEmployers.passed,
-      `a needless adjacent employer-name repeat is flagged, while a concise cue and necessary disambiguation remain allowed: ${repeatedEmployer.detail}; ${conciseRoleReference.detail}; ${disambiguatedEmployers.detail}`);
-      // The offending opening is the one span either message may quote besides
-      // the employer's own name. Every other quoted run would be wording the
-      // letter can adopt, which is the rule stated beside
-      // checkRepeatedSentenceShape in coverLetterChecks.js and the mechanism
-      // that put one cue in two paragraphs. The employer name itself is now
-      // curly-quoted too (checkPriorEmployerOpening's comment in
-      // coverLetterChecks.js explains why: it keeps a job-specific name out of
-      // this check's fingerprint), so it is filtered out before applying that
-      // older rule rather than making the older rule blind to it.
-      const quotedSpans = employerMessages.flatMap(detail => [...detail.matchAll(/“([^”]*)”/gu)].map(([, span]) => span));
-      const employerNameQuotes = quotedSpans.filter(span => span === 'Brackenfield Freight Company');
-      const otherQuotedSpans = quotedSpans.filter(span => span !== 'Brackenfield Freight Company');
-      assert(employerNameQuotes.length === 4,
-        `both messages must curly-quote the employer's own name at every mention, twice each (quoted=${JSON.stringify(quotedSpans)})`);
-      assert(otherQuotedSpans.length === 1 && otherQuotedSpans[0] === 'The company chose …',
-        `neither employer message quotes a reusable phrase the letter could paste, beyond the employer's own name (quoted=${JSON.stringify(quotedSpans)})`);
-      assert(!employerMessages.some(detail => /\bin that role\b/iu.test(detail)),
-        `and neither one names the re-entry cue the shipped letter copied twice (messages=${JSON.stringify(employerMessages)})`);
-      const evaluatedEmployerShorthand = evaluateCoverLetterChecks({
-        plan: { mappings: [{}], companyHook: { detail: '' } },
-        paragraphs: [
-          'At Brackenfield Freight Company, I retired the in-house invoicing and claims systems in favour of vendor-hosted software.',
-          'The company chose that software because it was cheaper to keep running than the in-house systems.',
-        ],
-        evidence: { roles: [{ company: 'Brackenfield Freight Company' }] }, researchText: '',
-      }).find(check => check.id === 'opening-employer-shorthand');
-      assert(evaluatedEmployerShorthand && !evaluatedEmployerShorthand.passed,
-        'the complete evaluator routes paragraph-opening prior-employer shorthand into its single prose-revision attempt');
-      return { workStatusChecks: workStatusChecks.length, logistics: proseOnlyLogistics.detail, unanchored: unanchored.detail, shorthandEmployer: shorthandEmployer.detail, repeatedEmployer: repeatedEmployer.detail };
+      return { workStatusChecks: workStatusChecks.length, logistics: proseOnlyLogistics.detail };
     },
   },
   {
@@ -2735,33 +2134,10 @@ export default [
       assert(simulation.passed,
         `hyphenated and pluralized need wording must still bind a natural-language simulation bridge: ${simulation.detail}`);
 
-      // The letter is written three stages before the audit that this check
-      // reads, so the stage that writes a paragraph reports the half of this
-      // verdict the paragraph alone decides. That reporter must never reject a
-      // letter this check would accept, which is the property measured here:
-      // for a paragraph it reports, EVERY contiguous word-run of that
-      // paragraph is tried as the span it says is missing, and none of them
-      // makes this check pass. Adding the span it describes then does.
       const unmappableClaim = 'My delivery experience is directly relevant to this role.';
       const unmappableProof = 'I owned the internal reporting service for the colleagues who depend on it.';
       const unmappable = `${unmappableClaim} ${unmappableProof}`;
       const unmappablePosting = 'Engineer role focused on reliable system delivery. The team maintains internal services.';
-      const spanGaps = paragraphArgumentSpanGaps(unmappable, unmappablePosting);
-      assert(spanGaps.length === 1 && spanGaps[0].field === 'relevance',
-        `the drafting-stage reporter names the one span this paragraph cannot supply: ${JSON.stringify(spanGaps)}`);
-      assert(!paragraphArgumentSpanGaps(unmappable).length && paragraphArgumentSpanGaps(unmappableProof).some(gap => gap.field === 'relevance'),
-        'without the posting the reporter can only ask whether the paragraph has a sentence apart from its proof, the weaker verdict and still a subset');
-      const runs = [];
-      const unmappableWords = unmappable.split(/\s+/u);
-      for (let start = 0; start < unmappableWords.length; start += 1) {
-        for (let end = start + 1; end <= unmappableWords.length; end += 1) runs.push(unmappableWords.slice(start, end).join(' '));
-      }
-      const mappable = runs.some(relevance => checkParagraphArgumentLinks({
-        plan: { paragraphs: [{ argumentMapping: { claim: unmappableClaim, proof: unmappableProof, relevance, jobNeedQuote: 'reliable system delivery' } }] },
-        paragraphs: [unmappable], jobText: unmappablePosting,
-      }).passed);
-      assert(!mappable,
-        `no span of a paragraph reported by the drafting stage can satisfy this check (${runs.length} spans tried)`);
       // In whatever wording the writer chooses: this sentence has no modal and no stock frame.
       const repairedRelevance = 'Reliable system delivery is what this team needs from whoever owns that service.';
       const repairedParagraph = `${unmappable} ${repairedRelevance}`;
@@ -2774,14 +2150,14 @@ export default [
         } }] },
         paragraphs: [repairedParagraph], jobText: unmappablePosting,
       });
-      assert(!paragraphArgumentSpanGaps(repairedParagraph, unmappablePosting).length && repaired.passed,
-        `the span the reporter describes is the span that makes this check pass: ${repaired.detail}`);
+      assert(repaired.passed,
+        `a sentence apart from the proof that names the need makes this check pass: ${repaired.detail}`);
 
-      return { deficient: deficientCheck.detail, relevanceFirst: passingCheck.detail, naturalClaims: naturalClaims.length, presentPerfect: presentPerfect.detail, doppel: doppel.detail, simulation: simulation.detail, spansTried: runs.length };
+      return { deficient: deficientCheck.detail, relevanceFirst: passingCheck.detail, naturalClaims: naturalClaims.length, presentPerfect: presentPerfect.detail, doppel: doppel.detail, simulation: simulation.detail };
     },
   },
   {
-    name: 'cover letter harness: artifact-as-actor prose silently escapes the argument battery, and the abstraction beat is a legal claim span',
+    name: 'cover letter harness: artifact-as-actor prose is caught by the agency check, and a first-person proof satisfies it',
     run: () => {
       // A shipped letter that named the artifact as the actor in every
       // paragraph. Nothing rejected it: no paragraph trips the past-proof cue,
@@ -2793,32 +2169,18 @@ export default [
         'A separate project moved paper inspection sheets and maintenance histories into a shared register, combining conversion workflows with photographing, checking, and cutover tooling.',
         'Import scripts handled trailer records, and a lookup service opened the gate database through staff accounts.',
       ];
-      const escaped = artifactActor.every(paragraph => !paragraphArgumentSpanGaps(paragraph, 'reducing handoff effort').length);
       const agency = checkCandidateAgency(artifactActor);
-      assert(escaped && !agency.passed && agency.detail.includes('argumentMapping'),
+      assert(!agency.passed && agency.detail.includes('argumentMapping'),
         `artifact-as-actor paragraphs owe no span and must be caught by the agency check instead: ${agency.detail}`);
 
-      // The same evidence in the first person now owes a mapping, and the
-      // paragraph is reported until it carries the abstraction beat.
-      const posting = 'Make it easy for Routelink depots to grow their volume while reducing handoff effort and delay.';
+      // The same evidence in the first person satisfies the agency check.
       const evidence = 'As a Software Engineer at Brackenfield Freight Company, I built a kiosk app that read container tags at the gate and sent each movement to the shipping lines\u2019 booking portals.';
       const transfer = 'I would apply that consolidation work to Routelink\u2019s planning screens, so depots adding Cold Storage, Customs Hold, or Cross-Dock carry less of the handoff effort.';
       const warrant = 'The engineering was in absorbing those portals\u2019 differences into one surface, so the clerk at the gate acted on a single screen instead of learning which carrier owned which action.';
-      const withoutWarrant = paragraphArgumentSpanGaps(`${evidence} ${transfer}`, posting);
-      const withWarrant = paragraphArgumentSpanGaps(`${evidence} ${warrant} ${transfer}`, posting);
-      assert(withoutWarrant.length === 1 && withoutWarrant[0].field === 'claim' && !withWarrant.length,
-        `the abstraction beat is the span that closes the claim gap: ${JSON.stringify(withoutWarrant)} then ${JSON.stringify(withWarrant)}`);
       assert(checkCandidateAgency([`${evidence} ${warrant} ${transfer}`]).passed,
         'a first-person proof satisfies the agency check');
 
-      // A bare -ing mood is not an abstraction of the work. The gerund has to
-      // take an object, or "the work was mostly rewarding" would read as a
-      // capability claim.
-      const mood = paragraphArgumentSpanGaps(`${evidence} The work was mostly rewarding and challenging. ${transfer}`, posting);
-      assert(mood.length === 1 && mood[0].field === 'claim',
-        `an adjectival -ing cannot stand in for the abstraction beat: ${JSON.stringify(mood)}`);
-
-      return { agency: agency.detail, withoutWarrant: withoutWarrant.length, withWarrant: withWarrant.length };
+      return { agency: agency.detail };
     },
   },
   {
@@ -2847,127 +2209,6 @@ export default [
       assert(!failed.length,
         `a letter already written in the target register must produce no revision work: ${failed.map(check => `${check.id}: ${check.detail}`).join('; ')}`);
       return { checks: checks.length };
-    },
-  },
-  {
-    name: 'cover letter harness: the drafting-stage reporter reads the posting, so a paragraph with no legal relevance span is named before the letter freezes',
-    run: () => {
-      // A relevance span is recognised by the words it shares with the posting,
-      // in whatever wording the writer chose. That is necessary, not sufficient:
-      // the gate also rejects a span that reads as a generic relevance label, and
-      // a span that names nothing the posting asks for. This paragraph has a
-      // sentence apart from its proof, and still cannot be mapped: the one
-      // sentence that could carry the relevance is a generic label (every span
-      // wide enough to reach the posting's vocabulary also picks up “experience
-      // … relevant”), and every other sentence shares too little with the
-      // posting. Reported by nobody until the completion gate read it, with the
-      // letter three stages frozen and the only repair a rewrite.
-      const posting = 'Harbourline Customs needs reliable delivery for the broker interface.';
-      const paragraph = 'My delivery experience supports dependable work. I owned the reporting service. My experience is directly relevant to this role, and I would bring it along.';
-      const claim = 'My delivery experience supports dependable work.';
-      const proof = 'I owned the reporting service.';
-      assert(paragraphHasCandidatePastProof(paragraph),
-        'the fixture states a candidate past action, so the completion gate requires a mapping for it');
-      const withPosting = paragraphArgumentSpanGaps(paragraph, posting);
-      assert(withPosting.length === 1 && withPosting[0].field === 'relevance',
-        `the reporter names the relevance span this paragraph cannot supply: ${JSON.stringify(withPosting)}`);
-      assert(!paragraphArgumentSpanGaps(paragraph).length,
-        'without the posting the reporter can only ask whether the paragraph has a sentence apart from its proof, which is the weaker verdict and still a subset');
-
-      // Subset proof, the same way the sibling reporter proves it: every
-      // contiguous word run of the paragraph is tried as the relevance span
-      // and every contiguous word run of the posting as its job-need quote,
-      // and none of them makes the gate pass. The only relevance observations
-      // that read the proof are the apart-from-proof ones, so the assertion
-      // also records that some OTHER relevance observation fires on every pair
-      // — no choice of claim or proof could have rescued it.
-      const wordRuns = (value) => {
-        const words = value.split(/\s+/u);
-        const runs = [];
-        for (let start = 0; start < words.length; start += 1) {
-          for (let end = start + 1; end <= words.length; end += 1) runs.push(words.slice(start, end).join(' '));
-        }
-        return runs;
-      };
-      const relevanceRuns = wordRuns(paragraph);
-      const needRuns = wordRuns(posting);
-      const independentRelevanceFailure = /argumentMapping\.relevance (?:is missing|is not an exact normalized span|uses a generic relevance label|does not name a concrete responsibility)/u;
-      let mappablePairs = 0;
-      let proofDependentOnlyPairs = 0;
-      for (const relevance of relevanceRuns) {
-        for (const jobNeedQuote of needRuns) {
-          const verdict = checkParagraphArgumentLinks({
-            plan: { paragraphs: [{ argumentMapping: { claim, proof, relevance, jobNeedQuote } }] },
-            paragraphs: [paragraph], jobText: posting,
-          });
-          if (verdict.passed) mappablePairs += 1;
-          else if (!independentRelevanceFailure.test(verdict.detail)) proofDependentOnlyPairs += 1;
-        }
-      }
-      assert(!mappablePairs && !proofDependentOnlyPairs,
-        `no span of a reported paragraph is a legal relevance field for any posting quote (${relevanceRuns.length} spans × ${needRuns.length} quotes, ${mappablePairs} passed, ${proofDependentOnlyPairs} failed only on a proof-dependent rule)`);
-
-      // The generic label is skipped by the reporter as the gate skips it: the
-      // only sentence apart from the proof that carries two words of the posting
-      // also carries “experience … relevant”, so every span wide enough to reach
-      // both words is a generic label and every narrower span names one word only.
-      // Flipping a single word (“is relevant to” becomes “sits beside”) turns the
-      // same sentence into a legal span, which is the control.
-      const genericPosting = 'The team needs reliable delivery.';
-      const genericClaim = 'My practice is steady.';
-      const genericProof = 'I owned the reporting service.';
-      const genericParagraph = `${genericClaim} ${genericProof} Reliable experience is relevant to delivery.`;
-      assert(paragraphArgumentSpanGaps(genericParagraph, genericPosting).some(gap => gap.field === 'relevance'),
-        'a sentence that carries the posting’s words only inside a generic label is not a relevance span');
-      const genericWords = genericParagraph.split(/\s+/u);
-      let genericPassed = 0;
-      for (let start = 0; start < genericWords.length; start += 1) {
-        for (let end = start + 1; end <= genericWords.length; end += 1) {
-          if (checkParagraphArgumentLinks({
-            plan: { paragraphs: [{ argumentMapping: { claim: genericClaim, proof: genericProof, relevance: genericWords.slice(start, end).join(' '), jobNeedQuote: 'reliable delivery' } }] },
-            paragraphs: [genericParagraph], jobText: genericPosting,
-          }).passed) genericPassed += 1;
-        }
-      }
-      assert(!genericPassed, `no span of the generic-label paragraph passes the gate either (${genericPassed} passed)`);
-      assert(!paragraphArgumentSpanGaps(genericParagraph.replace('is relevant to', 'sits beside'), genericPosting).length,
-        'without the label the same sentence is a legal relevance span');
-
-      // Repairability, by following the reported rule literally: say, in a
-      // sentence of your own, how the work bears on a responsibility the posting
-      // states. The sentence carries no modal and no stock frame.
-      const repairedRelevance = 'Reliable delivery for the broker interface is what this role comes down to.';
-      const repaired = `${paragraph} ${repairedRelevance}`;
-      assert(!paragraphArgumentSpanGaps(repaired, posting).length,
-        'the span the reporter describes is the span that clears it');
-      const repairedVerdict = checkParagraphArgumentLinks({
-        plan: { paragraphs: [{ argumentMapping: {
-          claim, proof,
-          relevance: repairedRelevance,
-          jobNeedQuote: 'reliable delivery for the broker interface',
-        } }] },
-        paragraphs: [repaired], jobText: posting,
-      });
-      assert(repairedVerdict.passed,
-        `the repair the reporter names is one the completion gate accepts: ${repairedVerdict.detail}`);
-
-      // And the reporter must stay silent on a paragraph the gate accepts:
-      // supplying the posting may never turn a mappable paragraph into a
-      // drafting-stage rejection. A sentence that is also the claim is a legal
-      // relevance span when it names the need and stands apart from the proof.
-      const mappable = 'My delivery experience supports reliable delivery for the broker interface. I owned the reporting service.';
-      assert(!paragraphArgumentSpanGaps(mappable, posting).length
-        && checkParagraphArgumentLinks({
-          plan: { paragraphs: [{ argumentMapping: {
-            claim: 'My delivery experience supports reliable delivery',
-            proof,
-            relevance: 'supports reliable delivery for the broker interface',
-            jobNeedQuote: 'reliable delivery for the broker interface',
-          } }] },
-          paragraphs: [mappable], jobText: posting,
-        }).passed,
-      'a paragraph the completion gate accepts is not reported by the drafting stage');
-      return { spans: relevanceRuns.length, quotes: needRuns.length };
     },
   },
   {
@@ -3064,250 +2305,11 @@ export default [
       const fallback = authorCoverLetterEnvelope({ job: {}, evidence: { identity: {} } });
       assert(fallback.recipient === '' && fallback.salutation === 'Dear Hiring Team,' && fallback.signatureTitle === '', 'missing company/title keeps a usable envelope without a recipient block');
       const proseChecks = evaluateCoverLetterChecks({ plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs: ['The role needs clear prioritization.', 'My triage experience demonstrates that mechanism.'], evidence, researchText: '' });
-      assert(Array.isArray(proseChecks) && proseChecks.length === 55, 'prose helper returns every non-page deterministic check');
-      assert(proseChecks.slice(9).map(check => check.id).join(',')
-        === 'compound-hyphenation,parallel-structure,prior-employer-opening,prior-employer-short-form,named-artifact-introduction,opening-artifact-context,vague-domain-work-label,reference-clarity,modifier-attachment,migration-object-clarity,opening-posting-restatement,opening-job-summary-scaffolding,anchor-relevance,target-claim-scope,target-company-binding,detached-relevance-claim,prospective-contribution-tense,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,dangling-paragraph-transition,sentence-length,punctuation-style,paragraph-openers,body-point-count,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,opening-demonstrative,opening-employer-shorthand,adjacent-employer-repetition,entailed-premise,repeated-sentence-shape,repeated-phrase,candidate-agency,letter-proportion,repeated-transfer-carrier,dangling-demonstrative,ended-role-current-employment,transfer-carrier-budget,transfer-benefit-support',
-      'the register and style checks are appended after the established eight, and all of them read paragraphs only');
-      const emptyHookWithResearch = evaluateCoverLetterChecks({
-        plan: { mappings: [{ evidence: 'Triaged incomplete emergency reports under time pressure.' }], companyHook: { detail: '' } },
-        paragraphs: ['Careful prioritization under incomplete reports is the relevant mechanism.'],
-        evidence,
-        researchText: 'Northstar Dispatch supports Acme incident operations.',
-        companyName: 'Acme',
-      }).find(check => check.id === 'company-specificity');
-      assert(emptyHookWithResearch?.passed && emptyHookWithResearch.detail.includes('intentionally omitted'),
-        'available research must not force company padding after the plan intentionally leaves its hook empty');
+      assert(Array.isArray(proseChecks) && proseChecks.length === 28, 'prose helper returns every non-page deterministic check');
+      assert(proseChecks.slice(6).map(check => check.id).join(',')
+        === 'prior-employer-opening,prior-employer-short-form,named-artifact-introduction,opening-artifact-context,opening-posting-restatement,opening-job-summary-scaffolding,anchor-relevance,target-claim-scope,target-company-binding,prospective-contribution-tense,containerization-technology-roles,posting-reference,claimed-equivalence,sentence-length,punctuation-style,paragraph-openers,body-point-count,repeated-phrase,candidate-agency,letter-proportion,ended-role-current-employment,transfer-benefit-support',
+      'the register and style checks follow the first six, and all of them read paragraphs only');
       return { proseChecks: proseChecks.length };
-    },
-  },
-  {
-    name: 'cover letter harness: a sentence shape repeated through the letter is reported, and deliberate parallelism is not',
-    run() {
-      // The defect this measures came off a real letter: four paragraphs that
-      // each ended "I would <verb> this <noun> to <company>'s <work>". Every
-      // existing check was blind to it. checkShape counts paragraphs and
-      // words; checkRedundancy and checkSalientPhraseEcho compare the letter
-      // to the RÉSUMÉ, never paragraph to paragraph; and the rotated verb
-      // means no two closings share a run anywhere near the résumé shingle
-      // floor, so lowering that floor would not have found it either.
-      const templated = [
-        'Marrowgate builds dispatcher-facing screens on top of route services. Dispatch work crosses both sides in my experience. At Brackenfield Freight Company, I assembled an internal dispatch board with an Angular front end and one backend application, then containerized it for deployment across depot server configurations. I would apply this experience to features that cross Marrowgate’s screens and route services.',
-        'On the interface side, my experience includes Angular and Sass interface work. At Brackenfield Freight Company, I restricted each yard coordinator’s dock-appointment screens to their own terminal, using Angular and Sass. I would use this experience to build robust screens across Marrowgate’s browsers and devices.',
-        'On the backend side, my background includes Java APIs and shell automations. At Orrin Quay Surveying Partners, I wrote endpoints that gave controlled access to a regional bridge-sensor archive, plus shell automations that surfaced sensors missing scheduled readings. I would bring this experience to Marrowgate’s backend services, with attention to data quality.',
-        'My engineering practice also includes rule-based release workflows. At Brackenfield Freight Company, I paired manual review with scripted checks so releases stayed fast, inexpensive, and dependable. I would apply this practice to Marrowgate’s use of automated code checks in development.',
-      ];
-      const reported = checkRepeatedSentenceShape(templated);
-      assert(!reported.passed && reported.id === 'repeated-sentence-shape'
-        && reported.detail.includes('paragraph 1 sentence 4')
-        && reported.detail.includes('paragraph 4 sentence 3')
-        && reported.detail.includes('“i would * this *”')
-        && reported.detail.includes(`at most ${sharedSentenceShapeCeiling(templated.length)} of these ${templated.length} paragraphs`)
-        && reported.detail.includes(`at least ${templated.length - sharedSentenceShapeCeiling(templated.length)} of those ${templated.length} sentences must be rewritten`),
-      `the repeated shape is reported with the sentence each repeat sits in, the shape read, the ceiling that would pass, and how many sentences have to move (detail=${reported.detail})`);
-      // The message must carry no em dash and no replacement wording: it is
-      // quoted back to the writer verbatim, and candidate copy may not contain
-      // an em dash at all.
-      assert(!/[—–]/u.test(reported.detail),
-        `the observation hands the writer no dash it could copy into the letter (detail=${reported.detail})`);
-      // Why no run-length check could see this, measured rather than asserted.
-      const runWords = value => (String(value).toLowerCase().match(/[\p{L}\p{N}]+/gu) || []);
-      const closings = templated.map(paragraph => sentences(paragraph).slice(-1)[0]);
-      let longestClosingRun = 0;
-      for (let left = 0; left < closings.length; left++) {
-        for (let right = left + 1; right < closings.length; right++) {
-          const leftWords = runWords(closings[left]);
-          const rightWords = runWords(closings[right]);
-          leftWords.forEach((_, start) => {
-            let run = 0;
-            while (leftWords[start + run] && rightWords.includes(leftWords[start + run])
-              && leftWords[start + run] === rightWords[rightWords.indexOf(leftWords[start]) + run]) run++;
-            longestClosingRun = Math.max(longestClosingRun, run);
-          });
-        }
-      }
-      assert(longestClosingRun < 5,
-        `the templated closings share no run a shingle check could catch (longest=${longestClosingRun})`);
-
-      // Deliberate parallelism is not a template. Three of five paragraphs
-      // closing alike is epistrophe a writer chose; rejecting it would cost a
-      // handoff round for a non-defect, so the ceiling is all but two.
-      // The triad is spread across paragraphs 1, 3 and 5 rather than run
-      // together. That placement is the whole allowance now: the count ceiling
-      // permits parallelism a reader meets with a paragraph in between, and the
-      // adjacency branch reports the same triad back-to-back, because what a
-      // reader registers as one template filled three times is consecutive.
-      const parallel = [
-        'Training software for people who are not at a desk has to be boring in the right places. That is the kind of problem I like.',
-        'I containerized an internal dispatch board so any depot server produced one stack.',
-        'I restricted the depot invoicing system by staff role in Angular and Sass. That is the kind of problem I like.',
-        'My shell automations surfaced sensors whose scheduled readings were missing.',
-        'None of it was glamorous, and none of it broke quietly. That is the kind of problem I like.',
-      ];
-      assert(checkRepeatedSentenceShape(parallel).passed,
-        `a deliberate parallel triad spread through a five-paragraph letter is not a template (detail=${checkRepeatedSentenceShape(parallel).detail})`);
-      assert(sharedSentenceShapeCeiling(3) === 2 && sharedSentenceShapeCeiling(4) === 2
-        && sharedSentenceShapeCeiling(5) === 3 && sharedSentenceShapeCeiling(6) === 4,
-      'the ceiling is all but two paragraphs, and never below two');
-      // One more paragraph on the same shape is the template again, so the
-      // rule has a repair target rather than an open-ended instruction.
-      assert(!checkRepeatedSentenceShape([parallel[0],
-        'I containerized an internal dispatch board so any depot server produced one stack. That is the kind of problem I like.',
-        ...parallel.slice(2)]).passed,
-      'four of five paragraphs closing alike is past the ceiling');
-
-      // A letter too short to have a template is never reported: there is no
-      // repair to name when two paragraphs are the whole letter.
-      assert(checkRepeatedSentenceShape([
-        'I would bring this practice to the platform work.',
-        'I would bring this habit to the release work.',
-      ]).passed, `a ${MIN_SHARED_SHAPE_PARAGRAPHS - 1}-paragraph letter is below the floor the contract prints`);
-      // A sentence whose whole shape is shorter than the compared window, or
-      // is mostly content, is not judged rather than being judged by a frame
-      // too thin to mean anything.
-      assert(checkRepeatedSentenceShape(['Reports arrived late.', 'Reports arrived late.', 'Reports arrived late.']).passed,
-        `a sentence shorter than ${SENTENCE_SHAPE_FRAME_WORDS} shape elements carries no comparable shape`);
-      assert(checkRepeatedSentenceShape([undefined, null, '']).passed && checkRepeatedSentenceShape().passed,
-        'an absent or empty letter reports nothing');
-      return { ceiling: sharedSentenceShapeCeiling(4), longestClosingRun, frameWords: SENTENCE_SHAPE_FRAME_WORDS };
-    },
-  },
-  {
-    name: 'cover letter harness: the repeated-shape read is position-blind, so a template that moves out of the closings is still reported',
-    run() {
-      // Measured on a live paste run. A generated letter was rejected
-      // for four paragraphs closing on one shape. The repair rotated two
-      // closings, cleared the check, and left the template where a reader
-      // meets it first: every paragraph walked into its evidence with "As a
-      // <role> at <employer>, my <noun> included". Reading one position
-      // measured the position, not the letter, so every sentence is read now.
-      const movedTemplate = [
-        'This role combines dispatcher-facing screens with route services in the same implementation. Full-stack development across screens and services is familiar ground for me. As a Software Engineer at Brackenfield Freight Company, my full-stack work included an internal dispatch board whose screens used Angular. The board was packaged in containers for deployment across depot server configurations, and growth was planned for both the screens and the services. This experience would help with features that span screens and backend services in this role.',
-        'On the interface side, my experience includes Angular and Sass interface work. As a Software Engineer at Brackenfield Freight Company, I restricted each yard coordinator’s dock-appointment screens to their own terminal, using Angular and Sass. I would use this Angular and Sass experience to build robust screens across browsers and devices in this role.',
-        'On the backend side, my background includes Java APIs and shell automations. As a Survey Analyst at Orrin Quay Surveying Partners, my work included Java endpoints that gave controlled access to a regional bridge-sensor archive. Shell automations I maintained told inspectors when a sensor had not logged the readings scheduled for a visit. This Java and shell experience would support backend services in this role, with attention to data quality.',
-        'Rule-based checking complements the cross-stack implementation this role requires. As a Software Engineer at Brackenfield Freight Company, my engineering practice included manual review and scripted release workflows. Those workflows kept releases fast, inexpensive, and dependable. I would apply this practice while developing screens and services with automated code checks in this role.',
-      ];
-      // The blind spot, measured rather than asserted: read only the closing
-      // sentence and this letter is inside the ceiling on every shape.
-      const closingShapes = new Map();
-      movedTemplate.forEach(paragraph => {
-        const probe = checkRepeatedSentenceShape(new Array(3).fill(sentences(paragraph).slice(-1)[0]));
-        const frame = /same sentence shape “([^”]*)”/u.exec(probe.detail)?.[1];
-        if (frame) closingShapes.set(frame, (closingShapes.get(frame) || 0) + 1);
-      });
-      assert(Math.max(...closingShapes.values()) <= sharedSentenceShapeCeiling(movedTemplate.length),
-        `the closing-only read passes this letter (shapes=${JSON.stringify([...closingShapes])})`);
-
-      const moved = checkRepeatedSentenceShape(movedTemplate);
-      assert(!moved.passed && moved.detail.includes('“as a * at *”')
-        && moved.detail.includes('paragraph 1 sentence 3, paragraph 2 sentence 2, paragraph 3 sentence 2 and paragraph 4 sentence 2'),
-      `the shape is reported wherever it sits, with the sentence that carries it in each paragraph (detail=${moved.detail})`);
-      // The same letter also signposts two consecutive paragraphs with one
-      // shape, which the count of two out of four never reached. That is now
-      // its own item in the same message, so the writer is told about both in
-      // the round that reports either.
-      assert(moved.detail.includes('“on the * my *”')
-        && moved.detail.includes('paragraph 2 sentence 1 and paragraph 3 sentence 1 carry the same sentence shape'),
-      `the back-to-back signpost is named alongside the count defect (detail=${moved.detail})`);
-
-      // The repair the message names, applied literally: two of the four
-      // sentences on the counted shape rewritten, and the two rewritten are
-      // the paragraphs that re-enter an employer already introduced, so the
-      // role stays attached where each employer is first named; plus the one
-      // sentence the adjacency item names.
-      const repaired = [...movedTemplate];
-      repaired[1] = repaired[1].replace(
-        'As a Software Engineer at Brackenfield Freight Company, I restricted each yard coordinator’s dock-appointment screens to their own terminal, using Angular and Sass.',
-        'Each yard coordinator’s dock-appointment screens, which I restricted to their own terminal at Brackenfield Freight Company, used Angular and Sass.');
-      repaired[2] = repaired[2].replace(
-        'On the backend side, my background includes Java APIs and shell automations.',
-        'Java APIs and shell automations are where my background sits.');
-      repaired[3] = repaired[3].replace(
-        'As a Software Engineer at Brackenfield Freight Company, my engineering practice included manual review and scripted release workflows.',
-        'My engineering practice at Brackenfield Freight Company included manual review and scripted release workflows.');
-      const afterRepair = checkRepeatedSentenceShape(repaired);
-      assert(afterRepair.passed,
-        `rewriting exactly the number of sentences the message names clears the check in one round (detail=${afterRepair.detail})`);
-
-      // The rule this one could collide with: a proof-bearing paragraph still
-      // owes a claim span and a transfer span, and the repair must not have
-      // bought its variety by dropping either. Measured on every paragraph,
-      // before and after.
-      const posting = 'Build robust screens across browsers and devices, and core backend services with Java and shell.';
-      const gapsBefore = movedTemplate.map(paragraph => paragraphArgumentSpanGaps(paragraph, posting).map(gap => gap.field).join(','));
-      const gapsAfter = repaired.map(paragraph => paragraphArgumentSpanGaps(paragraph, posting).map(gap => gap.field).join(','));
-      assert(gapsBefore.every(gaps => gaps === '') && gapsAfter.every(gaps => gaps === ''),
-        `the varied letter still carries every claim and transfer span the argument rules require (before=${JSON.stringify(gapsBefore)} after=${JSON.stringify(gapsAfter)})`);
-
-      // False positives are the cost that matters: a fired check spends a
-      // handoff round on good writing. Twelve letters written to vary their
-      // structure, including three that repeat a shape on purpose, a letter
-      // that names one employer in four paragraphs, and a six-paragraph
-      // letter, are all inside the ceiling on every position.
-      const varied = [
-        ['one employer, four paragraphs, varied entry',
-          'Dispatch software fails in the minutes nobody is watching it, which is the part of the job this posting describes. Three years at Northstar Dispatch taught me where those minutes are.',
-          'The incident queue there lost its ordering whenever two supervisors edited a shift at once. I rebuilt the write path so the later edit had to read the earlier one first, and the duplicate dispatches stopped.',
-          'Reporting was the second problem. Supervisors wanted the weekly numbers on Monday morning, and the export took until Tuesday, so I moved the aggregation into a nightly job and the Monday meeting got its numbers.',
-          'Neither fix was clever. Both came from sitting with the dispatchers for a week before writing anything, and I would start the same way on a queue I did not build.'],
-        ['six paragraphs, clinical operations',
-          'Infusion scheduling is a capacity problem wearing a calendar, and this coordinator role is written as one.',
-          'At Lakeview Oncology I ran the chair schedule for eleven nurses. Overbooking by one chair cost an hour of nurse time, and underbooking cost a patient a week.',
-          'The fix was a standing Thursday review of the next two weeks with the charge nurse. Cancellations stopped being surprises because somebody had already looked at them.',
-          'Pharmacy was the other constraint. I learned to ask for the mix time before promising a slot, which is dull and which is why the chairs stayed full.',
-          'When the clinic added Saturday hours, that review was the thing I carried over, and I would bring the same practice to a schedule with more sites than I have run before.',
-          'I am available for a conversation whenever it is useful.'],
-        ['analyst, evidence introduced three ways',
-          'Forecast accuracy is mostly a data-hygiene problem, and the posting puts hygiene first.',
-          'At Corvid Retail I owned the weekly demand forecast for nine hundred SKUs. Returns were being counted as sales in the warehouse feed, which inflated every fast mover until I traced it to a status code the vendor had reused.',
-          'Once the feed was honest, the model got simpler. I dropped two features the noise had been propping up and the error fell.',
-          'Buyers still needed a number they could argue with, so the weekly note said which SKUs the model was least sure about. That is the part I would bring here.'],
-        // The second half used to open on the same signpost as the first. That
-        // pair is the adjacency defect now, so the letter that stays inside
-        // every rule signposts its second half some other way.
-        ['technical writer, two halves signposted differently',
-          'Documentation that nobody opens is a support cost wearing a wiki.',
-          'On the API side, my work has been the reference nobody reads until something breaks. I rewrote the error tables for a payments API so each code named the caller mistake that produced it, and the tickets that quoted a code dropped.',
-          'Release notes were the other half of it. I moved the changelog into the pull request template so it was written while the author still remembered why.',
-          'Both habits came from watching support queues rather than from a style guide, and I would apply that to your developer portal.'],
-        ['security engineer, five paragraphs',
-          'Access reviews are where a security program either becomes real work or becomes a spreadsheet.',
-          'At Harbor Mutual the quarterly review covered four hundred accounts and was approved wholesale every time. I split it by system owner so each approver saw thirty rows they recognized, and the first honest quarter revoked sixty accounts.',
-          'Revocation broke two jobs nobody had documented. Fixing them took a week and produced the first list of service accounts the company had.',
-          'A year later the review took a morning. The list was the reason.',
-          'I would start a program here the same way, with a review small enough that somebody reads it.'],
-        ['support lead, varied transfer placement',
-          'Escalation policy is the only part of a support organization that customers can feel.',
-          'At Tidewater Software I rewrote ours after a week where three customers waited two days for the same missing owner. Naming a single accountable engineer per escalation, rather than a rotation, is what changed the clock.',
-          'I would bring that policy here, though the harder half was getting engineering to accept it, and that took showing the wait times by team rather than by ticket.',
-          'Your posting describes a queue with two products and one rotation, which is where the same argument would start.'],
-      ];
-      const falsePositives = varied.filter(([, ...paragraphs]) => !checkRepeatedSentenceShape(paragraphs).passed);
-      assert(falsePositives.length === 0,
-        `letters that vary their structure are not reported (fired=${JSON.stringify(falsePositives.map(([label]) => label))})`);
-
-      // Parallelism inside one paragraph is the writer's business: a shape a
-      // single paragraph repeats counts once for that paragraph.
-      const insideOneParagraph = [
-        'I kept the reporting service dependable for the people who depend on it. I wrote the runbook the rotation followed. I wrote the checklist the rotation signed. I wrote the summary the rotation filed.',
-        'Deployment was the other half of that work, and scripting it was what let a colleague repeat it without me.',
-        'That practice would support the delivery this role needs.',
-      ];
-      assert(checkRepeatedSentenceShape(insideOneParagraph).passed,
-        `a shape one paragraph repeats inside itself is counted once (detail=${checkRepeatedSentenceShape(insideOneParagraph).detail})`);
-
-      // Every shape over the ceiling is the same defect, so they travel in one
-      // item and one round clears the class. Past the cap the writer is told
-      // shapes remain rather than being handed a silent pass on them.
-      const templatedEverywhere = [
-        'I rebuilt the intake queue with a single owner. The report is the first thing a supervisor reads. We scripted that step for the night rotation. My work at Acme was steady. In the same year I rewrote the on-call rota.',
-        'I rewrote the escalation policy with a named engineer. The runbook is the first page a responder opens. We rehearsed that drill for the weekend shift. My month at Corvid was quiet. In the same month I replaced the paging tree.',
-        'I moved the reconciliation calendar with a written owner. The summary is the first slide a director sees. We timed that release for the quiet window. My quarter at Pell was clean. In the same quarter I retired the manual journal.',
-      ];
-      const batched = checkRepeatedSentenceShape(templatedEverywhere);
-      assert(!batched.passed && (batched.detail.match(/reduce to the same sentence shape/gu) || []).length === 4
-        && batched.detail.includes('1 additional repeated shape(s) omitted'),
-      `a letter templated at five positions names four of them and says one remains (detail=${batched.detail})`);
-      return { reportedShape: 'as a * at *', variedLetters: varied.length, falsePositives: falsePositives.length };
     },
   },
   {
@@ -3382,14 +2384,10 @@ export default [
     },
   },
   {
-    name: 'cover letter harness: a mapping span is copied out on word boundaries, so the drafting-stage reporter sees every span the completion gate accepts',
+    name: 'cover letter harness: a mapping span is copied out on word boundaries, so the completion gate accepts only spans a word-boundary walk enumerates',
     run: () => {
-      // The reporter that runs three stages earlier enumerates what a
-      // paragraph offers by walking its words; the gate took any substring.
-      // A span cut out of the middle of a word was therefore legal at
-      // completion and invisible to the reporter — the direction that costs a
-      // rewrite, because the letter is reported unmappable at the stage that
-      // could still change it, for a field the gate would have accepted.
+      // The gate used to take any substring, so a span cut out of the middle
+      // of a word was legal at completion.
       // Measured on the mappable paragraph below: the gate used to accept 774
       // spans of it, 670 of them cuts no word-walk can reach.
       const posting = 'Harbourline Customs needs reliable systems delivery for the broker interface.';
@@ -3413,9 +2411,6 @@ export default [
       `the gate rejects a mid-word cut and names the repair: ${midWordVerdict.detail}`);
       assert(paragraphHasCandidatePastProof(paragraph),
         'the fixture states a candidate past action, so the completion gate requires a mapping for it');
-      const gaps = paragraphArgumentSpanGaps(paragraph, posting);
-      assert(gaps.length === 1 && gaps[0].field === 'relevance',
-        `and the reporter reaches the same verdict about the same paragraph: ${JSON.stringify(gaps)}`);
 
       // Exact agreement, measured rather than argued: every span of a mappable
       // paragraph is tried as its relevance field, and every one the gate
@@ -3454,7 +2449,7 @@ export default [
         }
       }
       assert(accepted > 0 && !acceptedUnaligned,
-        `every span this gate accepts is one the reporter can enumerate (${tried} tried, ${accepted} accepted, ${acceptedUnaligned} of them unreachable by a word walk)`);
+        `every span this gate accepts is one a word-boundary walk enumerates (${tried} tried, ${accepted} accepted, ${acceptedUnaligned} of them unreachable by a word walk)`);
       // And wider than the whitespace runs the reporter used to walk, which is
       // why it walks word boundaries instead of splitting on spaces: this span
       // drops the sentence's final period, so no run of whole space-separated
@@ -3471,8 +2466,6 @@ export default [
           paragraphs: [mappable], jobText: posting,
         }).passed,
       'a span trimmed of its trailing punctuation is accepted and is not a run of whole space-separated tokens');
-      assert(!paragraphArgumentSpanGaps(mappable, posting).length,
-        'and the reporter stays silent on the paragraph the gate accepts spans of');
       return { tried, accepted, midWordDetail: midWordVerdict.detail };
     },
   },
@@ -3515,7 +2508,7 @@ export default [
         `the observation hands the writer no dash it could copy into the letter (detail=${reported.detail})`);
       // No replacement wording. The only quoted spans are the offending runs
       // themselves, which is naming the offense rather than writing the
-      // repair, the rule stated beside checkRepeatedSentenceShape.
+      // repair.
       const quoted = [...reported.detail.matchAll(/“([^”]*)”/gu)].map(([, run]) => run);
       assert(quoted.length > 0 && quoted.every(run => restated.some(paragraph => paragraph.toLowerCase().includes(run))),
         `every quoted span is a run the letter already contains (quoted=${JSON.stringify(quoted)})`);
@@ -3539,8 +2532,7 @@ export default [
         + ` (within=${checkRepeatedPhrase(withinOne).detail}; across=${checkRepeatedPhrase(acrossTwo).detail})`);
 
       // A name is supposed to recur, and how often it may is already
-      // checkPriorEmployerOpening's and checkAdjacentEmployerRepetition's
-      // business. Measured against the twin above rather than argued: the two
+      // checkPriorEmployerOpening's business. Measured against the twin above rather than argued: the two
       // letters differ only in whether the three words are a proper name.
       const named = withinOne.map(paragraph => paragraph.replaceAll('the dispatch office', 'Brackenfield Freight Company'));
       assert(checkRepeatedPhrase(named).passed,
@@ -3597,52 +2589,6 @@ export default [
       assert(throughHelper && !throughHelper.passed,
         'the check is registered in the prose battery the paste validator runs, not only callable on its own');
       return { reported: (reported.detail.match(/repeat one run of/gu) || []).length, sharedCarrier };
-    },
-  },
-  {
-    name: 'cover letter harness: one shape in back-to-back paragraphs is a filled template the count ceiling never reached',
-    run() {
-      // Measured on the same letter. Two of its four paragraphs entered their
-      // evidence on one frame, "In that role, my survey experience
-      // includes" and "In that Field Engineer role, my rating experience
-      // spans", and two of four is exactly the ceiling, so the count said
-      // nothing. The ceiling was built to permit deliberate parallelism; what a
-      // reader registers as one template filled twice is consecutive.
-      const template = [
-        'Inspection work joins the field survey with the calculations behind it.',
-        'In that role, my survey experience includes linked instruments and reading-triggered alerts. I developed the gauge-logging kit that drove a physical strain reader.',
-        'In that Field Engineer role, my rating experience spans bearing seats, joints and photographs. I moved the paper sheets and their maintenance history onto a shared condition register.',
-        'I welcome a conversation about either.',
-      ];
-      const shape = checkRepeatedSentenceShape(template);
-      assert(!shape.passed && shape.id === 'repeated-sentence-shape'
-        && shape.detail.includes('paragraph 2 sentence 1 and paragraph 3 sentence 1 carry the same sentence shape “in that * my *” in back-to-back paragraphs'),
-      `a frame two consecutive paragraphs carry is reported with both of its sentences (detail=${shape.detail})`);
-      // It is reported at a count the ceiling passes, which is the whole point
-      // of the branch, and the message does the subtraction rather than leaving
-      // the writer to work out that breaking a pair costs one rewrite.
-      assert(shape.detail.includes(`the ${sharedSentenceShapeCeiling(template.length)} paragraphs the count allows one shape`)
-        && shape.detail.includes('so at least 1 of those 2 sentences must be rewritten to a different shape'),
-      `the report names the ceiling it is below and how many sentences have to move (detail=${shape.detail})`);
-      assert(!/[—–]/u.test(shape.detail),
-        `the adjacency observation carries no dash the letter could copy (detail=${shape.detail})`);
-
-      // Adjacency is what fires, measured rather than argued: the same two
-      // sentences with one paragraph between them are the same count and are
-      // not reported.
-      const spread = [template[0], template[1], template[3], template[2]];
-      const spreadShape = checkRepeatedSentenceShape(spread);
-      assert(spreadShape.passed,
-        `the same frame with a paragraph between its two carriers is the parallelism the ceiling permits (detail=${spreadShape.detail})`);
-      // And a rewrite of one of the two clears it, so the message has a repair
-      // target rather than an open-ended instruction.
-      const repairedTemplate = [...template];
-      repairedTemplate[2] = repairedTemplate[2].replace(
-        'In that Field Engineer role, my rating experience spans bearing seats, joints and photographs.',
-        'Rating was the other half of that Field Engineer role, and it spanned bearing seats, joints and photographs.');
-      assert(checkRepeatedSentenceShape(repairedTemplate).passed,
-        `rewriting the one sentence the message names clears the check (detail=${checkRepeatedSentenceShape(repairedTemplate).detail})`);
-      return { ceiling: sharedSentenceShapeCeiling(template.length) };
     },
   },
   {
@@ -3706,11 +2652,10 @@ export default [
     name: 'cover letter harness: the syntax exclusion leaves every defect measured on the restating letter reported',
     run() {
       // What the exclusion cost, paid on the letter that produced both checks.
-      // Four defects were real in it, three runs and one shape, and an exclusion
+      // Three defects were real in it, three runs, and an exclusion
       // that reached any of them would have bought its silence with the
       // rejection the user asked for in the first place.
       const repeats = checkRepeatedPhrase(LETTER_THAT_RESTATES_ITSELF);
-      const shape = checkRepeatedSentenceShape(LETTER_THAT_RESTATES_ITSELF);
       const unreported = [
         ['the six-word run stated twice inside paragraph 1', repeats,
           'paragraph 1 sentence 2 and paragraph 1 sentence 3 repeat one run of 6 words, “checks across the deck and abutments”'],
@@ -3718,12 +2663,10 @@ export default [
           'paragraph 2 sentence 1 and paragraph 2 sentence 2 repeat one run of 3 words, “strain gauge logs”'],
         ['the four-word run carried from paragraph 1 into paragraph 2', repeats,
           'paragraph 1 sentence 4 and paragraph 2 sentence 3 repeat one run of 4 words, “the design challenge was”'],
-        ['the frame paragraphs 2 and 3 enter their evidence on', shape,
-          'paragraph 2 sentence 1 and paragraph 3 sentence 2 carry the same sentence shape “in that * my *” in back-to-back paragraphs'],
       ].filter(([, check, printed]) => check.passed || !check.detail.includes(printed));
       assert(!unreported.length,
         `every real defect in that letter is still named: unreported=${JSON.stringify(unreported.map(([label]) => label))}`
-        + ` (repeats=${repeats.detail}; shape=${shape.detail})`);
+        + ` (repeats=${repeats.detail})`);
       // Each of the three runs carries at least the content the exclusion asks
       // for, which is why they survive it, and the shortest of them is the
       // measurement that put MIN_REPEAT_CONTENT_WORDS where it is: "the
@@ -3733,62 +2676,6 @@ export default [
       assert(shortest === MIN_REPEAT_CONTENT_WORDS,
         `the thinnest real repeat sits exactly on the content floor (content=${shortest}, floor=${MIN_REPEAT_CONTENT_WORDS})`);
       return { runs: (repeats.detail.match(/repeat one run of/gu) || []).length, shortest };
-    },
-  },
-  {
-    name: 'cover letter harness: a stock transfer carrier is excused by its words and charged by its shape, and no rule requires it, so the repair is the writer\'s own wording',
-    run() {
-      // Read as one rule these two look like a contradiction, and the next
-      // reader is the one likely to "fix" it: checkRepeatedPhrase blanks the
-      // stock carrier out of its comparison while the adjacency branch of
-      // checkRepeatedSentenceShape reports two consecutive paragraphs for
-      // carrying that carrier's shape, both on the same two sentences of the
-      // same letter. This pins the asymmetry as deliberate.
-      const repeats = checkRepeatedPhrase(LETTER_THAT_RESTATES_ITSELF);
-      const shape = checkRepeatedSentenceShape(LETTER_THAT_RESTATES_ITSELF);
-      assert(!repeats.passed && !repeats.detail.includes('i would apply that'),
-        `the carrier's words are never charged to the writer (detail=${repeats.detail})`);
-      assert(!shape.passed
-        && shape.detail.includes('paragraph 1 sentence 5 and paragraph 2 sentence 4 carry the same sentence shape “i would * that *” in back-to-back paragraphs'),
-      `that same carrier's shape in back-to-back paragraphs is charged (detail=${shape.detail})`);
-
-      // Why the two answers differ: they read different levels. No rule requires
-      // a transfer carrier, so the choice of one, and of the same shape in
-      // neighbouring paragraphs, is the writer's, while its words are policed by
-      // the budget and the form check and are not charged a second time as a
-      // repeated phrase. Measured on the letter's own paragraphs: 2 and 3
-      // transferred on two different shapes and the span gate accepts both, and
-      // strip the carrier out of 3 and the gate still finds a legal relevance
-      // span, because the paragraph says how its work bears on the target in
-      // other words. The carrier is a habit, not a requirement.
-      const [, withWould, withCan] = LETTER_THAT_RESTATES_ITSELF;
-      const carrierless = withCan.replace(
-        ' I can apply that register approach to sampling, reporting, and ongoing asset care.', '');
-      const gapFields = paragraph => paragraphArgumentSpanGaps(paragraph).map(gap => gap.field);
-      assert(carrierless !== withCan && !gapFields(withWould).includes('relevance') && !gapFields(withCan).includes('relevance')
-        && !gapFields(carrierless).includes('relevance'),
-      'the span gate takes either shape of the carrier and takes the paragraph without one'
-        + ` (would=${JSON.stringify(gapFields(withWould))}, can=${JSON.stringify(gapFields(withCan))},`
-        + ` stripped=${JSON.stringify(gapFields(carrierless))})`);
-      assert(!ARGUMENT_RELEVANCE_SPAN_RULE.includes('I would apply') && !ARGUMENT_RELEVANCE_SPAN_RULE.includes('I can apply')
-        && REPEATED_TRANSFER_CARRIER_RULE.includes('never required'),
-      `neither printed rule enumerates a closed list of shapes (rule=${ARGUMENT_RELEVANCE_SPAN_RULE})`);
-
-      // So the repair the shape report asks for is the writer's own: rotate one
-      // of the two paragraphs onto another wording, and the carrier report is
-      // gone with the paragraph's relevance span intact and its new carrier
-      // still uncharged as words. The other frame those paragraphs share is a
-      // different defect and stays reported, so this measures the one report
-      // rather than the check's verdict.
-      const rotated = [...LETTER_THAT_RESTATES_ITSELF];
-      rotated[0] = rotated[0].replace('I would apply that checking approach', 'I can bring that checking approach');
-      const afterRotation = checkRepeatedSentenceShape(rotated);
-      assert(!afterRotation.detail.includes('i would * that *')
-        && !gapFields(rotated[0]).includes('relevance')
-        && !checkRepeatedPhrase(rotated).detail.includes('i can bring that'),
-      'rotating onto another offered shape clears the carrier report and stays compliant'
-        + ` (shape=${afterRotation.detail}; gaps=${JSON.stringify(gapFields(rotated[0]))})`);
-      return { chargedShape: 'i would * that *', rotatedTo: 'i can bring that' };
     },
   },
   {
@@ -3956,311 +2843,23 @@ export default [
     },
   },
   {
-    name: 'cover letter harness: direct-welcome-closing accepts the employer\'s own name and attributes the missing half',
-    run: () => {
-      // Ground truth for a 4-round rejection loop observed in one live
-      // generation (one fingerprint on every round): each pair
-      // below is identical except the FAIL sentence names the employer by
-      // name — the shape every other rule in this app pushes a writer
-      // toward — while the PASS sentence uses the generic "your" lexicon that
-      // already worked. Each FAIL sentence must pass once companyName names
-      // that employer, and must still fail with no companyName or with a
-      // DIFFERENT one — proving the matcher accepts the employer's own name,
-      // not any proper noun in the sentence.
-      const companyTargetPairs = [
-        {
-          fail: 'I welcome a conversation about how my integration work could support Quillmart’s smart-store rollout.',
-          pass: 'I welcome a conversation about how my integration work could support your smart-store rollout.',
-        },
-        {
-          fail: 'I welcome a conversation about applying that adapter service experience to Quillmart’s inventory sync.',
-          pass: 'I welcome a conversation about applying that adapter service experience to your inventory pipeline.',
-        },
-        {
-          fail: 'I welcome a conversation about how the integration I built could support Quillmart stores.',
-          pass: 'I welcome a conversation about how the integration I built could support the store platform.',
-        },
-      ];
-      for (const { fail, pass } of companyTargetPairs) {
-        const namedCompany = checkDirectWelcomeClosing([fail], 'Quillmart');
-        const noCompany = checkDirectWelcomeClosing([fail], '');
-        const differentCompany = checkDirectWelcomeClosing([fail], 'Northwind Robotics');
-        const genericControl = checkDirectWelcomeClosing([pass], '');
-        assert(namedCompany.passed,
-          `naming the employer by name must pass once companyName supplies that name (sentence=${JSON.stringify(fail)}, detail=${namedCompany.detail})`);
-        assert(!noCompany.passed,
-          `the identical sentence must still fail with no companyName (detail=${noCompany.detail})`);
-        assert(!differentCompany.passed,
-          `the identical sentence must still fail against a DIFFERENT company, proving this is not "any proper noun passes" (detail=${differentCompany.detail})`);
-        assert(genericControl.passed,
-          `the generic "your …" control sentence must already pass on its own (detail=${genericControl.detail})`);
-      }
-
-      // Legal-suffix stripping, and the parenthesized-acronym company-name shape
-      // ("Nimbus Web Services (NWS)"), must not throw and must still
-      // match — the full name, and its distinctive leading token.
-      const suffixed = checkDirectWelcomeClosing(
-        ['I welcome a conversation about how my integration work could support Quillmart’s smart-store rollout.'],
-        'Quillmart Inc.',
-      );
-      assert(suffixed.passed,
-        `"Quillmart Inc." must strip its legal suffix so "Quillmart’s" still matches (detail=${suffixed.detail})`);
-      let parenLeadingTokenThrew = false;
-      let parenLeadingToken = { passed: false, detail: '' };
-      try {
-        parenLeadingToken = checkDirectWelcomeClosing(
-          ['I welcome a conversation about how my integration work could support Nimbus’s smart-store rollout.'],
-          'Nimbus Web Services (NWS)',
-        );
-      } catch {
-        parenLeadingTokenThrew = true;
-      }
-      let parenFullNameThrew = false;
-      let parenFullName = { passed: false, detail: '' };
-      try {
-        parenFullName = checkDirectWelcomeClosing(
-          ['I welcome a conversation about how my integration work could support Nimbus Web Services (NWS)’s smart-store rollout.'],
-          'Nimbus Web Services (NWS)',
-        );
-      } catch {
-        parenFullNameThrew = true;
-      }
-      assert(!parenLeadingTokenThrew && parenLeadingToken.passed,
-        `a parenthesized company name must not throw building its matcher, and its leading token must match (threw=${parenLeadingTokenThrew}, detail=${parenLeadingToken.detail})`);
-      assert(!parenFullNameThrew && parenFullName.passed,
-        `the full parenthesized company name must also match without throwing (threw=${parenFullNameThrew}, detail=${parenFullName.detail})`);
-
-      // A company name too short to be safe (2 characters) builds no pattern
-      // at all: the sentence still fails, and the message never offers a name
-      // the matcher itself would refuse.
-      const shortName = checkDirectWelcomeClosing(
-        ['I welcome a conversation about how my integration work could support AB’s inventory sync.'],
-        'AB',
-      );
-      assert(!shortName.passed && !shortName.detail.includes('own name exactly as this letter'),
-        `a company name under 3 characters must build no pattern and must not be offered as a naming option (detail=${shortName.detail})`);
-
-      // A company name that normalizes to nothing but a stopword ("The")
-      // must not start matching ordinary "the <word>" prose that the GENERIC
-      // lexicon does not already cover on its own — "the details are settled"
-      // names no employer-facing noun, so this must still fail.
-      const stopwordName = checkDirectWelcomeClosing(
-        ['I welcome a conversation about how my integration work could support Widgetco once the details are settled.'],
-        'The',
-      );
-      assert(!stopwordName.passed,
-        `a stopword-only company name must build no pattern, so unrelated "the …" prose is not mistaken for a match (detail=${stopwordName.detail})`);
-      // The same stopword-only companyName must not interfere with a
-      // sentence the GENERIC lexicon legitimately passes on its own.
-      const stopwordOrdinary = checkDirectWelcomeClosing(
-        ['I welcome a conversation about how my integration work could support the dispatch team.'],
-        'The',
-      );
-      assert(stopwordOrdinary.passed,
-        `a stopword-only companyName must not break an otherwise-passing generic closing (detail=${stopwordOrdinary.detail})`);
-
-      // Per-half attribution: the same job's letter was rejected for this
-      // check 4 consecutive rounds because the single fixed message quoted
-      // asset and action examples but never a target example, so a writer who
-      // already had both kept rewriting the two halves that were never
-      // broken. A sentence missing only the target must be told about the
-      // target and nothing else; a sentence missing only the asset must be
-      // told about the asset and nothing else.
-      const targetOnlyMissing = checkDirectWelcomeClosing(
-        ['I welcome a conversation about how my integration work could support Quillmart’s smart-store rollout.'],
-        '',
-      );
-      assert(!targetOnlyMissing.passed
-        && targetOnlyMissing.detail.includes('the sentence is missing its target half')
-        && targetOnlyMissing.detail.includes('reach the employer’s side too')
-        // The reader-noun example set must agree with the design-system docs
-        // and with what EMPLOYER_FACING_TARGET actually accepts (client(s) /
-        // customer(s) / user(s) / student(s) / patient(s) / here): the message
-        // used to demonstrate only "customers" and "users", so a writer
-        // reaching for the docs' own "clients" example had no way to learn the
-        // check would already accept it.
-        && targetOnlyMissing.detail.includes('“clients”, “customers”, “users”')
-        && !targetOnlyMissing.detail.includes('never a bare demonstrative')
-        && !targetOnlyMissing.detail.includes('authorship clause')
-        && !targetOnlyMissing.detail.includes('say what that asset does for the target work'),
-      `a sentence missing only the target half must name the target operation and not repeat the asset or action instructions (detail=${targetOnlyMissing.detail})`);
-      const assetOnlyMissing = checkDirectWelcomeClosing(
-        ['I welcome a conversation about that could support your smart-store rollout.'],
-        '',
-      );
-      assert(!assetOnlyMissing.passed
-        && assetOnlyMissing.detail.includes('the sentence is missing its asset half')
-        && assetOnlyMissing.detail.includes('never a bare demonstrative')
-        && !assetOnlyMissing.detail.includes('reach the employer’s side too')
-        && !assetOnlyMissing.detail.includes('say what that asset does for the target work'),
-      `a sentence missing only the asset half must name the asset operation and not repeat the target or action instructions (detail=${assetOnlyMissing.detail})`);
-
-      // checkDirectWelcomeClosing's own design note says a modal-only guard
-      // "measurably rejected" this present-tense closing shape, which is why
-      // CONTRIBUTION_VERBS_PRESENT exists — but checkProspectiveContributionTense
-      // rejected the identical present-tense bridge in the identical sentence,
-      // pulling the two checks in opposite directions. Once
-      // checkDirectWelcomeClosing certifies this sentence class as a direct
-      // closing invitation, checkProspectiveContributionTense must not then
-      // fail it for using the present tense that certification requires.
-      const tugOfWarParagraphs = [
-        'I built and shipped several data pipelines at my last company.',
-        'I welcome the chance to talk about how my pipeline experience helps me contribute to your platform team.',
-      ];
-      const tugClosing = checkDirectWelcomeClosing(tugOfWarParagraphs);
-      const tugTense = checkProspectiveContributionTense(tugOfWarParagraphs);
-      assert(tugClosing.passed,
-        `the certified closing invitation must pass checkDirectWelcomeClosing (detail=${tugClosing.detail})`);
-      assert(tugTense.passed,
-        `checkProspectiveContributionTense must not reject a sentence checkDirectWelcomeClosing has already certified as a direct, present-tense closing invitation (detail=${tugTense.detail})`);
-      // The exemption is scoped to the final paragraph only: the identical
-      // present-tense bridge, appearing anywhere else, is exactly the shape
-      // this check exists to catch and must still be caught.
-      const tugNotClosing = checkProspectiveContributionTense([
-        'I welcome the chance to talk about how my pipeline experience helps me contribute to your platform team.',
-        'Thank you again for your time and consideration.',
-      ]);
-      assert(!tugNotClosing.passed,
-        `the identical present-tense bridge must still be caught when it is not in the final paragraph (detail=${tugNotClosing.detail})`);
-      return { targetOnlyMissing: targetOnlyMissing.detail, assetOnlyMissing: assetOnlyMissing.detail };
-    },
-  },
-  {
-    name: 'cover letter harness: the company leading-token target matcher is case-sensitive so ordinary English words do not falsely satisfy it',
-    run: () => {
-      // VERIFIED collision (companyNameTargetPattern, coverLetterChecks.js):
-      // a multi-word company's leading token used to match CASE-INSENSITIVELY,
-      // guarded only by length>=3 and a 3-word stopword set. "Best Harbor" ->
-      // "Best" matched ordinary candidate-facing prose ("my best work"), so
-      // the target half of the three-part closing requirement was falsely
-      // satisfied without the sentence ever reaching the employer's side — a
-      // false PASS on a check gating a paste handoff. This app's own job
-      // board turns up real employers whose leading token is an ordinary
-      // English word too (a bare common word used as a brand name).
-      const genericBestProse = checkDirectWelcomeClosing(
-        ['I welcome a conversation about how my integration work could support my best work.'],
-        'Best Harbor',
-      );
-      assert(!genericBestProse.passed
-        && genericBestProse.detail.includes('the sentence is missing its target half'),
-      `lowercase "best" inside ordinary candidate-facing prose must not satisfy the target half for companyName "Best Harbor" (detail=${genericBestProse.detail})`);
-
-      // The full (suffix-stripped) company name keeps matching CASE-
-      // INSENSITIVELY by design — only the leading-token alternative changed.
-      const fullNameLowercase = checkDirectWelcomeClosing(
-        ['I welcome a conversation about how my integration work could support best harbor’s checkout flow.'],
-        'Best Harbor',
-      );
-      assert(fullNameLowercase.passed,
-        `the full company name must still satisfy the target half case-insensitively (detail=${fullNameLowercase.detail})`);
-
-      // The leading token still matches when a letter capitalizes it exactly
-      // as the company spells it — the shape a letter naming the employer
-      // actually writes ("Best's checkout flow", "Supply's ingestion
-      // pipeline").
-      const leadingTokenCapitalized = checkDirectWelcomeClosing(
-        ['I welcome a conversation about how my integration work could support Best’s checkout flow.'],
-        'Best Harbor',
-      );
-      assert(leadingTokenCapitalized.passed,
-        `the capitalized leading token must still satisfy the target half (detail=${leadingTokenCapitalized.detail})`);
-
-      // Full company name, capitalized as written, is unaffected either way.
-      const fullNameCapitalized = checkDirectWelcomeClosing(
-        ['I welcome a conversation about how my integration work could support Best Harbor’s checkout flow.'],
-        'Best Harbor',
-      );
-      assert(fullNameCapitalized.passed,
-        `the full company name capitalized as written must still satisfy the target half (detail=${fullNameCapitalized.detail})`);
-
-      return {
-        genericBestProse: genericBestProse.detail,
-        fullNameLowercase: fullNameLowercase.detail,
-        leadingTokenCapitalized: leadingTokenCapitalized.detail,
-      };
-    },
-  },
-  {
-    name: 'cover letter harness: a single-word company name matches the target half case-sensitively, not case-insensitively like a multi-word full name',
-    run: () => {
-      // VERIFIED collision (companyNameTargetPattern, coverLetterChecks.js),
-      // found while re-verifying the leading-token fix directly above against
-      // the SAME class of employer its own comment names (a bare common
-      // word used as a brand name): a one-word company name fell
-      // through to the multi-word branch's fullNamePattern, which is
-      // case-INSENSITIVE by design (see fullNameLowercase above — that
-      // case-insensitivity is deliberate for a two-word name like "Best
-      // Harbor"). For a ONE-word name the "full name" and the "leading token"
-      // are the identical string, so the case-insensitive treatment let
-      // ordinary lowercase prose with no employer reference at all — "my own
-      // drift of ideas" — satisfy the target half for companyName "Drift",
-      // exactly the false PASS the leading-token fix exists to close, just on
-      // the single-word half of its own measured list instead of the
-      // multi-word half.
-      const driftLowercase = checkDirectWelcomeClosing(
-        ['I welcome a conversation about how my integration work could support my own drift of ideas.'],
-        'Drift',
-      );
-      assert(!driftLowercase.passed
-        && driftLowercase.detail.includes('the sentence is missing its target half'),
-      `lowercase "drift" inside ordinary candidate-facing prose must not satisfy the target half for companyName "Drift" (detail=${driftLowercase.detail})`);
-
-      const supplyLowercase = checkDirectWelcomeClosing(
-        ['I welcome a conversation about how my integration work could support the supply of my own services.'],
-        'Supply',
-      );
-      assert(!supplyLowercase.passed
-        && supplyLowercase.detail.includes('the sentence is missing its target half'),
-      `lowercase "supply" inside ordinary candidate-facing prose must not satisfy the target half for companyName "Supply" (detail=${supplyLowercase.detail})`);
-
-      // Capitalized exactly as the company spells it, the single-word name
-      // still satisfies the target half — the shape a letter naming the
-      // employer actually writes ("Drift's ingestion pipeline").
-      const driftCapitalized = checkDirectWelcomeClosing(
-        ['I welcome a conversation about how my integration work could support Drift’s ingestion pipeline.'],
-        'Drift',
-      );
-      assert(driftCapitalized.passed,
-        `the single-word company name capitalized as written must still satisfy the target half (detail=${driftCapitalized.detail})`);
-
-      const supplyCapitalized = checkDirectWelcomeClosing(
-        ['I welcome a conversation about how my integration work could support Supply’s ingestion pipeline.'],
-        'Supply',
-      );
-      assert(supplyCapitalized.passed,
-        `the single-word company name capitalized as written must still satisfy the target half (detail=${supplyCapitalized.detail})`);
-
-      return {
-        driftLowercase: driftLowercase.detail,
-        supplyLowercase: supplyLowercase.detail,
-        driftCapitalized: driftCapitalized.detail,
-        supplyCapitalized: supplyCapitalized.detail,
-      };
-    },
-  },
-  {
-    name: 'cover letter harness: certifiedClosingInvitation includes the "look forward to discussing" close so the tense check does not reject what the closing check just certified',
+    name: 'cover letter harness: certifiedClosingInvitation includes the "look forward to discussing" close so the tense check does not reject a certified closing',
     run: () => {
       // certifiedClosingInvitation (coverLetterChecks.js) used to test only
       // CONDITIONAL_WELCOME_CLOSE, DIRECT_CONVERSATION_CLOSE, and
-      // SELF_DIRECTED_CONVERSATION_CLOSE — but checkDirectWelcomeClosing's own
-      // selfDirectedMatch already ORs LOOK_FORWARD_CONVERSATION_CLOSE into
-      // that identical certifying branch (see the "bareLookForwardClose" and
-      // "prospectiveClose" fixtures above). A closing certified via "I look
-      // forward to discussing ..." was therefore rejected right back by
-      // checkProspectiveContributionTense for the exact present-tense bridge
-      // its own certifying branch requires — the two-checks-pulling-opposite-
-      // ways bug this whole fix exists to prevent, reproduced by omission.
+      // SELF_DIRECTED_CONVERSATION_CLOSE — but the since-retired
+      // direct-welcome-closing check's own selfDirectedMatch already ORed
+      // LOOK_FORWARD_CONVERSATION_CLOSE into that identical certifying branch.
+      // A closing certified via "I look forward to discussing ..." was
+      // therefore rejected right back by checkProspectiveContributionTense for
+      // the exact present-tense bridge its own certifying branch required.
       const lookForwardParagraphs = [
         'I built and shipped several data pipelines at my last company.',
         'I look forward to discussing how my pipeline experience helps me contribute to your platform team.',
       ];
-      const lookForwardClosing = checkDirectWelcomeClosing(lookForwardParagraphs);
       const lookForwardTense = checkProspectiveContributionTense(lookForwardParagraphs);
-      assert(lookForwardClosing.passed,
-        `fixture sanity: the "look forward to discussing" close with all three contribution halves already present must pass checkDirectWelcomeClosing (detail=${lookForwardClosing.detail})`);
       assert(lookForwardTense.passed,
-        `checkProspectiveContributionTense must not reject a "look forward to discussing" closing checkDirectWelcomeClosing has already certified (detail=${lookForwardTense.detail})`);
+        `checkProspectiveContributionTense must not reject a certified "look forward to discussing" closing (detail=${lookForwardTense.detail})`);
       // The exemption stays scoped to the final paragraph only: the identical
       // present-tense bridge elsewhere in the letter is exactly the defect
       // this check exists to catch, "look forward to discussing" wording or
@@ -4275,9 +2874,9 @@ export default [
     },
   },
   {
-    name: 'cover letter harness: the tense-check exemption is scoped to the ONE sentence checkDirectWelcomeClosing certifies, by position, not by text equality',
+    name: 'cover letter harness: the tense-check exemption is scoped to the ONE certified closing sentence, by position, not by text equality',
     run: () => {
-      // checkDirectWelcomeClosing certifies exactly ONE sentence per letter —
+      // The retired direct-welcome-closing check certified exactly ONE sentence per letter —
       // finalSubstantiveClosingSentenceIndex's pick in the final paragraph —
       // but the old exemption in checkProspectiveContributionTense tested
       // EVERY sentence of the final paragraph against certifiedClosingInvitation
@@ -4291,9 +2890,6 @@ export default [
       // must still be caught.
       const duplicateInvitation = 'I welcome the chance to talk about how my pipeline experience helps me contribute to your platform team.';
       const duplicateClosingParagraph = [`${duplicateInvitation} ${duplicateInvitation}`];
-      const duplicateClosing = checkDirectWelcomeClosing(duplicateClosingParagraph);
-      assert(duplicateClosing.passed,
-        `fixture sanity: the certified (second, final substantive) sentence satisfies all three contribution halves and passes on its own (detail=${duplicateClosing.detail})`);
       const duplicateTense = checkProspectiveContributionTense(duplicateClosingParagraph);
       assert(!duplicateTense.passed
         && duplicateTense.detail.includes('paragraph 1')
@@ -4338,24 +2934,6 @@ export default [
         ['checkOpeningArtifactContext (leading employer)',
           checkOpeningArtifactContext(['As a Software Engineer at Brackenfield Freight Company, I built a gate workflow that connected outside carrier portals.'], [], ['Brackenfield Freight Company']),
           checkOpeningArtifactContext(['As a Software Engineer at Acme, I built a gate workflow that connected outside carrier portals.'], [], ['Acme'])],
-        ['checkOpeningEmployerShorthand',
-          checkOpeningEmployerShorthand([
-            'At Brackenfield Freight Company, I retired the in-house invoicing and claims systems in favour of vendor-hosted software.',
-            'The company chose that software because it was cheaper to keep running than the in-house systems.',
-          ], ['Brackenfield Freight Company']),
-          checkOpeningEmployerShorthand([
-            'At Pinehurst Haulage Company, I retired the in-house invoicing and claims systems in favour of vendor-hosted software.',
-            'The company chose that software because it was cheaper to keep running than the in-house systems.',
-          ], ['Pinehurst Haulage Company'])],
-        ['checkAdjacentEmployerRepetition',
-          checkAdjacentEmployerRepetition([
-            'In my software engineering role at Brackenfield Freight Company, I wrote a gate workflow that forwarded every tag scan to the right carrier portal.',
-            'At Brackenfield Freight Company, I also assembled a dispatch board whose front end and back end were designed to take on further tools.',
-          ], ['Brackenfield Freight Company']),
-          checkAdjacentEmployerRepetition([
-            'In my software engineering role at Acme, I wrote a gate workflow that forwarded every tag scan to the right carrier portal.',
-            'At Acme, I also assembled a dispatch board whose front end and back end were designed to take on further tools.',
-          ], ['Acme'])],
         ['checkContainerizationTechnologyRoles',
           checkContainerizationTechnologyRoles(['I containerized it with Podman, Traefik, and Puma so one image could be promoted from staging to production hosts.'], {
             bulletTexts: ['Containerized the intake portal with Podman, running the app under Puma behind Traefik.'],
@@ -4376,344 +2954,14 @@ export default [
     },
   },
   {
-    name: 'cover letter harness: one transfer carrier form in two consecutive paragraphs is reported, and only that',
-    run: () => {
-      // The shipped letter this check was written for. Paragraph 2 handed its
-      // proof over with "That changeover experience would support ..." and
-      // paragraph 3 with "That judgment would support ...": one carrier form,
-      // back to back. checkRepeatedSentenceShape missed it because its
-      // five-word frame differs in the fifth slot ("... and" against "... for").
-      const embeddedAiLetter = [
-        'Duskfield is growing its cold-chain network across regional depots, and safety, audit trails, and uptime stay central to that growth. I combine depot route planning with forecasting work. As a Software Engineer at Brackenfield Freight Company, I built an internal dispatch board that spans the screens and services, packaged so it could be deployed at a new depot within a day. I would apply that capability to dispatch features that watch temperature across the network.',
-        'Linked structures are where my changeover experience sits, in surveying, photographing, and checking them in sequence. At Brackenfield Freight Company, I turned a stack of paper inspection sheets into one shared register, with sampling and cutover steps that kept it current. That changeover experience would support production sensor integrations, including alert routing and error handling.',
-        "My release practice combines manual review with scripted checking, and I have written route validators, checklist templates, and handoff routing for it. That judgment would support the team's shared habits around release safety, quality, and cost. I welcome a conversation about how my checking practice could support Duskfield's shared engineering patterns.",
-      ];
-      assert(checkRepeatedSentenceShape(embeddedAiLetter).passed,
-        'the premise: the sentence-shape check does not see this pair, which is why a second check reads the carrier');
-      const reported = checkRepeatedTransferCarrier(embeddedAiLetter);
-      assert(!reported.passed && reported.id === 'repeated-transfer-carrier'
-        && reported.detail.includes('paragraphs 2 and 3 both carry the same transfer form “that * would <verb>”')
-        && reported.detail.includes('paragraph 2 sentence 3, paragraph 3 sentence 2'),
-      `the shipped pair is one form once the noun phrase and the verb are slots (detail=${reported.detail})`);
-      // It names the operation, the offending form, and the form the OUTER
-      // neighbour uses so a rotation cannot land on it; it hands over no verb,
-      // and it asks for the writer's own wording rather than another member of a list.
-      const quoted = reported.detail.match(/“[^”]*”/g) || [];
-      assert(quoted.join(' ') === '“that * would <verb>” “i would <verb>”'
-        && reported.detail.includes('in your own wording, since no stock transfer form is required')
-        && reported.detail.includes('“i would <verb>” (paragraph 1 uses it) would be the same defect again'),
-      `the message quotes the offending form and the neighbour's form only (quoted=${JSON.stringify(quoted)})`);
-      assert(!/the argument rule accepts|a different transfer form/u.test(reported.detail),
-        `the message names no closed set of forms to move to (detail=${reported.detail})`);
-      for (const replacement of ['I can', 'I would', 'instead', 'such as', 'for example', 'e.g.']) {
-        assert(!reported.detail.includes(replacement),
-          `the message suggests no replacement wording (“${replacement}” in ${reported.detail})`);
-      }
-      assert(!/\b(?:apply|bring|use|contribute|help|support|enable)\b/iu.test(reported.detail.replace(/\(paragraph[^)]*\)/gu, '')),
-        `the message shows the verb slot, not a verb a writer could copy (detail=${reported.detail})`);
-      assert(!reported.detail.includes(String.fromCharCode(0x2014)), 'the message carries no em dash');
-
-      // The whole-battery view. The demonstrative check reads only the subject
-      // shape, so paragraph 1's "I would apply that capability", an object-position
-      // summary of the proof just before it, is not reported; paragraph 3 is.
-      const battery = paragraphs => evaluateCoverLetterChecks({
-        plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs, evidence: {}, jobText: '', researchText: '', companyName: 'Duskfield',
-      });
-      // It also carries a transfer form in all three paragraphs, which the carrier
-      // budget (at most MAX_EXPLICIT_TRANSFER_PARAGRAPHS paragraphs) now reports.
-      assert(battery(embeddedAiLetter).filter(check => !check.passed).map(check => check.id).join(',')
-        === 'repeated-transfer-carrier,dangling-demonstrative,transfer-carrier-budget',
-      'the shipped letter fails both carrier checks and the budget that reads its three transfers, and nothing else');
-      assert(checkDanglingDemonstrative([embeddedAiLetter[0]]).passed && !checkDanglingDemonstrative([embeddedAiLetter[2]]).passed,
-        'paragraph 1 is not reported by the demonstrative check, and paragraph 3 is');
-      // Rotating the form, the repair this pair's report asks for on its own,
-      // clears both carrier checks and leaves the letter over its transfer budget.
-      const rotated = [
-        embeddedAiLetter[0],
-        embeddedAiLetter[1],
-        embeddedAiLetter[2].replace("That judgment would support the team's shared habits", "I can bring that practice to the team's shared habits"),
-      ];
-      assert(battery(rotated).filter(check => !check.passed).map(check => check.id).join(',') === 'transfer-carrier-budget',
-        `rotating the form clears the pair and the demonstrative, and the three transfers remain (failed=${battery(rotated).filter(check => !check.passed).map(check => check.id)})`);
-      // The repair, in one round: paragraphs 2 and 3 end on what their work did
-      // instead of on a second and a third transfer, so only the first paragraph
-      // carries a stock frame (the budget is one) and the pair is gone.
-      const repaired = [
-        embeddedAiLetter[0],
-        embeddedAiLetter[1].replace(' That changeover experience would support production sensor integrations, including alert routing and error handling.', ''),
-        embeddedAiLetter[2].replace(" That judgment would support the team's shared habits around release safety, quality, and cost.", ''),
-      ];
-      assert(repaired[1] !== embeddedAiLetter[1] && repaired[2] !== embeddedAiLetter[2] && battery(repaired).every(check => check.passed),
-        `the minimal repair clears the whole battery (failed=${battery(repaired).filter(check => !check.passed).map(check => `${check.id}: ${check.detail}`).join(' | ')})`);
-      assert(battery(repaired).length === 55, 'the repaired letter is graded by every check, not by a shortened battery');
-      // Swapping only the verb or only the noun of the shipped sentence is not a rotation.
-      const verbOnly = [embeddedAiLetter[0], embeddedAiLetter[1], embeddedAiLetter[2].replace('That judgment would support', 'That practice would help')];
-      assert(!checkRepeatedTransferCarrier(verbOnly).passed
-        && checkRepeatedTransferCarrier(verbOnly).detail.includes('“that * would <verb>”'),
-      'the minimal noun-and-verb swap of the shipped sentence is still one form');
-
-      const pair = (first, second) => [`I kept the reporting service dependable. ${first}`, `I wrote the runbook the rotation followed. ${second}`];
-      // Positive: the same form, in every shape a form takes.
-      for (const [label, first, second, form] of [
-        ['subject shape', 'That reporting experience would support daily delivery.', 'That runbook practice would support weekly delivery.', 'that * would <verb>'],
-        ['other determiner', 'This practice would help daily delivery.', 'This approach would help weekly delivery.', 'this * would <verb>'],
-        ['only the verb changes (subject shape)', 'That practice would support daily delivery.', 'That practice would help weekly delivery.', 'that * would <verb>'],
-        ['only the verb changes (first person)', 'I would apply that practice to daily delivery.', 'I would bring that practice to weekly delivery.', 'i would <verb>'],
-        ['the determiner after I would is not part of the form', 'I would apply that experience to daily delivery.', 'I would apply my experience to weekly delivery.', 'i would <verb>'],
-        ['first person can', 'I can bring that practice to daily delivery.', 'I can bring that approach to weekly delivery.', 'i can <verb>'],
-        ['would before the verb without I', 'You would apply that practice to daily delivery.', 'Colleagues would use that approach for weekly delivery.', 'would <verb> that *'],
-        ['a modal outside the cue is not part of the form', 'I will apply that experience to daily delivery.', 'I could bring that practice to weekly delivery.', '<verb> that *'],
-      ]) {
-        const found = checkRepeatedTransferCarrier(pair(first, second));
-        assert(!found.passed && found.detail.includes(`“${form}”`),
-          `${label}: two consecutive paragraphs on one carrier form are reported as “${form}” (detail=${found.detail})`);
-      }
-      // A closing paragraph is read like any other: it is a carrier-shaped phrase in a consecutive paragraph.
-      const closing = checkRepeatedTransferCarrier(['I kept the reporting service dependable. I can apply that experience to daily delivery.',
-        'I welcome a conversation about how I can bring my experience to your platform.']);
-      assert(!closing.passed && closing.detail.includes('“i can <verb>”') && closing.detail.includes('paragraph 2 sentence 1'),
-        `the closing is read too (detail=${closing.detail})`);
-      // Negative: everything that is not the same form, or not consecutive.
-      for (const [label, paragraphs] of [
-        ['different forms', pair('I would apply that experience to daily delivery.', 'That practice would support weekly delivery.')],
-        ['a different determiner is a different way of handing the capability over', pair('You would apply that practice to daily delivery.', 'You would apply my practice to weekly delivery.')],
-        ['a different modal after I is a different form', pair('I would apply that practice to daily delivery.', 'I can apply that practice to weekly delivery.')],
-        ['a different shape is a different form', pair('You would apply that practice to daily delivery.', 'That practice would support weekly delivery.')],
-        ['one carrier only', ['I kept the reporting service dependable. I would apply that experience to daily delivery.', 'I wrote the runbook the rotation followed.']],
-        ['no carrier at all', pair('It ran daily.', 'It ran weekly.')],
-        ['a target-only cue is ordinary prose, not a handed-over proof', pair('The rota exists to support the team every day.', 'The runbook exists to support the team every week.')],
-        ['a single paragraph', ['I would apply that experience to daily delivery. I would apply that experience to weekly delivery.']],
-        ['hostile input', ['', null, undefined, 42, { toString: () => 'x' }]],
-      ]) {
-        const found = checkRepeatedTransferCarrier(paragraphs);
-        assert(found.passed, `${label}: not reported (detail=${found.detail})`);
-      }
-      const spread = [
-        'I kept the reporting service dependable. I would apply that experience to daily delivery.',
-        'I wrote the runbook the rotation followed. That practice would support weekly delivery.',
-        'I trained the new on-call engineers. I would apply that experience to onboarding.',
-      ];
-      assert(checkRepeatedTransferCarrier(spread).passed, 'one form spread across paragraphs that do not touch is the parallelism the count allows');
-      // Four proof paragraphs on four different forms, then a closing, is a legal letter.
-      const fourForms = [
-        'I kept the reporting service dependable. This experience would help daily delivery.',
-        'I wrote the runbook the rotation followed. I would apply that practice to weekly delivery.',
-        'I trained the new on-call engineers. That approach would support onboarding.',
-        'I closed the incident review loop. I can apply that work to reviews.',
-        'I welcome a conversation about the rota.',
-      ];
-      assert(checkRepeatedTransferCarrier(fourForms).passed, 'rotating four forms through four paragraphs is what the check asks for');
-
-      // A run of three neighbours costs one rewrite, not two, and the message says so.
-      const triad = [
-        'I kept the reporting service dependable. That practice would support daily delivery.',
-        'I wrote the runbook the rotation followed. That approach would support weekly delivery.',
-        'I trained the new on-call engineers. That experience would support onboarding.',
-        'I closed the incident review loop. I welcome a conversation.',
-      ];
-      const triadReport = checkRepeatedTransferCarrier(triad);
-      assert(!triadReport.passed && triadReport.detail.includes('paragraphs 1, 2 and 3 all carry the same transfer form')
-        && triadReport.detail.includes('at least 1 of them so that no two neighbouring paragraphs share it'),
-      `a run of three neighbours is one observation that counts the rewrites (detail=${triadReport.detail})`);
-
-      // Both reports name a pair the sentence-shape check also reports, and say so:
-      // a repair that answers only the shape report keeps the carrier, so this
-      // check is not suppressed.
-      const shapeReported = [
-        'I scripted the deployment step at Acme. I would apply that practice to the reliable delivery this role needs.',
-        'I wrote the weekly runbook at Acme. I would apply that practice to the reliable delivery this role needs.',
-        'The rotation followed the runbook. My colleagues repeated the step without me present.',
-      ];
-      const shape = checkRepeatedSentenceShape(shapeReported);
-      assert(!shape.passed && shape.detail.includes('“i would * that *”'),
-        `the premise: the shape check reports this pair (detail=${shape.detail})`);
-      const both = checkRepeatedTransferCarrier(shapeReported);
-      assert(!both.passed && both.detail.includes('repeated-sentence-shape reports these same sentences')
-        && both.detail.includes('one rewrite that changes both the carrier form and the sentence shape answers both reports'),
-      `a pair the shape check also reports is reported here and says so (detail=${both.detail})`);
-      // The round-two hole this closes: the shape is rotated and the carrier kept.
-      const shapeOnlyRepair = [shapeReported[0], shapeReported[1].replace('I would apply that practice to', 'At Acme I would apply that practice to'), shapeReported[2]];
-      assert(!checkRepeatedTransferCarrier(shapeOnlyRepair).passed,
-        'a shape-only repair that keeps the carrier is still one form, and is reported');
-      const shapeReportedVerbSwap = [shapeReported[0], shapeReported[1].replace('I would apply that practice', 'I would bring that practice'), shapeReported[2]];
-      assert(!checkRepeatedSentenceShape(shapeReportedVerbSwap).passed && !checkRepeatedTransferCarrier(shapeReportedVerbSwap).passed,
-        'a verb swap in a pair the shape check reports is one form too');
-      assert(!checkRepeatedTransferCarrier(shapeReported.slice(0, 2)).passed
-        && !checkRepeatedTransferCarrier(shapeReported.slice(0, 2)).detail.includes('repeated-sentence-shape reports'),
-      'below the shape check\'s paragraph floor the pair is reported without that note');
-
-      // Rotating onto the form of the paragraph beyond the pair moves the defect one paragraph over.
-      const beyond = checkRepeatedTransferCarrier([
-        'I kept the reporting service dependable. I would apply that experience to daily delivery.',
-        'I wrote the runbook the rotation followed. I can apply that practice to weekly delivery.',
-        'I trained the new on-call engineers. I can bring that approach to onboarding.',
-        'I closed the incident review loop. That work would support reviews.',
-      ]);
-      assert(!beyond.passed && beyond.detail.includes('paragraphs 2 and 3 both carry the same transfer form “i can <verb>”')
-        && beyond.detail.includes('and “i would <verb>” (paragraph 1 uses it) or “that * would <verb>” (paragraph 4 uses it) would be the same defect again'),
-      `the message names each outer neighbour's form (detail=${beyond.detail})`);
-
-      // The rule the contract prints says exactly what the code does, and quotes no word to reuse.
-      for (const clause of [
-        'every carrier-shaped phrase is read in any two consecutive paragraphs, the opening and the closing included',
-        'two paragraphs standing next to each other may not both carry the same form',
-        'changing only the verb or only the noun keeps the same form',
-        'after I, only would or can is part of the form',
-        '“I would apply that X” and “I would bring my Y” are one form',
-        '“that X would support” and “that Y would help” are one form',
-        '“will apply that X” and “could apply that Y” are one form',
-        'a stock transfer frame is never required',
-        'reaching for one form again in the very next paragraph is a choice, because no rule requires a carrier at all',
-        'the repair is your own wording in one of the two paragraphs, not a different stock form',
-      ]) {
-        assert(REPEATED_TRANSFER_CARRIER_RULE.includes(clause), `the printed rule states “${clause}” (rule=${REPEATED_TRANSFER_CARRIER_RULE})`);
-      }
-      return { reported: reported.detail.length };
-    },
-  },
-  {
-    name: 'cover letter harness: a demonstrative transfer carrier must find its capability noun earlier in its paragraph, and nothing else is judged',
-    run: () => {
-      const paragraph3 = "My release practice combines manual review with scripted checking, and I have written route validators, checklist templates, and handoff routing for it. That judgment would support the team's shared habits around release safety, quality, and cost. I welcome a conversation about how my checking practice could support Duskfield's shared engineering patterns.";
-      const reported = checkDanglingDemonstrative(['I built the dispatch board.', paragraph3]);
-      assert(!reported.passed && reported.id === 'dangling-demonstrative'
-        && reported.detail.includes('paragraph 2 sentence 2 carries “That judgment would support”')
-        && reported.detail.includes('no earlier sentence of paragraph 2 mentions “judgment”'),
-      `the shipped sentence has no referent: its paragraph is about a practice (detail=${reported.detail})`);
-      // The message names the operation, and the two repairs it offers are the two
-      // that keep the other rules satisfied: never a noun outside the cue, and
-      // never "name the thing in full", which repeats a phrase.
-      assert(reported.detail.includes('put a word an earlier sentence of this paragraph uses for that capability directly before the noun, or use one of the back-references that name experience, work or patterns and need no earlier mention'),
-        'the message names the operation');
-      assert(!reported.detail.includes('in full') && !reported.detail.includes('replace that noun'),
-        'the message never asks for a replacement noun or for the thing to be named in full');
-      const quoted = reported.detail.match(/“[^”]*”/g) || [];
-      assert(quoted.join(' ') === '“That judgment would support” “judgment”', `the message quotes the carrier and the noun (quoted=${JSON.stringify(quoted)})`);
-      // The repairs it offers clear it, and keep the carrier a carrier.
-      const mapped = text => checkParagraphArgumentLinks({
-        plan: { paragraphs: [{ argumentMapping: {
-          claim: 'My release practice combines manual review with scripted checking',
-          proof: 'I wrote checklist templates that sent every handoff to its reviewer',
-          relevance: text,
-          jobNeedQuote: 'reusable team practices for release safety',
-        } }] },
-        paragraphs: [`My release practice combines manual review with scripted checking. I wrote checklist templates that sent every handoff to its reviewer. ${text}`],
-        jobText: 'The role builds reusable team practices for release safety across the engineering group.',
-      });
-      for (const [label, replacement] of [
-        ['a word the paragraph uses before the noun', 'That release judgment would support reusable team practices for release safety.'],
-        ['the paragraph\'s own noun', 'That practice would support reusable team practices for release safety.'],
-        ['a permitted back-reference', 'That experience would support reusable team practices for release safety.'],
-      ]) {
-        assert(checkDanglingDemonstrative([`My release practice combines manual review with scripted checking. I wrote checklist templates that sent every handoff to its reviewer. ${replacement}`]).passed,
-          `${label} clears the check`);
-        assert(mapped(replacement).passed, `${label} stays a legal relevance span (detail=${mapped(replacement).detail})`);
-      }
-      assert(checkRepeatedPhrase([`My release practice combines manual review with scripted checking. I wrote checklist templates that sent every handoff to its reviewer. That release judgment would support reusable team practices for release safety.`]).passed,
-        'the word borrowed from the paragraph does not trip the repeated-phrase check');
-
-      const body = 'I retired the in-house invoicing systems for vendor-hosted software at Acme.';
-      const read = sentence => checkDanglingDemonstrative([`${body} ${sentence}`]);
-      // Positives: a carrier whose capability noun, and whose modifiers, no earlier sentence used.
-      for (const [label, sentence, noun] of [
-        ['subject shape, abstract quality', 'That judgment would support reusable practices.', 'judgment'],
-        ['subject shape, another noun', 'That capability would enable faster releases.', 'capability'],
-        ['plural noun', 'Those capabilities would help a small team.', 'capabilities'],
-        ['an approach', 'This approach would help a small team.', 'approach'],
-        ['modifiers that are not earlier either', 'That scripted checking practice would support reusable standards.', 'practice'],
-      ]) {
-        const found = read(sentence);
-        assert(!found.passed && found.detail.includes(`“${noun}”`), `${label}: reported (detail=${found.detail})`);
-      }
-      // A function word before the noun is not a word the paragraph "used".
-      assert(!checkDanglingDemonstrative(['I did very careful work on the cutover. That very approach would help a small team.']).passed,
-        'a function word between the determiner and the noun does not excuse the carrier');
-      // The object shape is not read: it sits right after the proof it transfers, so its
-      // noun summarizes that action (the shipped paragraph 1 measured this way).
-      for (const sentence of ['I would apply that capability to faster releases.', 'I can bring this approach to faster releases.',
-        'To apply that judgment to reviews, I would start small.', 'I would use that practice for weekly delivery.']) {
-        assert(read(sentence).passed, `an object-position carrier is out of scope: ${sentence}`);
-      }
-      // Negatives: the noun, a stem of it, or a modifier appears earlier.
-      for (const [label, sentences] of [
-        ['the noun appears earlier', 'My changeover practice starts from the records. That practice would support reusable standards.'],
-        ['the plural of the noun appears earlier', 'I documented the capabilities of each platform. That capability would help a small team.'],
-        ['the singular of the noun appears earlier', 'I documented each platform capability. Those capabilities would help a small team.'],
-        ['a modifier appears earlier', 'I ran the depot cutover myself. That depot cutover practice would support reusable standards.'],
-        ['a stemmed modifier appears earlier', 'I ran the changeovers myself. That changeover practice would support reusable standards.'],
-        ['a hyphenated modifier part appears earlier', 'I built a gate workflow for staff. That gate-triggered practice would support reusable standards.'],
-        ['the noun appears in the carrier\'s own object shape', 'My delivery approach kept releases small. I would bring that approach to your releases.'],
-      ]) {
-        const found = checkDanglingDemonstrative([sentences]);
-        assert(found.passed, `${label}: not reported (detail=${found.detail})`);
-      }
-      // The three back-references the relevance rule permits need no earlier mention, in any determiner.
-      for (const sentence of [
-        'That experience would support production integrations.', 'This experience would support production integrations.',
-        'That work would support production integrations.', 'This work would support production integrations.',
-        'Those patterns would support production integrations.', 'These patterns would support production integrations.',
-        'That integration experience would support production work.', 'That company-wide rollout work would support production work.',
-        'I would apply that experience to production integrations.', 'I would apply this work to production integrations.',
-      ]) {
-        assert(read(sentence).passed, `a permitted back-reference is never read: ${sentence}`);
-      }
-      // Nothing that is not a demonstrative transfer carrier is judged, whatever noun it opens on.
-      for (const [first, second] of [
-        ['I rebuilt the public API.', 'That rebuild let partners integrate in days.'],
-        ['I cached the pricing lookups.', 'This cut p95 latency from 900 to 120 milliseconds.'],
-        ['I added retries, idempotency keys, and dead-letter queues to the payment consumer.', 'These safeguards cut failed charges by 80 percent.'],
-        ['I kept the checkout service reliable during peak season.', 'That reliability mattered because peak weeks carried half the revenue.'],
-        ['I wrote the nightly load jobs that feed the warehouse.', 'This new pipeline replaced three spreadsheets.'],
-        ['I moved the claims records into a new platform.', 'That difficulty lay mostly in reconciling the duplicate records between platforms.'],
-        ['I moved the claims records into a new platform.', 'That judgment guided how I sequenced the cutover.'],
-        ['I ran the changeover.', 'That means I can move between UI and backend work.'],
-        ['I ran the changeover.', 'That said, I kept the rollout small.'],
-        ['I ran the changeover.', 'This role needs steady delivery.'],
-        ['I ran the changeover.', 'That would help a small team.'],
-      ]) {
-        const found = checkDanglingDemonstrative([`${first} ${second}`]);
-        assert(found.passed, `an ordinary demonstrative sentence is out of scope: ${second} (detail=${found.detail})`);
-      }
-      // The first sentence of a paragraph has nothing earlier to find its noun in; the boundary belongs to checkOpeningDemonstrative.
-      assert(checkDanglingDemonstrative(['That judgment would support reusable practices.', 'I would apply that capability to releases.']).passed,
-        'a paragraph\'s first sentence is not read');
-      assert(checkDanglingDemonstrative(['', null, undefined, 42, { toString: () => 'x' }]).passed, 'hostile input yields a result');
-      const many = checkDanglingDemonstrative([1, 2, 3].map(() => `${body} That judgment would help. That capability would help.`));
-      assert(!many.passed && many.detail.includes('additional observation(s) omitted'), 'the report is capped like its siblings');
-
-      // The scope the rule prints is read from the arrays the regexes are built from.
-      for (const clause of ['capability', 'practice', 'approach', 'judgment', 'experience', 'work', 'pattern',
-        'must find that noun, or a word standing before it in the carrier, or a form of one of them, in an earlier sentence of the same paragraph',
-        'put a word an earlier sentence of the paragraph uses for that capability directly before the noun',
-        'no object-position carrier such as apply that X, and no other sentence that opens with a demonstrative, is read here']) {
-        assert(DANGLING_DEMONSTRATIVE_RULE.includes(clause), `the printed rule states “${clause}” (rule=${DANGLING_DEMONSTRATIVE_RULE})`);
-      }
-      assert(!DANGLING_DEMONSTRATIVE_RULE.includes('in full'), 'the printed rule does not ask for the thing to be named in full');
-
-      // The paragraph-boundary check had the same verb-as-head leniency: a modal
-      // in the previous paragraph satisfied "That judgment would".
-      const boundary = checkOpeningDemonstrative([
-        'I would rewrite the runbook before I would ship the cutover.',
-        'That judgment would support reusable practices.',
-      ]);
-      assert(!boundary.passed && boundary.detail.includes('“judgment”') && !boundary.detail.includes('“would”'),
-        `a modal in the previous paragraph is not a referent at the boundary either (detail=${boundary.detail})`);
-      assert(checkOpeningDemonstrative(['I ran the changeover.', 'That would support reusable practices.']).passed,
-        'a demonstrative followed by a modal is a pronoun and has no noun to hunt for');
-      assert(checkOpeningDemonstrative(['I ran the changeover.', "That couldn't wait for the quarter."]).passed,
-        'a contracted auxiliary is not a noun either');
-      return { reported: reported.detail.length };
-    },
-  },
-  {
     name: 'cover letter harness: appended checks remain reportable prose checks',
     run: () => {
       const checks = evaluateCoverLetterChecks({ plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs: ['I built it.', 'It ran.'], evidence: {}, jobText: '', researchText: '' });
-      assert(checks.slice(-5).map(check => check.id).join(',') === 'repeated-transfer-carrier,dangling-demonstrative,ended-role-current-employment,transfer-carrier-budget,transfer-benefit-support',
+      assert(checks.slice(-2).map(check => check.id).join(',') === 'ended-role-current-employment,transfer-benefit-support',
         'the appended checks are last in the battery, so the established order is unmoved');
-      assert(checks.slice(-5).every(check => check.passed && typeof check.detail === 'string' && check.detail.length > 0),
+      assert(checks.slice(-2).every(check => check.passed && typeof check.detail === 'string' && check.detail.length > 0),
         'each returns the result(id, passed, detail) contract with a detail on a pass');
-      return { ids: checks.slice(-5).map(check => check.id) };
+      return { ids: checks.slice(-2).map(check => check.id) };
     },
   },
 ];

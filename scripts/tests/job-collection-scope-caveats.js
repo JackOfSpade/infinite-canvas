@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { readJobsSources } from './jobsSourceFixture.mjs';
 import { assert } from './testHelpers.js';
 import { __compactErrorStackForTests, buildJobTasks, claimJobAnalysisOperationAuthority, fs, ipcMain, markSourceStatus, os, path, readRunState, recordSourcePage, setStage, startRun } from '../test-dependencies.js';
 import { __registerJobsHandlersForTests } from '../../electron/ipc/jobs.js';
@@ -144,7 +145,7 @@ export default [
   {
     name: 'Job Search collection scope caveat: terminal wiring, new-run clear, career clear, and Done-state disclosure stay connected',
     run: () => {
-      const backend = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      const backend = readJobsSources('jobs', 'searchHandlers');
       const search = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
       const done = readFileSync(new URL('../../src/nodes/jobsearch/JobSearchDoneState.jsx', import.meta.url), 'utf8');
       assert(done.includes("searchWindow: 'Posting date window'"),

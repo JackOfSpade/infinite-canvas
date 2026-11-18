@@ -14,18 +14,15 @@
 // What changed, and what each group below proves:
 //   owed      only the FIRST proof-bearing paragraph owes a sentence about why
 //             its proof matters to the target (MAX_EXPLICIT_TRANSFER_PARAGRAPHS
-//             is one), counted by one function the gate, the drafting-stage
-//             reporter and the budget all read
+//             is one), counted by one function the gate reads
 //   natural   that sentence is recognised by the words it shares with the quote
 //             the paragraph cites and by standing apart from the proof sentence,
 //             in ANY wording: no stock frame, no would or can, no shared noun
 //   refused   a generic label, a sentence that only restates the proof, and a
 //             sentence that names nothing of the cited need are still refused,
 //             with a message that says what to do
-//   budget    transfer-carrier-budget counts stock frames only: at most one
-//             paragraph carries one, and none is required
-//   repeats   the same wording in neighbouring paragraphs is still reported,
-//             without a closed list of forms to move to
+//   repeats   the same wording in neighbouring paragraphs is still reported
+//             by the phrase check, without a closed list of forms to move to
 //   benefit   transfer-benefit-support reads every sentence of a proof-bearing
 //             paragraph that states no action of its own, so a natural-wording
 //             relevance sentence that promises a benefit the proof never showed
@@ -41,8 +38,7 @@ import { assert } from './testHelpers.js';
 import {
   ARGUMENT_LATER_RELEVANCE_SPAN_RULE, ARGUMENT_RELEVANCE_SPAN_RULE, EXPLICIT_TRANSFER_BUDGET_RULE, MAX_EXPLICIT_TRANSFER_PARAGRAPHS,
   TRANSFER_BENEFIT_CLASSES, TRANSFER_BENEFIT_CLASS_NAMES, TRANSFER_BENEFIT_SUPPORT_RULE, checkParagraphArgumentLinks,
-  checkRepeatedTransferCarrier, checkTransferBenefitSupport, checkTransferCarrierBudget, evaluateCoverLetterChecks, explicitTransferOwed,
-  paragraphArgumentSpanGaps, sentences,
+  checkTransferBenefitSupport, evaluateCoverLetterChecks, explicitTransferOwed,
 } from '../../electron/ipc/coverLetterChecks.js';
 import { PASTE_CHECK_PROSE_UNITS, pasteReportableCheckIds } from '../../electron/ipc/localAiApplication.js';
 
@@ -279,15 +275,12 @@ export default [
     run() {
       for (const domain of DOMAINS) {
         const first = domain.proofs[0];
-        // A: every natural form passes, and none of them is a stock frame, so the budget reads them as nothing.
+        // A: every natural form passes.
         first.natural.forEach((statement, form) => {
           assert(!/\b(?:would|can|could|will)\b/iu.test(statement), `${domain.key}: the fixture sentence ${form} uses no modal (${statement})`);
           const letter = letterOf(domain, { form });
           const verdict = gate(domain, letter, planOf(domain, { form }));
           assert(verdict.passed, `${domain.key}/A: natural form ${form} passes the gate (${detailOf(verdict)})`);
-          const budget = checkTransferCarrierBudget(letter);
-          assert(budget.passed && budget.detail.startsWith('0 of 5 paragraph(s) carry a stock transfer frame'), `${domain.key}/A: natural form ${form} is no stock frame (${detailOf(budget)})`);
-          assert(!paragraphArgumentSpanGaps(letter[1], domain.posting, { owesTransfer: true }).length, `${domain.key}/A: the drafting-stage reporter sees a legal span in natural form ${form}`);
         });
         // The stock frame is accepted as well: it is one wording among all of them, not a requirement.
         const stockVerdict = gate(domain, letterOf(domain, { stock: true }), planOf(domain, { stock: true }));
@@ -385,137 +378,9 @@ export default [
     },
   },
   {
-    name: 'Relevance drafting-stage reporter: reads the same count and the same rule as the gate, asks the owing paragraph for a sentence apart from its proof and a later one only for a responsibility, and stays a subset of the gate (A/B/C, three domains)',
+    name: 'Repeated wording: a natural sentence repeated across paragraphs is reported by the phrase check, and different wording clears it (C/D, three domains)',
     run() {
       for (const domain of DOMAINS) {
-        const first = domain.proofs[0];
-        const letter = letterOf(domain);
-        const owed = explicitTransferOwed(letter);
-        // A: the owing paragraph with a natural sentence has no gap; stripped to its proof and an ending that names nothing, against an unrelated posting, it has one.
-        assert(paragraphArgumentSpanGaps(letter[1], domain.posting, { owesTransfer: owed[1] }).length === 0, `${domain.key}/A: a natural sentence is a legal span`);
-        const proofOnly = first.proof;
-        const gapsProofOnly = paragraphArgumentSpanGaps(proofOnly, domain.posting, { owesTransfer: true }).filter(gap => gap.field === 'relevance');
-        assert(gapsProofOnly.length === 1 && gapsProofOnly[0].rule === ARGUMENT_RELEVANCE_SPAN_RULE,
-          `${domain.key}/A: a paragraph that owes the sentence and has nothing apart from its proof is reported under the owing rule (${JSON.stringify(gapsProofOnly.map(gap => gap.field))})`);
-        // The same paragraph is NOT reported when it does not owe the sentence: its proof sentence names the need.
-        assert(!paragraphArgumentSpanGaps(proofOnly, domain.posting, { owesTransfer: false }).some(gap => gap.field === 'relevance'), `${domain.key}/A: a later paragraph owes no sentence apart from its proof`);
-        // Flip: add one sentence that names the need and the same paragraph owes nothing more.
-        assert(!paragraphArgumentSpanGaps(`${proofOnly} ${statementOf(first)}`, domain.posting, { owesTransfer: true }).some(gap => gap.field === 'relevance'), `${domain.key}/A: a sentence apart from the proof clears it`);
-        // Without a posting copy the reporter can only ask whether a sentence stands apart from the proof, the weaker verdict and still a
-        // subset of the gate: a lone proof sentence is reported, a paragraph with a second sentence is not, and a later paragraph owes none.
-        const relevanceGap = (paragraphText, options) => paragraphArgumentSpanGaps(paragraphText, '', options).some(gap => gap.field === 'relevance');
-        assert(relevanceGap(proofOnly, { owesTransfer: true }) && !relevanceGap(`${proofOnly} ${first.ending}`, { owesTransfer: true }) && !relevanceGap(proofOnly, { owesTransfer: false }),
-          `${domain.key}/A: with no posting the reporter still sees that a lone proof sentence has nothing apart from it`);
-        // The part OUTSIDE the proof sentence is what is judged: here the proof sentence itself names the need, and the only other sentence
-        // names nothing of it, so the owing paragraph is reported while a paragraph that does not owe the sentence is not.
-        const quiet = `My quiet practice grew over many years. ${first.proof}`;
-        assert(paragraphArgumentSpanGaps(quiet, domain.posting, { owesTransfer: true }).some(gap => gap.field === 'relevance')
-          && !paragraphArgumentSpanGaps(quiet, domain.posting, { owesTransfer: false }).some(gap => gap.field === 'relevance'),
-        `${domain.key}/A: words in the proof sentence do not stand for a sentence about the target`);
-        // B: flip the posting to one that shares nothing with the paragraph and both are reported, each under its own rule.
-        const owingNoNeed = paragraphArgumentSpanGaps(letter[1], UNRELATED_POSTING, { owesTransfer: true });
-        const laterNoNeed = paragraphArgumentSpanGaps(letter[3], UNRELATED_POSTING, { owesTransfer: false });
-        assert(owingNoNeed.length === 1 && owingNoNeed[0].rule === ARGUMENT_RELEVANCE_SPAN_RULE && laterNoNeed.length === 1 && laterNoNeed[0].rule === ARGUMENT_LATER_RELEVANCE_SPAN_RULE,
-          `${domain.key}/B: with nothing in common with the posting each paragraph is reported under its own rule (${JSON.stringify([owingNoNeed, laterNoNeed].map(gaps => gaps.map(gap => gap.field)))})`);
-        // C: the subset relation. Whenever the reporter says a paragraph has no relevance span, the gate, given the strongest mapping the
-        // paragraph could offer (every word run as the relevance, the whole posting as the quote), reports the relevance field too.
-        letter.forEach((paragraph, index) => {
-          if (index === 0 || index === letter.length - 1) { assert(paragraphArgumentSpanGaps(paragraph, domain.posting).length === 0, `${domain.key}: an opening and a closing owe nothing`); return; }
-          const proof = domain.proofs[index - 1];
-          for (const postingText of [domain.posting, UNRELATED_POSTING]) {
-            const quietClaim = 'My quiet practice grew over many years.';
-            for (const { candidate, claim } of [
-              { candidate: paragraph, claim: proof.claim },
-              { candidate: `${proof.claim} ${proof.proof}`, claim: proof.claim },
-              { candidate: `${proof.claim} ${proof.proof} ${proof.ending}`, claim: proof.claim },
-              // the proof sentence names the need and nothing apart from it does
-              { candidate: `${quietClaim} ${proof.proof}`, claim: quietClaim },
-            ]) {
-              const gaps = paragraphArgumentSpanGaps(candidate, postingText, { owesTransfer: owed[index] });
-              if (!gaps.some(gap => gap.field === 'relevance')) continue;
-              const words = candidate.split(/\s+/u);
-              for (let start = 0; start < words.length; start += 1) {
-                for (let end = start + 1; end <= words.length; end += 1) {
-                  // The whole posting is the strongest quote there is: every content word of it is eligible.
-                  const verdict = checkParagraphArgumentLinks({
-                    plan: { paragraphs: [{ argumentMapping: { claim, proof: proof.proof, relevance: words.slice(start, end).join(' '), jobNeedQuote: postingText } }] },
-                    paragraphs: [candidate], jobText: postingText,
-                  });
-                  assert(!verdict.passed, `${domain.key}/C: the reporter's relevance gap is real in the gate (owed=${owed[index]}, relevance=${words.slice(start, end).join(' ')}): ${detailOf(verdict)}`);
-                }
-              }
-            }
-          }
-        });
-        // And a paragraph the gate maps is not reported.
-        assert(gate(domain, letter, planOf(domain)).passed && letter.slice(1, -1).every((paragraph, at) => !paragraphArgumentSpanGaps(paragraph, domain.posting, { owesTransfer: owed[at + 1] }).length),
-          `${domain.key}: a paragraph the gate maps is not reported`);
-      }
-    },
-  },
-  {
-    name: 'Transfer budget: transfer-carrier-budget counts stock frames only, allows one paragraph to carry one, names the paragraphs and the repair, and clears when one carrier goes (A/B/C, three domains)',
-    run() {
-      for (const domain of DOMAINS) {
-        // A: one stock frame passes, and so does a letter with none.
-        const within = checkTransferCarrierBudget(letterOf(domain, { stock: true }));
-        assert(within.passed && within.id === 'transfer-carrier-budget' && within.detail.includes('1 of 5 paragraph(s) carry a stock transfer frame, within the budget of 1'), `${domain.key}/A: ${detailOf(within)}`);
-        assert(checkTransferCarrierBudget(letterOf(domain)).passed, `${domain.key}/A: a letter with no frame passes`);
-        // B: give the second proof a stock frame too and the letter is over the budget of ONE.
-        const over = letterOf(domain, { stock: true, owing: 2 });
-        const failed = checkTransferCarrierBudget(over);
-        assert(!failed.passed && failed.detail.includes('paragraphs 2 and 3 carry a stock transfer frame')
-          && failed.detail.includes('at most 1 paragraph,') && failed.detail.includes('end paragraph 3 on what the work did')
-          && failed.detail.includes('paragraph 3 sentence 3') && failed.detail.includes('none is required'),
-        `${domain.key}/B: the message names the paragraphs, the ceiling and where the carrier sits (${failed.detail})`);
-        // The message names the repair, never a string to copy: no carrier verb, no example sentence, no em dash.
-        const message = failed.detail.replace(/\bparagraphs? \d+(?:, \d+)*(?: and \d+)?(?: sentence \d+)?/gu, '');
-        for (const copied of ['I would', 'I can', 'would support', 'would help', 'apply', 'bring', 'contribute', 'for example', 'e.g.', 'such as']) {
-          assert(!message.includes(copied), `${domain.key}/B: the message hands over no wording (“${copied}” in ${failed.detail})`);
-        }
-        assert(!failed.detail.includes(String.fromCharCode(0x2014)), `${domain.key}: no em dash`);
-        // C: the repair the message prescribes, applied mechanically (the named sentence removed), clears the check.
-        const named = /paragraph (\d+) sentence (\d+)/u.exec(failed.detail);
-        const repaired = over.map((paragraph, index) => (index + 1 === Number(named[1])
-          ? sentences(paragraph).filter((_, position) => position + 1 !== Number(named[2])).join(' ') : paragraph));
-        assert(repaired[Number(named[1]) - 1] !== over[Number(named[1]) - 1] && checkTransferCarrierBudget(repaired).passed, `${domain.key}/C: removing the named carrier clears it`);
-        // The check is about how many paragraphs carry one, not which: the opening counts, and so does the closing.
-        const openingCarries = [`${domain.opening} I would bring that approach to this work.`, ...letterOf(domain, { stock: true }).slice(1)];
-        const opening = checkTransferCarrierBudget(openingCarries);
-        assert(!opening.passed && opening.detail.includes('paragraph 1 sentence 2') && /end paragraphs? 1 on what the work did/u.test(opening.detail),
-          `${domain.key}: a carrier in the opening counts against the budget (${opening.detail})`);
-        const closingCarries = [...letterOf(domain, { stock: true }).slice(0, -1), `${domain.closing} That practice would help your team.`];
-        const closing = checkTransferCarrierBudget(closingCarries);
-        assert(!closing.passed && closing.detail.includes('paragraphs 2 and 5 carry a stock transfer frame') && closing.detail.includes('end paragraph 5 on what the work did'),
-          `${domain.key}: a carrier in the closing counts too (${closing.detail})`);
-        // The two cue shapes that end on the target alone are not transfer forms, so a letter full of them is inside the budget.
-        const targetOnly = [domain.opening, ...domain.proofs.map(proof => `${proof.claim} ${proof.proof} Helping this role keep the work steady is the aim.`), domain.closing];
-        assert(checkTransferCarrierBudget(targetOnly).passed, `${domain.key}: a target-only carrier costs nothing`);
-        // Paragraphs are counted once however many carriers one holds.
-        const twoInOne = [domain.opening, `${domain.proofs[0].claim} ${domain.proofs[0].proof} ${domain.proofs[0].stock} ${domain.proofs[1].stock}`, paragraphOf(domain.proofs[2]), domain.closing];
-        assert(checkTransferCarrierBudget(twoInOne).passed, `${domain.key}: two carriers in one paragraph are one paragraph`);
-        // Natural wording is never counted, however many paragraphs state their relevance that way (the repeats are policed by wording, below).
-        assert(checkTransferCarrierBudget(letterOf(domain, { owing: 3 })).passed, `${domain.key}: natural sentences in every proof paragraph are no stock frame`);
-      }
-    },
-  },
-  {
-    name: 'Repeated wording: one stock form in neighbouring paragraphs is still reported without a closed list to move to, and a natural sentence repeated across paragraphs is reported by the phrase and shape checks (A/B/C, three domains)',
-    run() {
-      for (const domain of DOMAINS) {
-        // A: two stock frames in two paragraphs: the budget and the form check both report, and the message names no list.
-        const letter = letterOf(domain, { stock: true, owing: 2 });
-        const sameForm = letter.map((paragraph, index) => (index === 2 ? paragraph.replace(domain.proofs[1].stock, domain.proofs[0].stock.replace(/that [a-z]+ practice/u, 'that practice')) : paragraph));
-        const repeated = checkRepeatedTransferCarrier(sameForm);
-        assert(!repeated.passed && repeated.id === 'repeated-transfer-carrier' && checkTransferCarrierBudget(sameForm).passed === false,
-          `${domain.key}/A: one form twice in a row is reported (${detailOf(repeated)})`);
-        assert(repeated.detail.includes('in your own wording') && repeated.detail.includes('no stock transfer form is required')
-          && !/the argument rule accepts|a different transfer form|rule accepts/u.test(repeated.detail),
-        `${domain.key}/A: the repair is the writer's own wording, never a different member of a closed list (${repeated.detail})`);
-        // B: put the second paragraph's relevance into natural wording and both reports go.
-        const reworded = sameForm.map((paragraph, index) => (index === 2 ? paragraphOf(domain.proofs[1], { statement: domain.proofs[1].natural[0] }) : paragraph));
-        assert(checkRepeatedTransferCarrier(reworded).passed && checkTransferCarrierBudget(reworded).passed,
-          `${domain.key}/B: the writer's own wording clears the form check and the budget`);
         // C: the same NATURAL sentence in two paragraphs is not a stock frame, and the phrase check reports it anyway.
         const sentence = domain.proofs[0].natural[0];
         const echoed = [domain.opening, paragraphOf(domain.proofs[0], { statement: sentence }), paragraphOf(domain.proofs[1], { statement: sentence }), paragraphOf(domain.proofs[2]), domain.closing];
@@ -640,21 +505,17 @@ export default [
     },
   },
   {
-    name: 'Transfer budget: both checks are in the battery and the prose-unit table, in the order they were appended, the budget of one is enforced by the whole battery, and the whole battery reports them (A/B/C)',
+    name: 'Transfer benefit: the check is in the battery and the prose-unit table, and the whole battery reports it (A/B)',
     run() {
       for (const domain of DOMAINS) {
-        const twoFrames = letterOf(domain, { stock: true, owing: 2 });
-        const checks = battery(domain, twoFrames);
-        assert(checks.slice(-2).map(check => check.id).join() === 'transfer-carrier-budget,transfer-benefit-support', `${domain.key}: both are the last two checks (${checks.slice(-2).map(check => check.id)})`);
-        assert(failedIds(checks).includes('transfer-carrier-budget'), `${domain.key}/A: a letter with two stock frames fails the budget of one in the whole battery`);
-        const fixed = battery(domain, letterOf(domain, { stock: true }));
-        assert(!failedIds(fixed).includes('transfer-carrier-budget'), `${domain.key}/B: the same letter with the second frame removed clears it`);
+        const checks = battery(domain, letterOf(domain, { stock: true, owing: 2 }));
+        assert(checks.slice(-1).map(check => check.id).join() === 'transfer-benefit-support', `${domain.key}: it is the last check (${checks.slice(-1).map(check => check.id)})`);
         const natural = battery(domain, letterOf(domain, { owing: 3 }));
-        assert(!failedIds(natural).includes('transfer-carrier-budget') && !failedIds(natural).includes('transfer-benefit-support'), `${domain.key}/C: natural sentences are inside both`);
+        assert(!failedIds(natural).includes('transfer-benefit-support'), `${domain.key}/B: natural sentences are inside it`);
       }
-      assert(PASTE_CHECK_PROSE_UNITS['transfer-carrier-budget'] === 'prose-unit' && PASTE_CHECK_PROSE_UNITS['transfer-benefit-support'] === 'prose-unit', 'both are scoped to the prose unit a repair rewrites');
+      assert(PASTE_CHECK_PROSE_UNITS['transfer-benefit-support'] === 'prose-unit', 'it is scoped to the prose unit a repair rewrites');
       const reportable = pasteReportableCheckIds();
-      assert(reportable.includes('transfer-carrier-budget') && reportable.includes('transfer-benefit-support'), 'both are reportable ids of the paste pipeline');
+      assert(reportable.includes('transfer-benefit-support'), 'it is a reportable id of the paste pipeline');
     },
   },
   {

@@ -24,6 +24,7 @@
  */
 import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
+import { atomicWriteFile } from '../utils/atomicWrite.js';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { htmlToText } from 'html-to-text';
@@ -633,14 +634,12 @@ async function existingSubdirectory(root, name) {
 }
 
 async function writePrivateFile(target, data) {
-  const temporary = `${target}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
-  try {
-    await fs.writeFile(temporary, data, { flag: 'wx', mode: 0o600 });
-    await fs.rename(temporary, target);
-  } catch (error) {
-    await fs.rm(temporary, { force: true }).catch(() => {});
-    throw error;
-  }
+  await atomicWriteFile(target, data, {
+    fs,
+    encoding: null,
+    tempPath: () => `${target}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`,
+    cleanup: 'rm',
+  });
 }
 
 function convertedFileName(originalName, taken) {

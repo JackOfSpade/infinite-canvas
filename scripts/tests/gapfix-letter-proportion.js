@@ -31,7 +31,7 @@ import {
   MAX_PARAGRAPHS_PER_CITED_QUOTE, MIN_FIRST_PERSON_ACTION_PARAGRAPH_SHARE, MIN_FIRST_PERSON_SENTENCE_SHARE,
   MIN_MEAN_PARAGRAPH_WORDS, MIN_STANDALONE_SENTENCE_PARAGRAPH_ALLOWANCE, PROPORTION_ACTION_EXAMPLES, PROPORTION_ACTION_STATEMENT,
   PROPORTION_NON_ACTION_EXAMPLES, PROPORTION_NON_ACTION_WORDS, SINGLE_SENTENCE_PARAGRAPH_SHARE_DIVISOR, analyzeLetterProportion,
-  checkCandidateAgency, checkEvidenceGrounding, checkLetterProportion, checkMappingNarrativeStructure, checkRoleThesis,
+  checkCandidateAgency, checkEvidenceGrounding, checkLetterProportion, checkRoleThesis,
   evaluateCoverLetterChecks, letterFirstPersonActionParagraphFloor, letterSingleSentenceAllowance, paragraphStatesFirstPersonAction, sentences,
 } from '../../electron/ipc/coverLetterChecks.js';
 import {
@@ -209,7 +209,7 @@ const GOOD_LETTERS = Object.freeze([
   },
 ]);
 
-// Short letters in the shape checkDirectWelcomeClosing certifies: a one-line hook,
+// Short letters in the shape the retired direct-welcome-closing check certified: a one-line hook,
 // two proof paragraphs and a one-line direct welcome, so two of the four
 // paragraphs are a single sentence. Each passes the whole editorial battery and
 // every paragraph's grounding. They sit near the lower bounds on purpose (110 to
@@ -291,7 +291,7 @@ function battery(letter, paragraphs, citations = null) {
   const plan = planOf(letter);
   const evidence = evidenceOf(letter);
   return [
-    checkRoleThesis(plan), checkMappingNarrativeStructure(plan), checkEvidenceGrounding(plan, evidence),
+    checkRoleThesis(plan), checkEvidenceGrounding(plan, evidence),
     ...evaluateCoverLetterChecks({
       plan, paragraphs, evidence, jobText: letter.jobText, researchText: '', companyName: letter.company, referenceDate: '2026-10-09',
       paragraphCitations: citations,
@@ -434,7 +434,7 @@ export default [
       for (const letter of GOOD_LETTERS) {
         const paragraphs = textsOf(letter);
         const checks = battery(letter, paragraphs, citationsOf(letter));
-        assert(checks.length === 56, `${letter.key}: the whole battery ran (checks=${checks.length})`);
+        assert(checks.length === 28, `${letter.key}: the whole battery ran (checks=${checks.length})`);
         assert(!failedIds(checks).length, `${letter.key}: a good letter fails nothing (failed=${failedIds(checks).map(id => `${id}: ${checks.find(check => check.id === id).detail}`).join(' | ')})`);
         const proportion = checks.find(check => check.id === 'letter-proportion');
         assert(proportion && proportion.passed && /within the letter proportion limits/u.test(proportion.detail),
@@ -813,7 +813,7 @@ export default [
     },
   },
   {
-    // The shape checkDirectWelcomeClosing certifies (a one-line hook, two proofs, a one-line direct welcome) was rejected by
+    // The shape the retired direct-welcome-closing check certified (a one-line hook, two proofs, a one-line direct welcome) was rejected by
     // the first limits for two reasons at once: two standalone sentences against an allowance of one, and a paragraph mean
     // just under 30. Both limits moved; every inventory shape must still fail.
     name: 'Letter proportion: a one-line hook and a one-line direct welcome around two proofs pass the whole battery in three domains, and every cut of them into an inventory still fails (A/B/C)',
@@ -824,7 +824,7 @@ export default [
         const paragraphs = textsOf(letter);
         const citations = citationsOf(letter);
         const checks = battery(letter, paragraphs, citations);
-        assert(checks.length === 56 && !failedIds(checks).length,
+        assert(checks.length === 28 && !failedIds(checks).length,
           `${letter.key}: the letter passes the whole editorial battery (failed=${failedIds(checks).map(id => `${id}: ${checks.find(check => check.id === id).detail}`).join(' | ')})`);
         const perParagraph = paragraphs.map(paragraph => sentences(paragraph).length);
         assert(perParagraph[0] === 1 && perParagraph.at(-1) === 1 && perParagraph.slice(1, -1).every(count => count >= 2), `${letter.key}: the shape is a one-line hook, proofs and a one-line closing (${perParagraph})`);

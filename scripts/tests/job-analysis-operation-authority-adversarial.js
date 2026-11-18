@@ -300,9 +300,9 @@ export default [
         assert(begun.ok, 'the standalone source continuation must start from its sealed parent');
         lease = await claimJobContinuation(canvas, { ...begun.intent, autoResume: false }, { sender });
         assert(lease.ok, 'the exact source continuation must own an execution lease');
-        const source = await fs.promises.readFile(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+        const source = await fs.promises.readFile(new URL('../../electron/ipc/jobs/analysisStore.js', import.meta.url), 'utf8');
         const start = source.indexOf('function checkpointContinuationBeforeReply(operation) {');
-        const end = source.indexOf('\nasync function admitContinuationProviderWork', start);
+        const end = source.indexOf('\nexport async function admitContinuationProviderWork', start);
         const beforeReply = runInNewContext(`(${source.slice(start, end)})`, {
           isAppQuitPauseReason, validateJobContinuationAuthority, checkpointJobContinuationResult,
           continuationTerminalResult: (_op, result) => result.success === true && Array.isArray(result.jobs),
@@ -670,7 +670,7 @@ export default [
         const two = await claimJobAnalysisOperationAuthority(s2);
         const ordinaryCancel = await revokeJobAnalysisOperationAuthority({ ...s2, revision: two.receipt.revision, clearPublished: false });
         assert(ordinaryCancel.revoked, 'fixture must cancel S2 normally');
-        const reloadedJobs = await import(`../../electron/ipc/jobs.js?ordinary-cancel-restart=${Date.now()}`);
+        const reloadedJobs = await import(`../../electron/ipc/jobs/analysisStore.js?ordinary-cancel-restart=${Date.now()}`);
         const preserved = await reloadedJobs.__loadJobAnalysisSnapshotForTests(canvas, 'hub', 'run-1');
         assert(preserved.snapshot.jobs[0].title === 'Original role',
           'an S2 cancel must not erase an already-published S1 fallback after reload');
@@ -873,7 +873,7 @@ export default [
         const rebind = await rebindJobAnalysisRecoveryOwners(oldCanvas, newCanvas);
         assert(rebind.success, `Save As migration must complete: ${rebind.reason || 'unknown'}`);
 
-        const restartedJobs = await import(`../../electron/ipc/jobs.js?save-as-publications=${Date.now()}`);
+        const restartedJobs = await import(`../../electron/ipc/jobs/analysisStore.js?save-as-publications=${Date.now()}`);
         for (const [runId, title] of generations) {
           const restored = await restartedJobs.__loadJobAnalysisSnapshotForTests(newCanvas, hubId, runId);
           assert(restored.snapshot.jobs[0]?.title === title,
@@ -1807,7 +1807,7 @@ export default [
           assert(await currentJobAnalysisOperationAuthority({ ...owner, revision: claimed.receipt.revision }),
             `checkpoint ${index} cleanup must not corrupt S1 write authority`);
         }
-        const restarted = await import(`../../electron/ipc/jobs.js?checkpoint-prune=${Date.now()}`);
+        const restarted = await import(`../../electron/ipc/jobs/analysisStore.js?checkpoint-prune=${Date.now()}`);
         const restored = await restarted.__loadJobAnalysisSnapshotForTests(canvas, 'hub', 'run-1');
         assert(restored.snapshot.jobs[0]?.title === 'Stable global publication',
           'checkpoint publication cleanup must prune its map entries rather than exhausting the bounded authority map');
@@ -1936,7 +1936,7 @@ export default [
           assert(injected && interrupted, `${boundary} must inject after its actual durable rename`);
           fs.promises.rename = originalRename;
 
-          const restarted = await import(`../../electron/ipc/jobs.js?rotation-crash=${boundary}-${Date.now()}`);
+          const restarted = await import(`../../electron/ipc/jobs/analysisStore.js?rotation-crash=${boundary}-${Date.now()}`);
           const recovered = await restarted.__loadJobAnalysisSnapshotForTests(canvas, hubId);
           assert(/^Seed [1-3]$|^Newer interrupted generation$/.test(recovered.snapshot.jobs[0]?.title || ''),
             `${boundary}: restart must select an exact pre-existing or pending publication, never invent content`);
@@ -2022,7 +2022,7 @@ export default [
         assert(secondCrash, 'second crash must occur before an S2 artifact rename');
         fs.promises.rename = originalRename;
 
-        const restartedJobs = await import(`../../electron/ipc/jobs.js?double-crash-read=${Date.now()}`);
+        const restartedJobs = await import(`../../electron/ipc/jobs/analysisStore.js?double-crash-read=${Date.now()}`);
         const recoveredD = await restartedJobs.__loadJobAnalysisSnapshotForTests(canvas, hubId, 'run-d');
         assert(recoveredD.snapshot.jobs[0]?.title === 'D',
           'after S1 renamed D and S2 crashed pre-rename, D must remain exactly recoverable');

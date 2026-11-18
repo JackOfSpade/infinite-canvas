@@ -1,4 +1,5 @@
 import { isTimedRetrySourceWarning } from '../../src/utils/jobSourceWarningPolicy.js';
+import { readJobsSource } from './jobsSourceFixture.mjs';
 import { assert, canAttemptJobSourceResolve, isDescriptionRecoveryWarningCode, isJobSourceWarningGating, isTerminalSourceStatus, reconcileTerminalJobSourceWarningProjection } from '../test-dependencies.js';
 import { isSolveIpcCancellation, isSolveIpcFailure, solveIpcFailureMessage } from '../../src/utils/solveIpcFailure.js';
 import fs from 'node:fs';
@@ -166,7 +167,7 @@ export default [
     name: 'shared-profile readers and login entrypoints retain explicit lock boundaries',
     run: () => {
       const accounts = fs.readFileSync(new URL('../../electron/ipc/accounts.js', import.meta.url), 'utf8');
-      const jobs = fs.readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      const jobs = readJobsSource('recoveryHandlers');
       const marketplace = fs.readFileSync(new URL('../../electron/ipc/marketplace.js', import.meta.url), 'utf8');
       const listingStatus = fs.readFileSync(new URL('../../electron/ipc/listingStatusCheck.js', import.meta.url), 'utf8');
       const mutex = fs.readFileSync(new URL('../../electron/ipc/asyncMutex.js', import.meta.url), 'utf8');

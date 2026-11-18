@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { readJobsSources } from './jobsSourceFixture.mjs';
 import {
   fetchDiceListings,
   fetchLinkedInJobs,
+  linkedInNextStart,
   fetchRemoteOKJobs,
   fetchUSAJobs,
   fetchWeWorkRemotelyJobs,
@@ -184,9 +186,27 @@ export default [
       // the next run can skip it. None of these did.
       assert.deepEqual(healthy.finishedQueries, [], 'a cancelled walk finished nothing');
       assert.deepEqual((await run('')).finishedQueries, [], 'an empty first page may be a soft block, so the query is not finished');
-      const throttled = await withFetch(() => new Response('', { status: 429 }), () => fetchLinkedInJobs(['a', 'b'], null, 7, 'Toronto', null));
+      let throttledCalls = 0;
+      const throttled = await withFetch(() => { throttledCalls++; return new Response('', { status: 429 }); }, () => fetchLinkedInJobs(['a', 'b'], null, 7, 'Toronto', null, { throttleRetryWaitsMs: [0, 0] }));
       assert.equal(throttled.warning?.code, 'http-429');
+      assert.equal(throttledCalls, 3, 'a refused page is asked for again once per wait, then the platform stops');
       assert.deepEqual(throttled.finishedQueries, [], 'a query stopped by a rate limit is not finished, and later queries never ran');
+      // One 429 is not a block: the same page is asked for again after the wait
+      // and the walk carries on with no warning.
+      const starts = [];
+      const recoveredController = new AbortController();
+      const recovered = await withFetch((url) => {
+        starts.push(new URL(String(url?.url || url)).searchParams.get('start'));
+        return starts.length === 1 ? new Response('', { status: 429 }) : respond(cards(10));
+      }, () => fetchLinkedInJobs(['a'], recoveredController.signal, 7, 'Toronto', ({ detail }) => { if (/p1$/u.test(detail)) recoveredController.abort(); }, { throttleRetryWaitsMs: [0] }));
+      assert.deepEqual(starts, ['0', '0'], 'the retry asks for the page that was refused');
+      assert.equal(recovered.items.length, 10);
+      assert.equal(recovered.warning, null, 'a 429 that clears on retry leaves no warning');
+      // `start` is a row offset: a 10-card page is followed by row 10, not row 25.
+      assert.equal(linkedInNextStart(0, 10), 10);
+      assert.equal(linkedInNextStart(10, 10), 20);
+      assert.equal(linkedInNextStart(50, 25), 75);
+      assert.equal(linkedInNextStart(0, 0), 25, 'a page with no cards ends the walk before this step is used');
     },
   },
   {
@@ -263,7 +283,7 @@ export default [
         assert.equal(sources.weworkremotely.pageShapeFailures, 2);
         assert.equal(Object.hasOwn(sources.dice, 'pageShapeFailures'), false, 'a clean source saves nothing');
       } finally { await fsm.promises.rm(root, { recursive: true, force: true }); }
-      const jobs = fsm.readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      const jobs = readJobsSources('jobs', 'searchHandlers');
       assert(jobs.includes("source?.status === 'done' && Number.isSafeInteger(source.pageShapeFailures)")
         && jobs.includes('result.pageShapeFailures = (result.pageShapeFailures || 0) + pages;'), 'resume restores the saved count for finished sources');
       assert(jobs.includes('pageShapeFailures: data?.pageShapeFailures || 0,') && jobs.includes('pageShapeFailures: rows.reduce('), 'both source status writes save the count');
@@ -313,7 +333,7 @@ export default [
       const restored = assessSourceHealth(googleRows, { datedOutsideWindowBySource: restoredWindowDropped });
       assert.deepEqual(restored, [], 'the restored window drops widen the posted denominator, so no alarm is raised');
 
-      const jobs = fsm.readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      const jobs = readJobsSources('jobs', 'searchHandlers');
       assert(jobs.includes("source?.status === 'done' && Number.isSafeInteger(source.windowDropped) && source.windowDropped > 0")
         && jobs.includes('result.windowDropped = (result.windowDropped || 0) + dropped;'), 'resume restores the saved window drops for finished sources');
       assert(jobs.includes('windowDropped: data?.windowDropped || 0,'), 'the live source status write saves the window drops');

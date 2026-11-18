@@ -81,6 +81,10 @@ Shadow measurement: launch the app with `INFINITE_CANVAS_SHADOW_OFFLOAD` (comma 
 
 ## Session log
 
+### 2026-11-18 — cover-letter checks set to off were deleted; user-directed; no guidance change; counter not reset
+
+Removed the 29 cover-letter check ids whose disposition was `off` (they ran only in tests), with their functions, tests and table rows, and the `off` value and `activeOnly` flag of the letter table. The active checks, their messages, ids and order, and every prompt and schema sentence are unchanged.
+
 ### 2026-11-16 — improvement session; past-work references, the role's need, shared work as "we"; generation also stops when a session is due; counter reset
 
 Run because the pre-generation gate refused new bundles, with the counter at 3. Coverage: all 3 pairs since the earlier 2026-11-16 session, one model label, one career snapshot, none superseded. All three résumés were saved as generated. All three letters were edited, each with notes. No truth errors, and no edit was source-resolved.
