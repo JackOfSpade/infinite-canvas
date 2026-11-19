@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { assessSourceHealth, DESCRIPTIONS_NOT_FETCHED_CODE, descriptionsNotFetchedWarning, sourceHealthWarning } from '../../electron/ipc/jobSourceHealth.js';
 import { collectionScopeCaveatsFromSourceResults, describeSourceHealthFailures, normalizeCollectionScopeCaveats, sourceHealthCaveats } from '../../src/utils/jobCollectionScopeCaveats.js';
-import { isJobSourceWarningGating } from '../../src/utils/jobSourceWarningPolicy.js';
+import { AUTOMATIC_DESCRIPTION_SOLVE_WAIT_MS, automaticDescriptionSolveDue, EMPLOYER_POSTING_READ_SOURCE_IDS, employerPostingReadOnSkip, isJobSourceWarningGating } from '../../src/utils/jobSourceWarningPolicy.js';
+import { EMPLOYER_POSTING_READ_MAX_LISTINGS, readListingsFromEmployerPostings } from '../../electron/ipc/jobs/employerPostingRead.js';
+import { listingReadProgress, listingsReadElsewhere } from '../../electron/ipc/jobs/sourceRules.js';
+import { applyResolvedListingsToPendingCoverage } from '../../src/utils/jobSearchSourceCoverage.js';
+import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { appendWalkGuard, CHALLENGE_ESCALATE_MS, descriptionPanelPacing, DETAIL_BLOCK_MAX_TOTAL_REPROBES, detailBlockCooldownMs, panelWindowWaitMs, revealLowGrowthStop, selectManualSourcePageJobs, WALK_GUARD_MAX } from '../../electron/ipc/browser/manualScraper.js';
 import { linkedInEnrichedRow } from '../../electron/extractors/apiExtractors.js';
 import { indeedPanelDescription, indeedPanelShowsJob } from '../../electron/extractors/indeedBrowser.js';
@@ -371,6 +375,94 @@ export default [
       const dice = descriptionsNotFetchedWarning('dice', [{ source: 'dice', snippet: '' }]);
       assert.equal(dice.evidence.startsWith('1 saved Dice listing(s)'), true, 'the site name and count are exact');
       assert.equal(descriptionsNotFetchedWarning('dice', rows('linkedin', 5, { snippet: '' })), null, 'rows of another source are not counted');
+    },
+  },
+  {
+    name: 'Solve is pressed automatically once per run for a description refusal, never for a check a person must pass',
+    run() {
+      const refused = { sourceId: 'google', code: 'description-rate-limited', severity: 'block' };
+      const due = over => automaticDescriptionSolveDue({ hubState: 'sources-ready', jobRunId: 'run-1', warnings: [refused], ...over });
+      assert.equal(due(), true);
+      assert.equal(due({ attemptedRunId: 'run-1' }), false, 'one automatic try per run');
+      assert.equal(due({ attemptedRunId: 'run-0' }), true, 'an earlier run does not use up this one');
+      assert.equal(due({ hubState: 'searching' }), false, 'not while the search is still running');
+      assert.equal(due({ jobRunId: '' }), false);
+      assert.equal(due({ warnings: [] }), false, 'a skipped platform leaves nothing to retry');
+      assert.equal(due({ warnings: [{ ...refused, severity: 'warn' }] }), false, 'only a refusal that pauses the run');
+      assert.equal(due({ warnings: [{ sourceId: 'google', code: 'captcha', severity: 'block' }] }), false, 'a person must pass a check');
+      assert.equal(due({ warnings: [{ ...refused, action: 'login-platform' }] }), false, 'a sign-in is a person\'s step');
+      assert.equal(AUTOMATIC_DESCRIPTION_SOLVE_WAIT_MS, detailBlockCooldownMs(0), 'the same rest the scan gives a first refusal');
+    },
+  },
+  {
+    name: 'An unread listing another platform read in the same scan counts as read, by the scan\'s own same-job rule',
+    run() {
+      const unread = over => row('google', { snippet: '', descriptionDeferredReason: 'description-rate-limited', ...over });
+      const same = unread({ title: 'Data Engineer', company: 'Acme', url: 'https://google.test/a' });
+      const otherCity = unread({ title: 'Data Engineer', company: 'Acme', location: 'Vancouver', url: 'https://google.test/b' });
+      const alone = unread({ title: 'Platform Lead', company: 'Birch', url: 'https://google.test/c' });
+      const jobsBySource = {
+        google: [same, otherCity, alone, row('google', { title: 'Read Here', url: 'https://google.test/d' })],
+        indeed: [row('indeed', { title: 'Data Engineer', company: 'Acme', url: 'https://indeed.test/1' }),
+          row('indeed', { title: 'Platform Lead', company: 'Birch', snippet: '', url: 'https://indeed.test/2' })],
+      };
+      const covered = listingsReadElsewhere('google', jobsBySource);
+      assert.deepEqual([...covered], [sourceJobKey(same)], 'a different city, and a copy the other platform did not read either, stay unread');
+      const progress = listingReadProgress(jobsBySource.google, covered);
+      assert.equal(progress.readKeys.includes(sourceJobKey(same)), true);
+      assert.deepEqual(progress.unreadListings.map(listing => listing.key), [sourceJobKey(otherCity), sourceJobKey(alone)]);
+      assert.equal(listingsReadElsewhere('google', { google: jobsBySource.google }).size, 0, 'a platform never covers itself');
+    },
+  },
+  {
+    name: 'Reading the last unread listing of a fully walked platform finishes it; a cut-short platform stays unfinished',
+    run() {
+      const pending = { runId: 'r', completedSourceIds: ['indeed'], walkCompleteSourceIds: ['google'],
+        sourceQueryProgress: { google: { finishedQueries: [], unreadListings: [{ key: 'a' }, { key: 'b' }] },
+          linkedin: { finishedQueries: [], unreadListings: [{ key: 'x' }] } } };
+      const partly = applyResolvedListingsToPendingCoverage(pending, 'google', ['a']);
+      assert.deepEqual(partly.completedSourceIds, ['indeed']);
+      const all = applyResolvedListingsToPendingCoverage(partly, 'google', ['b']);
+      assert.deepEqual(all.completedSourceIds, ['indeed', 'google']);
+      assert.deepEqual(applyResolvedListingsToPendingCoverage(pending, 'linkedin', ['x']).completedSourceIds, ['indeed']);
+    },
+  },
+  {
+    name: 'Skip reads unread listings from employer postings only on a hand-listed platform, and keeps only text the finder verified',
+    async run() {
+      const refused = { code: 'description-rate-limited', severity: 'block' };
+      assert.equal(EMPLOYER_POSTING_READ_SOURCE_IDS.size, 0, 'no platform is enabled: the measured yield was too low');
+      assert.equal(employerPostingReadOnSkip('google', refused), false);
+      EMPLOYER_POSTING_READ_SOURCE_IDS.add('google');
+      try {
+        assert.equal(employerPostingReadOnSkip('google', refused), true, 'a platform listed by hand is read on Skip');
+        assert.equal(employerPostingReadOnSkip('glassdoor', refused), false, 'a platform is added by hand, never by itself');
+        assert.equal(employerPostingReadOnSkip('google', { code: 'captcha', severity: 'block' }), false);
+        assert.equal(employerPostingReadOnSkip('google', { ...refused, severity: 'warn' }), false);
+      } finally { EMPLOYER_POSTING_READ_SOURCE_IDS.delete('google'); }
+
+      const listing = index => row('google', { title: `Role ${index}`, snippet: '', descriptionDeferredReason: 'description-rate-limited', url: `https://google.test/${index}` });
+      const listings = Array.from({ length: EMPLOYER_POSTING_READ_MAX_LISTINGS + 3 }, (_, index) => listing(index));
+      const outcomes = ['found', 'found', 'link-only', 'not-found', 'closed', 'found'];
+      let asked = 0;
+      const result = await readListingsFromEmployerPostings(listings, {
+        store: {},
+        resolve: async (jobs) => {
+          asked = jobs.length;
+          return { jobs: jobs.map((job, index) => ({ ...job, officialPosting: {
+            outcome: outcomes[index] || 'not-found', level: index === 5 ? 'L4' : 'L1', contentHash: `h${index}` } })) };
+        },
+        // Row 1 was found but its saved text is too short to score.
+        getView: async job => ({ officialPosting: job.officialPosting, description: job.title === 'Role 1' ? 'Too short.' : TEXT }),
+      });
+      assert.equal(asked, EMPLOYER_POSTING_READ_MAX_LISTINGS, 'one Skip looks up a bounded number');
+      assert.deepEqual(result.read.map(entry => entry.row.title), ['Role 0'], 'only an open posting with verified, score-length text is read');
+      assert.equal(result.read[0].row.snippet, TEXT.trim());
+      assert.equal('descriptionDeferredReason' in result.read[0].row, false);
+      assert.equal(result.read[0].row.descriptionSource, 'employer-posting');
+      assert.equal(result.unread.length, EMPLOYER_POSTING_READ_MAX_LISTINGS - 1);
+      assert.equal(result.unread[0].descriptionDeferredReason, 'description-rate-limited', 'an unread listing comes back unchanged');
+      assert.deepEqual((await readListingsFromEmployerPostings([], { resolve: async () => { throw new Error('not called'); } })).read, []);
     },
   },
 ];

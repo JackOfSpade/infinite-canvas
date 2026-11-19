@@ -19,7 +19,7 @@ import { JOB_SEARCH_TEST_MODE } from '../utils/jobSourceScope';
 // another board already returned, exactly as it would have in the main
 // gather, without over-collapsing distinct same-title/company reqs in
 // different cities. See the policy note in jobIdentity.js.
-import { dedupJobsAcrossSources, uniqueJobsAcrossSources } from '../utils/jobIdentity';
+import { dedupJobsAcrossSources, sourceJobKey, uniqueJobsAcrossSources } from '../utils/jobIdentity';
 import { boardCombinedSearchRun, searchRowsWithIncompleteLookups, summarizeSearchOfficialLookups } from '../utils/jobBoardOfficialPostingRefresh';
 import { getJobAuthPreflightSourceIds } from '../utils/jobAuthPreflight';
 import { mergeResolvedSourceItems } from '../utils/jobSourceResolveMerge';
@@ -31,7 +31,7 @@ import { careerFilesCleanupNeedsWarning, isJobAnalysisSnapshotAfterClear, nextJo
 import { formatCompletionTimestamp, normalizeCompletionTimestamp } from '../utils/completionTimestamp';
 import { jobSearchDateDiagnosticPatch, jobSearchDateRetentionReason } from '../utils/jobSearchDateDiagnostics';
 import { filesToDropPayloads, summarizeFileExtensions } from '../utils/fileDropUtils';
-import { canAutomaticallyResolveJobSourceWarning, descriptionRecoveryCheckpointWriteFailureWarning, isDescriptionRecoverySourceWarning, isDescriptionRecoveryWarningCode, isJobSourceWarningGating, reconcileTerminalJobSourceWarningProjection, reconcileJobSourceWarnings } from '../utils/jobSourceWarningPolicy';
+import { AUTOMATIC_DESCRIPTION_SOLVE_CODES, AUTOMATIC_DESCRIPTION_SOLVE_WAIT_MS, automaticDescriptionSolveDue, canAutomaticallyResolveJobSourceWarning, descriptionRecoveryCheckpointWriteFailureWarning, isDescriptionRecoverySourceWarning, isDescriptionRecoveryWarningCode, isJobSourceWarningGating, reconcileTerminalJobSourceWarningProjection, reconcileJobSourceWarnings } from '../utils/jobSourceWarningPolicy';
 import { collectionScopeCaveatsForSavedJobReanalysis, describeSourceHealthFailures, normalizeCollectionScopeCaveats, sourceHealthCaveats, sourceHealthSiteName } from '../utils/jobCollectionScopeCaveats';
 import { createRunOwnershipGuard } from '../utils/runOwnership';
 import { createJobAnalysisOperationLedger, jobAnalysisOperationMatches } from '../utils/jobAnalysisOperationLedger';
@@ -119,6 +119,9 @@ import {
   sourcesBehindLatest,
   coverageSourceIdsForLocation,
   sourceFinishedQueriesForRun,
+  applyResolvedListingsToPendingCoverage,
+  applySourceSkipToPendingCoverage,
+  sourceOwedKeysForRun,
   sourceReadContextKey,
   sourceReadKeysForRun,
   sourcesWithoutDateProgress,
@@ -1357,6 +1360,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // per source for reconciliation with its final warning list. `null` means an
   // explicit Skip/dismiss or a clean successful resolve.
   const sourceWarningOverridesDuringSearchRef = useRef(new Map());
+  // Platforms the person pressed Skip on before the search result arrived,
+  // tagged with the run they belong to so a later run never inherits them.
+  const sourcesSkippedDuringSearchRef = useRef({ runId: null, sourceIds: new Set() });
   // Tracks only warning entries inserted from live source progress. It allows
   // the projection effect below to retract a provider's cleared/retried card
   // without ever removing final backend warnings or another source's state.
@@ -1748,9 +1754,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             sourceQueryProgress: searchResult.sourceQueryProgress || null,
             locationKey: searchResult.sourceQueryLocationKey || '',
             readContextKey: searchResult.sourceReadContextKey || '',
+            readKeysBySource: searchResult.sourceReadKeysReported || null,
+            walkCompleteSourceIds: searchResult.sourceWalkCompleteIds || null,
             participatingSourceIds: searchResult.participatingSourceIds || null,
           }
           : null;
+        const skippedEarly = sourcesSkippedDuringSearchRef.current;
+        const stagedSourceCoverage = partialSourceCoverage && skippedEarly.runId === runId
+          ? [...skippedEarly.sourceIds].reduce(applySourceSkipToPendingCoverage, partialSourceCoverage)
+          : partialSourceCoverage;
         updateGlobal(id, (node) => {
           if (!canPublish(node)) return null;
           return {
@@ -1770,7 +1782,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               : {}),
             // ...but the platforms that DID finish this run keep their own
             // bookmarks even though the hub watermark must not advance.
-            ...(partialSourceCoverage ? { pendingSourceCoverage: partialSourceCoverage } : {}),
+            ...(stagedSourceCoverage ? { pendingSourceCoverage: stagedSourceCoverage } : {}),
           };
         });
       }
@@ -1814,6 +1826,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             sourceQueryProgress: searchResult.sourceQueryProgress || null,
             locationKey: searchResult.sourceQueryLocationKey || '',
             readContextKey: searchResult.sourceReadContextKey || '',
+            readKeysBySource: searchResult.sourceReadKeysReported || null,
+            walkCompleteSourceIds: searchResult.sourceWalkCompleteIds || null,
             participatingSourceIds: searchResult.participatingSourceIds || null,
           },
         }
@@ -4855,6 +4869,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         sourceFinishedQueries: runSourceFinishedQueries,
         // Listings those same platforms already read, to leave unopened.
         sourceReadKeys: runSourceReadKeys,
+        // Listings still owed after a platform's date moved past them; their
+        // cards are opened whatever their date.
+        sourceOwedKeys: recoveredPreSearchContext
+          ? null
+          : sourceOwedKeysForRun(laneTurnData, runActiveEnabledSourceIds, runSourceQueryLocationKey),
         runOrigin,
         profileInputMode: 'stored-profile',
         ...(providerPhaseOnly ? { providerPhaseOnly: true } : {}),
@@ -7680,7 +7699,25 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       }
       const remaining = (scrapeWarningsRef.current || []).filter(w => w.sourceId !== skippedSourceId);
       scrapeWarningsRef.current = remaining;
-      updateGlobal(id, { scrapeWarnings: remaining });
+      // Skip on a platform whose result lists were all walked moves its date
+      // and keeps the listings it could not read as owed. Before the result is
+      // staged the choice is remembered for this run and applied then.
+      if (warningAction === 'skip') {
+        const skippedEarly = sourcesSkippedDuringSearchRef.current;
+        if (skippedEarly.runId !== activeJobRunId) {
+          sourcesSkippedDuringSearchRef.current = { runId: activeJobRunId, sourceIds: new Set([skippedSourceId]) };
+        } else skippedEarly.sourceIds.add(skippedSourceId);
+      }
+      updateGlobal(id, (node) => {
+        const staged = node?.data?.pendingSourceCoverage;
+        const next = warningAction === 'skip' && staged?.runId && staged.runId === activeJobRunId
+          ? applySourceSkipToPendingCoverage(staged, skippedSourceId)
+          : staged;
+        if (next !== staged) {
+          EventLogger.log(`[JobSearch][${id}] Skip on ${skippedSourceId}: every result list was walked, so its date moves and its unread listings stay owed`);
+        }
+        return { scrapeWarnings: remaining, ...(next !== staged ? { pendingSourceCoverage: next } : {}) };
+      });
       EventLogger.log(
         `[JobSearch][${id}] User ${warningAction === 'dismiss' ? 'dismissed non-blocking warning' : 'skipped blocked source'} ${skippedSourceId}`
         + ` code=${e.detail?.warningCode || 'unknown'} severity=${e.detail?.warningSeverity || 'unknown'}`
@@ -7863,11 +7900,23 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         );
       }
       scrapeWarningsRef.current = remaining;
-      updateGlobal(id, {
-        pendingJobs: mergedPending,
-        jobCount: mergedPending.length,
-        gatheredCount: gatheredCountRef.current,
-        scrapeWarnings: remaining,
+      // What this pass read counts as read on the staged result of the same
+      // run, and leaves that platform's not-done list, so the next scan does
+      // not open those listings again.
+      const resolvedRunId = e.detail?.jobRunId || jobRunIdRef.current || null;
+      const resolvedKeys = items.map(item => sourceJobKey(item?.source ? item : { ...item, source: resolvedSourceId })).filter(Boolean);
+      updateGlobal(id, (node) => {
+        const staged = node?.data?.pendingSourceCoverage;
+        const next = staged?.runId && staged.runId === resolvedRunId
+          ? applyResolvedListingsToPendingCoverage(staged, resolvedSourceId, resolvedKeys)
+          : staged;
+        return {
+          pendingJobs: mergedPending,
+          jobCount: mergedPending.length,
+          gatheredCount: gatheredCountRef.current,
+          scrapeWarnings: remaining,
+          ...(next !== staged ? { pendingSourceCoverage: next } : {}),
+        };
       });
       // Auto-resume on no remaining GATING warnings (info / non-LinkedIn throttle stays).
       const remainingBlocks = remaining.filter(isJobSourceWarningGating);
@@ -8046,6 +8095,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const solveAllRunningRef = useRef(false);
   const solveAllActiveSourceRef = useRef(null);
   const [solveAllProgress, setSolveAllProgress] = useState(null);
+  const solveAllAutomaticCodesRef = useRef(null);
 
   const handleStopSolveAll = useCallback(() => {
     if (!solveAllRunningRef.current) return;
@@ -8066,6 +8116,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
   const handleSolveAllBlockedSources = useCallback(async () => {
     if (solveAllRunningRef.current) return;
+    // Set only by the automatic retry below, and read once: a press of the
+    // button always drives every blocked source.
+    const automaticCodes = solveAllAutomaticCodesRef.current;
+    solveAllAutomaticCodesRef.current = null;
     if (isJobWorkflowDeletionPending(id)) return;
     const liveData = getNode(id)?.data || data;
     if (liveData.hubState !== 'sources-ready') return;
@@ -8082,6 +8136,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     );
     // Same re-proof as "Score current results": a stale click must fail closed.
     if (liveBoardRecoveryOwner && !livePausedBoardContinuationOwner) {
+      if (automaticCodes) return;
       addToast({
         title: 'Job Board Run in Progress',
         description: 'Finish or cancel the owning Job Board run before solving this paused Search.',
@@ -8099,6 +8154,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     for (const sourceId of activeEnabledSourceIds) {
       const warning = (scrapeWarningsRef.current || []).find(w => (
         w?.sourceId === sourceId && isJobSourceWarningGating(w) && canAutomaticallyResolveJobSourceWarning(w)
+        && (!automaticCodes || automaticCodes.has(w.code))
       ));
       if (warning && !seen.has(sourceId)) {
         seen.add(sourceId);
@@ -8106,6 +8162,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       }
     }
     if (blockedSourceIds.length === 0) {
+      if (automaticCodes) return;
       addToast({
         title: 'Nothing to Solve',
         description: 'No blocked source has a recoverable action. Skip the remaining warnings or score what was gathered.',
@@ -8117,7 +8174,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     solveAllRunningRef.current = true;
     solveAllAbortRef.current = false;
     setSolveAllProgress({ index: 0, total: blockedSourceIds.length, sourceId: blockedSourceIds[0], stopping: false });
-    EventLogger.log(`[JobSearch][${id}] Solve all started for ${blockedSourceIds.length} blocked source(s): ${blockedSourceIds.join(', ')}`);
+    EventLogger.log(`[JobSearch][${id}] Solve all started ${automaticCodes ? 'automatically ' : ''}for ${blockedSourceIds.length} blocked source(s): ${blockedSourceIds.join(', ')}`);
 
     // One request → one terminal reply, correlated by request id. The ack is
     // dispatched synchronously by the card during the request, so an unanswered
@@ -8227,6 +8284,34 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     activeEnabledSourceIds, addToast, data, ensureBlockedSourceCards,
     getEdges, getNode, getNodes, id,
   ]);
+
+  // A platform that refused descriptions part-way leaves listings unread. The
+  // scan already waits and resumes on later result pages, but it never goes
+  // back to the listings it passed while refused; Solve does. So Solve is
+  // pressed once per run without the person, after the same rest the scan gives
+  // a refusal. A check that needs a person is never started this way.
+  const automaticSolveRunRef = useRef(null);
+  const automaticSolveDue = automaticDescriptionSolveDue({
+    hubState,
+    jobRunId: data.jobRunId,
+    attemptedRunId: data.automaticSolveRunId,
+    warnings: data.scrapeWarnings,
+  });
+  useEffect(() => {
+    if (!automaticSolveDue) return undefined;
+    const runId = data.jobRunId;
+    if (automaticSolveRunRef.current === runId) return undefined;
+    const timer = setTimeout(() => {
+      if (automaticSolveRunRef.current === runId) return;
+      automaticSolveRunRef.current = runId;
+      // Saved, so a restart does not press Solve a second time for the same run.
+      updateGlobal(id, { automaticSolveRunId: runId });
+      EventLogger.log(`[JobSearch][${id}] Retrying refused descriptions automatically for run ${runId}`);
+      solveAllAutomaticCodesRef.current = AUTOMATIC_DESCRIPTION_SOLVE_CODES;
+      void handleSolveAllBlockedSources();
+    }, AUTOMATIC_DESCRIPTION_SOLVE_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [automaticSolveDue, data.jobRunId, handleSolveAllBlockedSources, id, updateGlobal]);
 
   // A Job Search card never starts a provider search by itself, and connecting
   // a Board is not a search trigger either: a persisted legacy file path stays

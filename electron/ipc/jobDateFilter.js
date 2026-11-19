@@ -152,6 +152,7 @@ export function filterJobsByAge(jobs, maxAgeDays, now = new Date()) {
   if (!maxAgeDays || maxAgeDays <= 0) return jobs;
   const cutoff = now.getTime() - maxAgeDays * 86400000;
   return jobs.filter(j => {
+    if (j?.postedWindowExempt === true) return true;
     const d = parsePostedDate(j.posted, now);
     return !d || postedDateMeetsAgeCutoff(d, cutoff);
   });
@@ -175,7 +176,10 @@ export function filterJobsByPostedSince(jobs, postedSince, now = new Date()) {
     : postedSince;
   if (!Number.isFinite(startTimestamp)) return jobs;
 
+  // `postedWindowExempt` marks a listing still owed from an earlier scan (see
+  // selectManualSourcePageJobs): it is kept whatever its date.
   return jobs.filter(job => {
+    if (job?.postedWindowExempt === true) return true;
     const postedAt = parsePostedDate(job?.posted, now);
     return !postedAt || postedAt.getTime() >= startTimestamp;
   });

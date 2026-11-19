@@ -1,6 +1,6 @@
 import { reportDigestHex } from './helpers.js';
 import { sanitizeJobSearchDateDiagnostics } from '../../../src/utils/jobSearchDateDiagnostics.js';
-import { normalizeSourceCoverage, normalizeSourceQueryProgress } from '../../../src/utils/jobSearchSourceCoverage.js';
+import { normalizeSourceCoverage, normalizeSourceOwedListings, normalizeSourceQueryProgress, normalizeSourceReadLedger, SOURCE_OWED_MAX_SCANS } from '../../../src/utils/jobSearchSourceCoverage.js';
 import { completionTimestampIso } from '../../../src/utils/completionTimestamp.js';
 
 function identifier(value) {
@@ -54,10 +54,23 @@ export function buildJobSearchDateHistory(nodes) {
       const queryProgress = normalizeSourceQueryProgress(data.sourceQueryProgress);
       const progressSourceIds = Object.keys(queryProgress).sort();
       if (progressSourceIds.length) {
-        lines.push(`  - Work kept from blocked runs (finished queries and read listings are skipped next run; unread listings are still owed): ${progressSourceIds
-          .map(sourceId => `${sourceId} ${queryProgress[sourceId].finishedQueries.length} finished · ${queryProgress[sourceId].readKeys?.length || 0} listing(s) read · ${queryProgress[sourceId].unreadListings?.length || 0} unread · oldest run start ${timestamp(queryProgress[sourceId].oldestStartedAt)} · ${
+        lines.push(`  - Work kept from blocked runs (finished queries are skipped next run; unread listings are still owed): ${progressSourceIds
+          .map(sourceId => `${sourceId} ${queryProgress[sourceId].finishedQueries.length} finished · ${queryProgress[sourceId].unreadListings?.length || 0} unread · oldest run start ${timestamp(queryProgress[sourceId].oldestStartedAt)} · ${
             queryProgress[sourceId].bookmarkAt === (sourceCoverage[sourceId]?.coverageStartedAt ?? null) ? 'current' : 'stale (date has moved)'}`)
           .join('; ')}.`);
+      }
+      // Counts only: listing keys, titles and links stay out of the report.
+      const readLedger = normalizeSourceReadLedger(data.sourceReadLedger);
+      const readSourceIds = Object.keys(readLedger).sort();
+      if (readSourceIds.length) {
+        lines.push(`  - Listings already read (not opened again while the search location and job preferences stay the same): ${readSourceIds
+          .map(sourceId => `${sourceId} ${readLedger[sourceId].keys.length}`).join('; ')}.`);
+      }
+      const owedListings = normalizeSourceOwedListings(data.sourceOwedListings);
+      const owedSourceIds = Object.keys(owedListings).sort();
+      if (owedSourceIds.length) {
+        lines.push(`  - Listings still owed after Skip moved the date (opened if they turn up; dropped after ${SOURCE_OWED_MAX_SCANS} scans): ${owedSourceIds
+          .map(sourceId => `${sourceId} ${owedListings[sourceId].listings.length} (most scans used ${Math.max(...owedListings[sourceId].listings.map(listing => listing.attempts))})`).join('; ')}.`);
       }
       if (!history.length) {
         lines.push('  - Date decisions: not retained — older or missing diagnostics do not establish why this date was kept.');

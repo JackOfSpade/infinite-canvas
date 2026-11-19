@@ -563,6 +563,8 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
     collectionStartTimestampBySource = null,
     // sourceId → test for "an earlier run already read or showed this listing".
     alreadyReadBySource = null,
+    // sourceId → test for "this listing is still owed from an earlier scan".
+    owedBySource = null,
   } = opts;
   const limits = normalizeJobCollectionLimits(collectionLimits);
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
@@ -768,6 +770,7 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
           collectionLimits: limits,
           collectionStartTimestamp: sourceCollectionStartTimestamp,
           ...(typeof alreadyReadBySource?.[sourceId] === 'function' ? { isAlreadyRead: alreadyReadBySource[sourceId] } : {}),
+          ...(typeof owedBySource?.[sourceId] === 'function' ? { isOwed: owedBySource[sourceId] } : {}),
           startPageNum: startPage,
           nextUrl: (page) => urlFn(q, page, sourceDays),
           onPageScraped,
@@ -786,6 +789,7 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
           collectionLimits: limits,
           collectionStartTimestamp: sourceCollectionStartTimestamp,
           ...(typeof alreadyReadBySource?.[sourceId] === 'function' ? { isAlreadyRead: alreadyReadBySource[sourceId] } : {}),
+          ...(typeof owedBySource?.[sourceId] === 'function' ? { isOwed: owedBySource[sourceId] } : {}),
           onPageScraped,
         };
       }

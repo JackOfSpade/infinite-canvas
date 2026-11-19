@@ -3625,3 +3625,20 @@ Recorded cost so far: $7.101.
 
 Recorded cost so far: $0.816.
 <!-- /ai-test-run:2026-11-16T13-26-48-135Z-claude-effort-ladderrun-b47e0e -->
+
+<!-- ai-test-run:2026-11-19T05-52-59-158Z-employer-posting-read-measure-2a2dd6 -->
+### 2026-11-19 05:52 UTC · employer-posting-read-measure · job-official-posting-research + job-official-posting-match · Skip-time employer-posting read on unread Google listings (no description, no location)
+
+- Status: **finished** (updated 2026-11-19 05:52:59 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-19-employer-posting-read`
+- Pool: 50 unread Google listings saved by the 2026-11-19 scan
+- Cost per listing read: about 1.53 USD in the 12 sample
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| sample-12 seed 7 | 12 | 3 | 9 | $4.590 | 3 read (found, L2); 7 ambiguous (5 semantic-uncertain, 2 source-unproven), 1 not-found, 1 link-only; 42 AI calls (2 research, 40 match), 4.8 min wall |
+| probe-2 seed 1 | 1 | 1 | 0 | $0.100 | found L2, 3 AI calls, 0.5 min |
+
+Recorded cost so far: $4.690.
+- Note: Rows carried title, company and link only; in the app they also carry the card location, which may help the judges. Not run through the app's own worker.
+<!-- /ai-test-run:2026-11-19T05-52-59-158Z-employer-posting-read-measure-2a2dd6 -->

@@ -609,7 +609,7 @@ export default [
         'sourceWarningOverridesDuringSearchRef', 'pendingJobsRef', 'mergeResolvedSourceItems',
         'gatheredCountRef', 'scrapeWarningsRef', 'updateGlobal', 'isJobSourceWarningGating',
         'isSameJobSourceWarningEntry', 'isDescriptionRecoveryWarningCode', 'window', 'resumeScoringRef', 'processingRunsRef',
-        'scheduleCleanSourceCardDismiss',
+        'scheduleCleanSourceCardDismiss', 'sourceJobKey', 'applyResolvedListingsToPendingCoverage',
         `${jobSearch.slice(resolvedStart, resolvedEnd)}\nreturn onResolved;`,
       )(
         'hub-1',
@@ -627,7 +627,9 @@ export default [
         (prevPending, items) => ({ fresh: items, mergedPending: prevPending.concat(items), replacedExisting: 0 }),
         { current: 0 },
         { current: warnings },
-        (nodeId, patch) => writes.push({ nodeId, patch }),
+        // The resolved handler writes through a function of the node, so the
+        // staged result of the same run can be updated in the same write.
+        (nodeId, patch) => writes.push({ nodeId, patch: typeof patch === 'function' ? patch({ data: {} }) : patch }),
         isJobSourceWarningGating,
         isSameJobSourceWarningEntry,
         isDescriptionRecoveryWarningCode,
@@ -635,6 +637,8 @@ export default [
         { current: () => { resumed.push('resume-scoring'); return null; } },
         { current: { active: false } },
         () => {},
+        job => job?.url || job?.title || '',
+        pending => pending,
       );
 
       // One source can end a run holding several entries; here LinkedIn holds

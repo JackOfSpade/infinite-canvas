@@ -5,7 +5,7 @@ import { PlatformBadge } from '../components/PlatformBadge';
 import { NodeHandles } from './_shared/NodeHandles';
 import { SourceWarningPanel } from './_shared/SourceWarningPanel';
 import { createSourceProgressRunGuard, mergeSourceProgress, isTerminalSourceStatus } from '../utils/sourceProgress';
-import { canAttemptJobSourceResolve, effectiveJobSourceCardRunId, hardBlockRetryWaitMs, isJobSourceResolveBusyHubState, isJobSourceWarningGating, isTimedRetrySourceWarning, jobSourceWarningAction } from '../utils/jobSourceWarningPolicy';
+import { canAttemptJobSourceResolve, effectiveJobSourceCardRunId, employerPostingReadOnSkip, hardBlockRetryWaitMs, isJobSourceResolveBusyHubState, isJobSourceWarningGating, isTimedRetrySourceWarning, jobSourceWarningAction } from '../utils/jobSourceWarningPolicy';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
 import { useJobSearchCoordinator } from '../contexts/useJobSearchCoordinator';
@@ -204,6 +204,9 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   // between passes and stops after the one in flight, instead of committing the
   // user to every remaining query.
   const stopWalkRef = useRef(false);
+  const skipButtonRef = useRef(null);
+  const employerReadRunRef = useRef(null);
+  const [skipAfterEmployerRead, setSkipAfterEmployerRead] = useState(false);
   // Set by the hub's "Solve all" driver immediately before it invokes this
   // card's Solve. handleSolve reads and clears it on entry so every exit path
   // can report back under the id the driver is waiting on. Null for a manual
@@ -577,7 +580,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     return () => document.removeEventListener('job-source-dismiss-clean', onDismiss);
   }, [data.hubId, progress?.status, progress?.warning, id, deleteElements]);
 
-  const handleSolve = async ({ continuation = null } = {}) => {
+  const handleSolve = async ({ continuation = null, employerPostingRead = false } = {}) => {
     // Claim the driver's request id (if any) before the first await, and clear
     // it so a later manual click cannot re-use it.
     const solveRequestId = solveRequestIdRef.current;
@@ -1088,6 +1091,9 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           secondTabUrl: pendingWarning?.openSecondTab ? pendingUrl : null,
           continuationIntentId: continuationIntent.intentId,
           continuationLeaseToken,
+          // Skip's own pre-step: no window opens, the unread listings are
+          // looked up on the employers' sites instead.
+          ...(employerPostingRead ? { employerPostingRead: true } : {}),
         });
       }
       // handleSafe resolves failures as { success:false, error }, so they do
@@ -1635,6 +1641,14 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   // declaration is a temporal-dead-zone ReferenceError that takes the whole
   // card down on its first paint.
   const handleSolveRef = useRef(null);
+  // The Skip that asked for an employer-posting read goes ahead once that read
+  // has ended and the card is idle again, through the button's own guards. A
+  // card with nothing left to skip has no button, so nothing happens.
+  useEffect(() => {
+    if (!skipAfterEmployerRead || resolving) return;
+    setSkipAfterEmployerRead(false);
+    skipButtonRef.current?.click();
+  }, [skipAfterEmployerRead, resolving]);
   useEffect(() => {
     handleSolveRef.current = handleSolve;
   });
@@ -2222,6 +2236,24 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
                 });
                 return;
               }
+              // A platform that kept refusing descriptions gets one more read
+              // before it is skipped: its unread listings are looked up on the
+              // employers' own sites. Once per run; the Skip itself follows
+              // when that read ends, whatever it found.
+              if (employerPostingReadOnSkip(data.sourceId, warning) && employerReadRunRef.current !== sourceJobRunId) {
+                employerReadRunRef.current = sourceJobRunId;
+                addToast({
+                  title: 'Reading Employer Postings',
+                  description: 'Looking up the unread listings on the employers\u2019 own sites before skipping. This can take several minutes.',
+                  type: 'info',
+                  dedupeKey: `job-source-employer-read:${id}`,
+                });
+                EventLogger.log(`[JobSource][${id}] Skip on ${data.sourceId}: reading unread listings from employer postings first`);
+                void handleSolve({ employerPostingRead: true })
+                  .catch(() => {})
+                  .finally(() => setSkipAfterEmployerRead(true));
+                return;
+              }
               setDismissed(true);
               setProgress(prev => prev ? {
                 ...prev,
@@ -2259,6 +2291,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
                 deleteElements({ nodes: [{ id }] });
               }
             }}
+            ref={skipButtonRef}
             onPointerDown={(e) => e.stopPropagation()}
             disabled={sourceActionDisabled && !canStopSolveWalk}
             className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[9px] font-medium text-white/60 hover:text-white bg-white/[0.03] hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-default"

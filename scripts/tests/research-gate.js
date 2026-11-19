@@ -265,6 +265,20 @@ export default [
       const source = readJobsSource('recoveryHandlers');
       const generic = between(source, 'const runGenericResolve = async () =>', "checkpointContinuationBeforeReply('resolve-job-source')");
       assert.doesNotMatch(generic, RESEARCH_IDENTIFIERS, 'the generic Solve branch names no research function');
+      // The one sanctioned exception (Jack, 2026-11-19): Skip on a hand-listed
+      // platform reads its still-unread listings from employer postings. It is
+      // one call, behind an explicit request flag and the hand-set platform
+      // list, and no ordinary Solve or search can reach it.
+      assert.equal([...source.matchAll(/readListingsFromEmployerPostings\(/gu)].length, 1, 'the employer-posting read is called from one place');
+      assert.ok(between(generic, 'const readRecoveryRowsFromEmployerPostings = async () =>', 'const readsEmployerPostings =').includes('await readListingsFromEmployerPostings(unreadRows, { signal, nodeId });'));
+      assert.ok(generic.includes('const readsEmployerPostings = employerPostingRead === true && canReadFromEmployerPostings(sourceId);')
+        && generic.includes('if (readsEmployerPostings) result = await readRecoveryRowsFromEmployerPostings();')
+        && [...generic.matchAll(/readRecoveryRowsFromEmployerPostings\(\)/gu)].length === 1,
+      'only an explicit Skip-time request on a hand-listed platform runs it');
+      assert.ok(source.includes('employerPostingRead = false } = {}, signal) =>'), 'the request flag is off unless the card sends it');
+      for (const name of ['searchHandlers', 'boardHandlers', 'coreHandlers', 'jobs']) {
+        assert.doesNotMatch(readJobsSource(name), /readListingsFromEmployerPostings|employerPostingRead/u, `${name} cannot start the employer-posting read`);
+      }
       const init = source.indexOf('const resolveGenericPostings =', source.indexOf('const runGenericResolve = async () =>'));
       const persist = source.indexOf('const persistSourceRecoveryJobs = async', init);
       const publish = source.indexOf('const officialResolution = await resolveGenericPostings(', persist);

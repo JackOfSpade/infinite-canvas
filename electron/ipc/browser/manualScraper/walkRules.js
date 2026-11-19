@@ -211,7 +211,7 @@ export function manualPageCapForTasks(sourceTasks, collectionLimits) {
  * retain the small identity guard here as well so this safety boundary remains
  * correct when a provider repeats cards in a single extraction payload.
  */
-export function selectManualSourcePageJobs(newJobs, existingJobs, jobsPerPlatform, collectionStartTimestamp, stats = null) {
+export function selectManualSourcePageJobs(newJobs, existingJobs, jobsPerPlatform, collectionStartTimestamp, stats = null, isOwed = null) {
   const existingKeys = new Set((Array.isArray(existingJobs) ? existingJobs : [])
     .map(sourceJobKey));
   const unique = [];
@@ -220,6 +220,14 @@ export function selectManualSourcePageJobs(newJobs, existingJobs, jobsPerPlatfor
     if (existingKeys.has(key)) continue;
     existingKeys.add(key);
     unique.push(job);
+  }
+  // A listing still owed from an earlier scan is opened whatever its date: its
+  // platform's date already moved past it. The mark travels with the row so the
+  // later window checks keep it too. A lookup that throws leaves the row as is.
+  if (typeof isOwed === 'function') {
+    for (const job of unique) {
+      try { if (isOwed(job) === true) job.postedWindowExempt = true; } catch { /* treated as not owed */ }
+    }
   }
   const eligible = filterJobsByPostedSince(unique, collectionStartTimestamp);
   // This window drop keeps undated cards and removes dated ones, so the rows it

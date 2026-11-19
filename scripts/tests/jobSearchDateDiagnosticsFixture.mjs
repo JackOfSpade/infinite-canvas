@@ -12,7 +12,7 @@ import { buildJobHubScrapeClearPatch } from '../../src/utils/jobSearchSplitClear
 import { redactNodeForIssueReport } from '../../src/utils/issueReportRedaction.js';
 import { cloneNode } from '../../src/utils/nodeFactory.js';
 import { sanitizeNodesForSave } from '../../src/utils/serializationUtils.js';
-import { buildSourceCoverageCommitPatch, sourcesWithoutDateProgress } from '../../src/utils/jobSearchSourceCoverage.js';
+import { applySourceSkipToPendingCoverage, buildSourceCoverageCommitPatch, sourcesWithoutDateProgress } from '../../src/utils/jobSearchSourceCoverage.js';
 
 const SNAPSHOT = 'a'.repeat(64);
 const OLD = Date.UTC(2026, 9, 6, 5, 30);
@@ -47,6 +47,7 @@ function renderer(initial = {}) {
     EventLogger: { error() {} },
     addToast: toast => { harness.toasts.push(toast); },
     buildSourceCoverageCommitPatch, sourcesWithoutDateProgress,
+    applySourceSkipToPendingCoverage, sourcesSkippedDuringSearchRef: { current: { runId: null, sourceIds: new Set() } },
     ALL_JOB_SOURCE_IDS: ['indeed', 'linkedin', 'google'],
     JOB_SOURCE_BY_ID: { linkedin: { name: 'LinkedIn' }, indeed: { name: 'Indeed' }, google: { name: 'Google' } },
     window: { electronAPI: { completeJobRun: async () => { harness.calls++; return harness.result; } } },

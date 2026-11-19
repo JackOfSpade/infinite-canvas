@@ -1482,6 +1482,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             jobsPerPlatform,
             task.options?.collectionStartTimestamp,
             sourceWindowDropStats,
+            task.options?.isOwed,
           );
           // A listing an earlier run already read, or already showed, is not
           // opened again. It is left out of this run's rows altogether: the

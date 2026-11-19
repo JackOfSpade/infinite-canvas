@@ -386,8 +386,25 @@ export function linkedInPacingWaitMs(pacing = {}) {
  * guest search throttles single requests at random (a cold first request was
  * seen to get a 429 and the next one a 200), so one 429 is not proof of a
  * block. Only a page still refused after every wait ends the platform's walk.
+ * The first wait is short because a stray 429 usually clears at once; the later
+ * ones are long because a real limit takes minutes, and this walk runs beside
+ * the browser platforms, which take far longer than these waits add up to.
  */
-export const LINKEDIN_THROTTLE_RETRY_WAITS_MS = Object.freeze([45000, 90000, 180000]);
+export const LINKEDIN_THROTTLE_RETRY_WAITS_MS = Object.freeze([10000, 45000, 90000, 180000, 300000, 300000]);
+
+/**
+ * Whether a refused LinkedIn page is asked for again. A 429 always is. Once a
+ * page has been throttled, a request that then times out or drops is the same
+ * throttle seen another way (LinkedIn stops answering), so it is retried too;
+ * a transport failure with no throttle before it is left to the ordinary path.
+ */
+export function shouldRetryLinkedInThrottle(response, throttledBefore = false) {
+  if (Number(response?.status) === 429) return true;
+  return throttledBefore === true
+    && response?.ok === false
+    && Number(response?.status) === 0
+    && response?.warning?.code === 'api-fetch-failed';
+}
 
 /** Row offset of the page after one that returned `cardCount` cards. */
 export function linkedInNextStart(start, cardCount) {
@@ -510,14 +527,16 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
       let r = await requestPage();
       // A 429 is retried on the SAME page after a long wait, never at once.
       const retryWaits = Array.isArray(throttleRetryWaitsMs) ? throttleRetryWaitsMs : [];
-      for (let attempt = 0; attempt < retryWaits.length && r.status === 429 && !signal?.aborted; attempt++) {
-        logger.warn(`[LinkedIn API] Query ${qi + 1}/${queryList.length} page ${pageIndex} returned 429; waiting ${Math.ceil(retryWaits[attempt] / 1000)}s before retry ${attempt + 1}/${retryWaits.length}`);
+      let throttledThisPage = false;
+      for (let attempt = 0; attempt < retryWaits.length && shouldRetryLinkedInThrottle(r, throttledThisPage) && !signal?.aborted; attempt++) {
+        throttledThisPage = true;
+        logger.warn(`[LinkedIn API] Query ${qi + 1}/${queryList.length} page ${pageIndex} returned ${r.status === 429 ? '429' : 'no answer after a 429'}; waiting ${Math.ceil(retryWaits[attempt] / 1000)}s before retry ${attempt + 1}/${retryWaits.length}`);
         await sleepUnlessAborted(retryWaits[attempt], signal);
         if (signal?.aborted) break;
         apiRequestsIssued++;
         r = await requestPage();
       }
-      if (signal?.aborted && r.status === 429) { stopReason = 'aborted'; break; }
+      if (signal?.aborted && shouldRetryLinkedInThrottle(r, throttledThisPage)) { stopReason = 'aborted'; break; }
 
       // First detected warning wins — the rest of the loop bails. LinkedIn is
       // a heavy anti-bot source so if page 0 is blocked, page 1 will be too.

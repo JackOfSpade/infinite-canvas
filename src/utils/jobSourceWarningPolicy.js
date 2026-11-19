@@ -300,6 +300,42 @@ export function canAutomaticallyResolveJobSourceWarning(warning, now = Date.now(
     && !['open-external', 'login-platform'].includes(jobSourceWarningAction(warning));
 }
 
+// Refusals that clear by themselves with time, so Solve can be pressed without
+// the person. A check a person must pass is never in this list.
+export const AUTOMATIC_DESCRIPTION_SOLVE_CODES = new Set(['description-rate-limited']);
+// The same rest the scan gives a platform after its first refusal.
+export const AUTOMATIC_DESCRIPTION_SOLVE_WAIT_MS = 120_000;
+
+/**
+ * Whether the hub should press Solve by itself for this run: the search has
+ * paused on its platforms, one of them still holds a description refusal Solve
+ * can retry unattended, and this run has not been retried this way before.
+ */
+export function automaticDescriptionSolveDue({ hubState, jobRunId, attemptedRunId, warnings } = {}) {
+  if (hubState !== 'sources-ready' || !jobRunId || attemptedRunId === jobRunId) return false;
+  return (Array.isArray(warnings) ? warnings : []).some(warning => (
+    AUTOMATIC_DESCRIPTION_SOLVE_CODES.has(warning?.code)
+    && isJobSourceWarningGating(warning)
+    && canAttemptJobSourceResolve(warning)
+    && !['open-external', 'login-platform'].includes(jobSourceWarningAction(warning))
+  ));
+}
+
+// Platforms whose unread listings are read from the employer's own posting
+// when the person presses Skip. Set by hand, per platform, only for one that
+// keeps refusing descriptions: nothing adds a platform to this list by itself.
+// Empty since 2026-11-19: measured on 12 unread Google listings it read 3 for
+// $4.59 (docs/ai-test-runs.md), so Google was turned off again.
+export const EMPLOYER_POSTING_READ_SOURCE_IDS = new Set([]);
+
+/** Whether Skip on this card first reads its unread listings from employer postings. */
+export function employerPostingReadOnSkip(sourceId, warning) {
+  return EMPLOYER_POSTING_READ_SOURCE_IDS.has(sourceId)
+    && isJobSourceWarningGating(warning)
+    && isDescriptionRecoveryWarningCode(warning)
+    && canAttemptJobSourceResolve(warning);
+}
+
 /**
  * Drop stale backend warnings for sources the user already handled while the
  * multi-source search was still in flight.

@@ -14808,7 +14808,7 @@ export default [
           && visibleWindowFailure?.warning?.code === 'description-detail-error'
           && visibleWindowFailure?.checkpoint === 'unchanged'
           && !JSON.stringify(visibleWindowFailure).includes(secret)
-          && jobsSource.includes('let result;\n    try {\n      result = await withSharedProfileLock(() => openCaptchaResolveWindow(')
+          && jobsSource.includes('let result;\n    if (readsEmployerPostings) result = await readRecoveryRowsFromEmployerPostings();\n    else try {\n      result = await withSharedProfileLock(() => openCaptchaResolveWindow(')
           && jobsSource.includes("warning: { code: 'description-detail-error', severity: 'block' }")
           && jobsSource.includes('if (!signal?.aborted) {\n        recordJobSourceResolvePass(sourceId,'),
         'a thrown visible Solve window retains only a fixed failed-state code before its original IPC error is rethrown');

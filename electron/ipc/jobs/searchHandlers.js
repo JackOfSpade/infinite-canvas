@@ -33,7 +33,7 @@ import { getJobsSettings } from '../settings.js';
 import { CANCEL_CAUSE_LABELS, CHECKPOINT_PRESERVING_ABORT_CAUSES, JobOperationSupersededError, admitContinuationProviderWork, checkpointContinuationBeforeReply, claimExactJobRunExecution, isJobOperationSupersededError, normalizeCareerSnapshotIdentifier, requireSavedJobRecoveryCanvas, shouldDiscardJobRunAfterAbort } from './analysisStore.js';
 import { abortableDelay, authoritativeFreshJobSearchWindow, buildJobTasks, completedJobSourceIds, effectiveJobSearchWindow, enrichLinkedInDescriptionsLocked, getEgressIp, glassdoorPostedBucket, listWalkStoppedByProviderBlock, manualAiPreSearchRecoveryWindow, narrowJobSearchSourceWindows, runCooldownProbe, selectIndeedResumePlan, withFreshManualScraperTelemetry } from './collection.js';
 import { reconcileSearchFunnel, validateExactResumeRun } from './scoring.js';
-import { ACTIVE_SOURCE_IDS, ACTIVE_SOURCE_ID_SET, BACKGROUND_PROVIDER_ONLY_SOURCE_IDS, BROWSER_SCRAPE_ORDER, EXACT_RESUME_PROVIDER_ONLY_SOURCE_IDS, JOB_SOURCE_DISPLAY_NAMES, WALK_GUARD_WARNING_CODE, acceptProviderSearchResults, boundedDedupProvenance, boundedRecoveryBlockedUrls, canRecoverGatheredRunDirectly, capPlatformJobsAfterWindow, dedupByTitleCompany, extractExecutedGoogleQueryStrings, filterAndDedupJobsByPostedSince, filterJobsByDescriptionEvidence, getCompletedQueriesFromDetail, getEffectiveSourceWarning, getQueryProgressTotal, hasResolvedJobDescription, jobSourceAuthPreflightScope, jobSourceRecoveryDisposition, linkedInBrowserUnavailableWarning, linkedInShortDescriptionWarning, listingReadProgress, mergeJobSourceCollectionCap, mergeRoleScreenedJobs, orderedBlockedManualSourceUrls, reconcileTitleRelevanceFunnel, refreshManualSourceUrlIndex, sanitizeWalkGuards, synthScrapeWarning, walkGuardWarning } from './sourceRules.js';
+import { ACTIVE_SOURCE_IDS, ACTIVE_SOURCE_ID_SET, BACKGROUND_PROVIDER_ONLY_SOURCE_IDS, BROWSER_SCRAPE_ORDER, EXACT_RESUME_PROVIDER_ONLY_SOURCE_IDS, JOB_SOURCE_DISPLAY_NAMES, WALK_GUARD_WARNING_CODE, acceptProviderSearchResults, boundedDedupProvenance, boundedRecoveryBlockedUrls, canRecoverGatheredRunDirectly, capPlatformJobsAfterWindow, dedupByTitleCompany, extractExecutedGoogleQueryStrings, filterAndDedupJobsByPostedSince, filterJobsByDescriptionEvidence, getCompletedQueriesFromDetail, getEffectiveSourceWarning, getQueryProgressTotal, hasResolvedJobDescription, jobSourceAuthPreflightScope, jobSourceRecoveryDisposition, linkedInBrowserUnavailableWarning, linkedInShortDescriptionWarning, listingReadProgress, listingsReadElsewhere, mergeJobSourceCollectionCap, mergeRoleScreenedJobs, orderedBlockedManualSourceUrls, reconcileTitleRelevanceFunnel, refreshManualSourceUrlIndex, sanitizeWalkGuards, synthScrapeWarning, walkGuardWarning } from './sourceRules.js';
 import { clearLinkedInCeiling, jobsTelemetry, linkedinCeiling, rememberLinkedInCeiling } from './state.js';
 import { canWriteJobResolveTelemetry, indeedPreflightObservationNote, indeedWarningRequiresManualVerification, recordHistoryWrite, recordJobSourceDispatch, recordJobSourceProgress, recordJobsSourceScope, recordLinkedinEnrichPass, restoreJobsTelemetryIfCurrentRun, syncIndeedSessionStatusFromScrape } from './telemetry.js';
 import electronPkg from 'electron';
@@ -43,7 +43,7 @@ const { shell } = electronPkg;
 export function registerSearchHandlers(ctx) {
   const { handleSafe, resolveRequiredPinnedCareerInputForHandler, runHttpSources, beforeSearchStageWrite, afterSearchProviderResult, settleScrapedRowsForScoring } = ctx;
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
-  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, careerSnapshotId, operationAuthority = null, lastCompletedRunAt = null, initialLookbackDays = null, searchWindow: requestedSearchWindow = null, sourceSearchWindows = null, canvasFilePath, preferredLocation, rawLocation, collectionLimits, enabledSourceIds, jobPreferences = '', jobPreferencePlan = null, jobPreferencesInterpretation = null, countryScope = '', resume = false, resumeRunId = null, finishWithStaged = false, providerPhaseOnly: requestedProviderPhaseOnly = false, boardRecoveryClaim = null, profileFingerprint = null, manualAiPreSearchRecovery = null, sourceFinishedQueries = null, sourceReadKeys = null, runOrigin, profileInputMode }, signal) => {
+  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, careerSnapshotId, operationAuthority = null, lastCompletedRunAt = null, initialLookbackDays = null, searchWindow: requestedSearchWindow = null, sourceSearchWindows = null, canvasFilePath, preferredLocation, rawLocation, collectionLimits, enabledSourceIds, jobPreferences = '', jobPreferencePlan = null, jobPreferencesInterpretation = null, countryScope = '', resume = false, resumeRunId = null, finishWithStaged = false, providerPhaseOnly: requestedProviderPhaseOnly = false, boardRecoveryClaim = null, profileFingerprint = null, manualAiPreSearchRecovery = null, sourceFinishedQueries = null, sourceReadKeys = null, sourceOwedKeys = null, runOrigin, profileInputMode }, signal) => {
     // Provider collection deliberately has no raw profile argument.  Still
     // validate the pinned approved snapshot at this final admission boundary:
     // a deleted/replaced snapshot cannot keep an old query bundle running.
@@ -838,9 +838,24 @@ export function registerSearchHandlers(ctx) {
         }
       }
     }
+    // Listings a platform still owes from before its date moved (see
+    // applySourceSkipToPendingCoverage). Their cards are opened whatever their
+    // date, so a card that turns up again is not lost to the window.
+    const owedBySource = {};
+    if (!skipProviderCollection && sourceOwedKeys && typeof sourceOwedKeys === 'object') {
+      for (const sourceId of activeSourceIds) {
+        if (!BROWSER_SCRAPE_ORDER.includes(sourceId) || !Object.hasOwn(sourceOwedKeys, sourceId)) continue;
+        const owedKeys = new Set((Array.isArray(sourceOwedKeys[sourceId]) ? sourceOwedKeys[sourceId] : [])
+          .filter(key => typeof key === 'string' && key));
+        if (owedKeys.size === 0) continue;
+        owedBySource[sourceId] = job => owedKeys.has(sourceJobKey(job?.source ? job : { ...job, source: sourceId }));
+        logger.info(`[Jobs][${nodeId}] ${sourceId}: ${owedKeys.size} listing(s) still owed from an earlier scan will be opened if they turn up`);
+      }
+    }
     const candidateTasks = buildJobTasks(queries, ageDays, {
       onlySources: requestedRunnableSourceScope,
       alreadyReadBySource,
+      owedBySource,
       ...(queryPlans ? { startPageBySourceQuery: queryPlans } : {}),
       collectionStartTimestamp: activeSearchWindow.startTimestamp,
       maxAgeDaysBySource: ageDaysBySource(),
@@ -3176,6 +3191,12 @@ export function registerSearchHandlers(ctx) {
     // next run can skip them. Only a run that walked its providers in this
     // process knows which queries were fully read.
     const sourceQueryProgress = {};
+    // Every listing each card-reading platform read this run, finished or not,
+    // for the lasting read list.
+    const sourceReadKeysReported = {};
+    // Unfinished platforms whose every result list was walked to its end, so
+    // all they are missing is the descriptions of known listings.
+    const sourceWalkCompleteIds = [];
     if (canvasFilePath) {
       try {
         const finalState = await readRunState(canvasFilePath, Date.now(), { nodeId });
@@ -3193,8 +3214,24 @@ export function registerSearchHandlers(ctx) {
             countryApplicableSourceIds,
           });
           if (!resume && !skipProviderCollection) {
+            const jobsBySource = Object.fromEntries(Object.entries(sourceResults || {})
+              .map(([sourceId, result]) => [sourceId, result?.jobs]));
             for (const sourceId of activeSourceIds) {
+              const readsCards = sourceId === 'indeed' || tasks.some(task => task?.sourceId === sourceId);
+              // Unread here but read on another platform this scan: not owed.
+              const readElsewhere = readsCards ? listingsReadElsewhere(sourceId, jobsBySource) : null;
+              if (readElsewhere?.size > 0) logger.info(`[Jobs][${sourceId}] ${readElsewhere.size} unread listing(s) were read on another platform this scan and count as read`);
+              if (readsCards) {
+                const readKeys = listingReadProgress(sourceResults[sourceId]?.jobs, readElsewhere).readKeys;
+                if (readKeys.length > 0) sourceReadKeysReported[sourceId] = readKeys;
+              }
               if (completedSourceIds.includes(sourceId)) continue;
+              if (readsCards && sourceId !== 'indeed') {
+                const ledger = finalState.manifest.sources?.[sourceId]?.queries || {};
+                const walked = queries.every((_query, index) => ledger[`#${index}`]?.terminal === true
+                  || carriedQueryPlans?.[sourceId]?.[index]?.terminal === true);
+                if (queries.length > 0 && walked) sourceWalkCompleteIds.push(sourceId);
+              }
               let finished = [];
               if (sourceId === 'linkedin') {
                 const linkedIn = (Array.isArray(httpResults) ? httpResults : []).find(result => result?.sourceId === 'linkedin');
@@ -3208,13 +3245,10 @@ export function registerSearchHandlers(ctx) {
               // Listing-level progress for a platform read card by card: what
               // this run read (not opened again next time) and what came back
               // unread (the work still owed).
-              const listingProgress = sourceId === 'indeed' || tasks.some(task => task?.sourceId === sourceId)
-                ? listingReadProgress(sourceResults[sourceId]?.jobs)
-                : null;
-              if (finished.length > 0 || listingProgress?.readKeys.length > 0 || listingProgress?.unreadListings.length > 0) {
+              const listingProgress = readsCards ? listingReadProgress(sourceResults[sourceId]?.jobs, readElsewhere) : null;
+              if (finished.length > 0 || listingProgress?.unreadListings.length > 0) {
                 sourceQueryProgress[sourceId] = {
                   finishedQueries: finished,
-                  ...(listingProgress?.readKeys.length > 0 ? { readKeys: listingProgress.readKeys } : {}),
                   ...(listingProgress?.unreadListings.length > 0 ? { unreadListings: listingProgress.unreadListings } : {}),
                 };
               }
@@ -3224,6 +3258,8 @@ export function registerSearchHandlers(ctx) {
       } catch {
         completedSourceIds = [];
         for (const sourceId of Object.keys(sourceQueryProgress)) delete sourceQueryProgress[sourceId];
+        for (const sourceId of Object.keys(sourceReadKeysReported)) delete sourceReadKeysReported[sourceId];
+        sourceWalkCompleteIds.length = 0;
       }
     }
     // `setJobRunStage` owns the exact authority→manifest transaction.
@@ -3316,6 +3352,8 @@ export function registerSearchHandlers(ctx) {
       sourceSearchWindows: activeSourceSearchWindows,
       completedSourceIds,
       sourceQueryProgress,
+      sourceReadKeysReported,
+      sourceWalkCompleteIds,
     };
     } catch (error) {
       if (isJobOperationSupersededError(error)) return searchSupersededResult();

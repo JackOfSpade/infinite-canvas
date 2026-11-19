@@ -4,6 +4,7 @@ import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
 import { RECENT_INDEED_LOGIN_MS, clearLinkedInCeiling, indeedLoginStamp, jobsTelemetry, linkedInSameIpRetryDecision, linkedinCeiling, rememberLinkedInCeiling } from './state.js';
 import { admitContinuationProviderWork, assessDescriptionRecoveryCheckpoint, checkpointContinuationBeforeReply, descriptionRecoveryNotReadyWarning, descriptionRecoveryPersistenceWarning, loadDescriptionRecoveryCheckpoint, loadJobAnalysisSnapshot, requireDescriptionRecoveryCheckpointPersisted, requireSavedJobRecoveryCanvas, saveDescriptionRecoverySnapshotIfCurrent, withDescriptionRecoveryLock } from './analysisStore.js';
 import { boardClosedRetirement, scoreSafeRowsWithBoardClosed } from '../officialPostingBoardClosed.js';
+import { canReadFromEmployerPostings, readListingsFromEmployerPostings } from './employerPostingRead.js';
 import { buildJobAnalysisSnapshot } from './scoring.js';
 import { canPerformJobSourceAction, canWriteJobResolveTelemetry, jobSourceActionAuthorization, nativeChallengeTerminalDisposition, nextResolvePassTrail, recordJobSourceProgress, recordJobSourceResolvePass, recordJobSourceResumeAttempt, recordLinkedinEnrichPass, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordResumeAttemptTelemetry, recordSourceResolvedAfterGather, summarizeIndeedResumeEnrichment, syncIndeedSessionStatusFromScrape } from './telemetry.js';
 import { createOfficialPostingRecoveryPassResolver } from '../officialPostingService.js';
@@ -86,7 +87,7 @@ export function registerRecoveryHandlers(ctx) {
   // pendingJobs and drop the warning. items is [] when no extractor is
   // available for the source (API sources can't be inline-extracted; their
   // Solve button doesn't render).
-  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, jobRunId = null, canvasFilePath, searchWindow, maxAgeDays, preferredLocation, secondTabUrl, collectionLimits, enabledSourceIds, continuationIntentId = null, continuationLeaseToken = null, careerSnapshotId = null, operationAuthority = null, parentArtifactFingerprint = null, warningCode = null } = {}, signal) => {
+  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, jobRunId = null, canvasFilePath, searchWindow, maxAgeDays, preferredLocation, secondTabUrl, collectionLimits, enabledSourceIds, continuationIntentId = null, continuationLeaseToken = null, careerSnapshotId = null, operationAuthority = null, parentArtifactFingerprint = null, warningCode = null, employerPostingRead = false } = {}, signal) => {
     requireSavedJobRecoveryCanvas(canvasFilePath);
     const continuationAdmission = await admitContinuationProviderWork(event, {
       canvasFilePath, nodeId, jobRunId, continuationIntentId, continuationLeaseToken,
@@ -969,9 +970,61 @@ export function registerRecoveryHandlers(ctx) {
         }
       : null;
 
-    logger.info(`[Jobs][${nodeId}] Opening resolve window for ${sourceId}: ${url}${secondTabUrl ? ' (2-tab)' : ''}`);
+    // Skip on a platform that kept refusing descriptions: no window is opened.
+    // The listings still unread are looked up on each employer's own site by
+    // the one posting finder, and the ones it reads are saved exactly as a
+    // browser pass saves the cards it opened.
+    const readRecoveryRowsFromEmployerPostings = async () => {
+      const unreadRows = sourceRecoveryCheckpointOwned
+        ? filterJobsByDescriptionEvidence(sourceRecoveryJobs).dropped.filter(job => listingStateRank(job) < 3)
+        : [];
+      const outcome = await readListingsFromEmployerPostings(unreadRows, { signal, nodeId });
+      const readRows = outcome.read.map(({ candidate, row }) => mergeResolvedDescriptionRecoveryCandidate(candidate, row, sourceId));
+      const recovery = reconcileResolvedDescriptionRecovery(sourceRecoveryJobs, sourceId, readRows);
+      let warning = null;
+      if (readRows.length > 0) {
+        try {
+          await persistSourceRecoveryJobs(recovery.recoveryJobs);
+        } catch (error) {
+          logger.warn(`[Jobs][${nodeId}] ${recoveryLabel} employer-posting read could not be saved: ${error?.message || error}`);
+          warning = descriptionRecoveryPersistenceWarning(
+            recoveryLabel,
+            error,
+            `${recoveryLabel} listings read from employer postings could not be checkpointed, so they were not added.`,
+          );
+        }
+      }
+      // Listings neither the platform nor the employer's site gave up keep the
+      // platform paused, so the Skip that asked for this read still decides.
+      if (!warning && recovery.emptyRows.length > 0) {
+        warning = {
+          code: 'description-listing-unavailable', severity: 'block', shortLabel: 'Skip recommended',
+          evidence: `${readRows.length} of ${outcome.attempted} unread ${recoveryLabel} listing(s) were read from the employers' own postings. ${recovery.emptyRows.length} still have no description.`,
+          suggestion: 'Skip to continue without them. They stay owed, so a later scan opens them if they turn up again.',
+        };
+      }
+      logger.info(`[Jobs][${nodeId}] ${recoveryLabel} employer-posting read: ${unreadRows.length} unread, ${outcome.attempted} looked up, ${readRows.length} read (${Object.entries(outcome.outcomes).map(([code, count]) => `${code}=${count}`).join(', ') || 'none'})`);
+      return {
+        resolved: true,
+        items: warning ? [] : recovery.completeRows,
+        warning,
+        diag: {
+          postprocessOutcome: 'ok',
+          postprocessMeta: {
+            employerPostingRead: true,
+            attempted: outcome.attempted, targeted: unreadRows.length,
+            enriched: readRows.length, succeeded: readRows.length,
+            completeTotal: recovery.completeRows.length, empty: recovery.emptyRows.length,
+          },
+        },
+      };
+    };
+    const readsEmployerPostings = employerPostingRead === true && canReadFromEmployerPostings(sourceId);
+    if (employerPostingRead === true && !readsEmployerPostings) return { resolved: false, items: [], nextBlockedUrl: null };
+    if (!readsEmployerPostings) logger.info(`[Jobs][${nodeId}] Opening resolve window for ${sourceId}: ${url}${secondTabUrl ? ' (2-tab)' : ''}`);
     let result;
-    try {
+    if (readsEmployerPostings) result = await readRecoveryRowsFromEmployerPostings();
+    else try {
       result = await withSharedProfileLock(() => openCaptchaResolveWindow(
         url,
         event.sender,
@@ -1205,7 +1258,8 @@ export function registerRecoveryHandlers(ctx) {
     // restart or another canvas claiming process-global diagnostics; telemetry
     // remains only a backward-compatible same-process fallback.
     let checkpointRemainingUrls = null;
-    if (sourceRecoveryCheckpointOwned) {
+    // An employer-posting read opened no blocked query, so the queue is untouched.
+    if (sourceRecoveryCheckpointOwned && !readsEmployerPostings) {
       const queuedUrls = recoveryBlockedUrlsForSource(sourceRecoverySnapshot?.descriptionRecoveryState, sourceId);
       if (queuedUrls.length > 0) {
         const consumedQueue = consumeRecoveryBlockedUrl(
@@ -1245,8 +1299,8 @@ export function registerRecoveryHandlers(ctx) {
     const remaining = checkpointRemainingUrls ?? (canWriteTelemetry()
       ? (jobsTelemetry.sourceBlockedUrls?.[sourceId] || []).filter(u => u !== url)
       : []);
-    if (canWriteTelemetry() && jobsTelemetry.sourceBlockedUrls) jobsTelemetry.sourceBlockedUrls[sourceId] = remaining;
-    const nextBlockedUrl = remaining[0] || null;
+    if (!readsEmployerPostings && canWriteTelemetry() && jobsTelemetry.sourceBlockedUrls) jobsTelemetry.sourceBlockedUrls[sourceId] = remaining;
+    const nextBlockedUrl = readsEmployerPostings ? null : remaining[0] || null;
     if (nextBlockedUrl) logger.info(`[Jobs][${nodeId}] Next blocked URL for ${sourceId}: ${nextBlockedUrl}`);
     recordGenericResolvePass(
       resolveWarning?.severity === 'block' || resolveWarning?.severity === 'throttle'
@@ -1262,6 +1316,7 @@ export function registerRecoveryHandlers(ctx) {
       && result?.resolved !== false
       && resolveWarning?.severity !== 'block'
       && resolveWarning?.severity !== 'throttle'
+      && !readsEmployerPostings
       && remaining.length === 0) {
       recordSourceResolvedAfterGather(sourceId);
     }
@@ -1276,8 +1331,9 @@ export function registerRecoveryHandlers(ctx) {
       // queued queries are still outstanding AFTER this pass, so the card can
       // say "query 3 of 7" and bound its own walk against a real number rather
       // than a guess. Older renderers ignore it; no migration needed.
-      remainingBlockedCount: remaining.length,
-      attemptedBlockedUrl: url,
+      remainingBlockedCount: readsEmployerPostings ? 0 : remaining.length,
+      attemptedBlockedUrl: readsEmployerPostings ? null : url,
+      ...(readsEmployerPostings ? { employerPostingRead: { ...(enrichmentMeta || {}) } } : {}),
       // Google recovery returns the complete score-safe source subset from its
       // checkpoint, not an incremental provider page. Replacement semantics
       // keep repeated Solve attempts from inflating source/gathered counts when

@@ -8,7 +8,8 @@ import { createSeenListingMatcher, dedupAgainstHistory } from '../../electron/ip
 import { sanitizeJobRunCollectionDiagnostics } from '../../electron/ipc/jobRunStaging.js';
 import { sanitizeJobSearchDateDiagnostics } from '../../src/utils/jobSearchDateDiagnostics.js';
 import fs from 'node:fs';
-import { didDetailBlockReprobeRecover, partitionAlreadyReadJobs, withoutAlreadyReadJobs } from '../../electron/ipc/browser/manualScraper.js';
+import { didDetailBlockReprobeRecover, partitionAlreadyReadJobs, selectManualSourcePageJobs, withoutAlreadyReadJobs } from '../../electron/ipc/browser/manualScraper.js';
+import { filterJobsByAge, filterJobsByPostedSince } from '../../electron/ipc/jobDateFilter.js';
 import { assessSourceHealth } from '../../electron/ipc/jobSourceHealth.js';
 import { formatPipelineState } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import {
@@ -27,7 +28,11 @@ import {
   partitionSourcesByRescrapeAge,
   resolveJobSearchSourceWindows,
   serializeJobSearchWindow,
+  applyResolvedListingsToPendingCoverage,
+  applySourceSkipToPendingCoverage,
+  SOURCE_OWED_MAX_SCANS,
   sourceFinishedQueriesForRun,
+  sourceOwedKeysForRun,
   sourceReadContextKey,
   sourceReadKeysForRun,
   sourcesBehindLatest,
@@ -796,7 +801,8 @@ export default [
         } },
         locationKey: 'Canada',
       }, 'hub'));
-      assert(data.sourceQueryProgress.google.readKeys.length === 3, 'read listings add up across blocked runs');
+      assert(data.sourceReadLedger.google.keys.length === 3, 'read listings add up across blocked runs');
+      assert(data.sourceQueryProgress.google.readKeys === undefined, 'read listings are kept in one place, the lasting list');
       assert(data.sourceQueryProgress.google.unreadListings.length === 1
         && data.sourceQueryProgress.google.unreadListings[0].key === progress.unreadListings[1].key,
         'a listing that has now been read leaves the not-done list');
@@ -809,6 +815,8 @@ export default [
       }, 'hub'));
       assert(data.sourceCoverage.google.coverageStartedAt === run1 && Object.keys(data.sourceQueryProgress).length === 0,
         'a finished platform moves to the oldest contributing run and starts clean');
+      assert(sourceReadKeysForRun(data, ['google'], 'Canada').google.length === 3,
+        'what it read is still not opened again after it finishes');
     },
   },
   {
@@ -870,8 +878,8 @@ export default [
         sourceQueryProgress: { google: { finishedQueries: [], readKeys: ['k2', 'k3'] } },
         locationKey: 'Canada', readContextKey: anyPlace,
       }, 'hub'));
-      assert(JSON.stringify(data.sourceQueryProgress.google.readKeys) === '["k2","k3"]',
-        `listings judged under the old preferences are forgotten, got ${JSON.stringify(data.sourceQueryProgress.google.readKeys)}`);
+      assert(JSON.stringify(data.sourceReadLedger.google.keys) === '["k2","k3"]',
+        `listings judged under the old preferences are forgotten, got ${JSON.stringify(data.sourceReadLedger.google.keys)}`);
       assert(Object.keys(sourceReadKeysForRun(data, ['google'], 'Canada', remoteOnly)).length === 0
         && sourceReadKeysForRun(data, ['google'], 'Canada', anyPlace).google.length === 2,
         'the read listings now belong to the new preferences');
@@ -905,6 +913,92 @@ export default [
       // Earlier-read cards never make up the minimum sample by themselves.
       assert(assessSourceHealth(broken.slice(0, 5), { measuredEarlierBySource: { glassdoor: 100 } }).length === 0,
         'five opened cards are too few to judge, however many were read earlier');
+    },
+  },
+  {
+    name: 'Skip on a platform whose result lists were all walked moves its date and keeps the unread listings owed for three scans',
+    run() {
+      const day = 86400000;
+      const bookmark = localDate(2026, 11, 15, 4).getTime();
+      const run1 = localDate(2026, 11, 18, 20).getTime();
+      const entry = at => ({ coverageStartedAt: at, completedAt: at, runId: null });
+      const unread = ['u1', 'u2'].map(key => ({ key, title: `Title ${key}`, company: 'Acme', url: `https://example.test/${key}` }));
+      const staged = {
+        runId: 'r1', collectionStartedAt: run1, collectionCompletedAt: run1 + 1000,
+        completedSourceIds: ['indeed'], participatingSourceIds: ['google', 'linkedin', 'indeed'],
+        walkCompleteSourceIds: ['google'], locationKey: 'Canada', readContextKey: 'p',
+        readKeysBySource: { google: ['k1'], indeed: ['i1'] },
+        sourceQueryProgress: { google: { finishedQueries: ['a'], unreadListings: unread }, linkedin: { finishedQueries: [] } },
+      };
+      const start = { sourceCoverage: { google: entry(bookmark), linkedin: entry(bookmark), indeed: entry(bookmark) } };
+
+      // Without Skip the blocked platform keeps its date and is reported.
+      assert(sourcesWithoutDateProgress(start, staged, 'hub', ['google', 'linkedin', 'indeed']).map(item => item.sourceId).join() === 'google,linkedin',
+        'before Skip both unfinished platforms are reported');
+
+      // A Solve pass reads one of the two unread listings.
+      const afterSolve = applyResolvedListingsToPendingCoverage(staged, 'google', ['u1', 'k1']);
+      assert(afterSolve.sourceQueryProgress.google.unreadListings.map(listing => listing.key).join() === 'u2'
+        && [...afterSolve.readKeysBySource.google].sort().join() === 'k1,u1', 'what Solve read counts as read and leaves the not-done list');
+      assert(applyResolvedListingsToPendingCoverage(staged, 'google', []) === staged, 'a pass that read nothing changes nothing');
+
+      // Skip: the walked platform moves on; the one cut short does not.
+      const afterSkip = applySourceSkipToPendingCoverage(afterSolve, 'google');
+      assert(afterSkip.completedSourceIds.includes('google') && afterSkip.skippedSourceIds.join() === 'google', 'Skip finishes the fully walked platform');
+      assert(applySourceSkipToPendingCoverage(afterSkip, 'linkedin') === afterSkip, 'a platform whose walk was cut short is left unfinished');
+      assert(applySourceSkipToPendingCoverage(afterSkip, 'google') === afterSkip, 'a second Skip changes nothing');
+      assert(sourcesWithoutDateProgress(start, afterSkip, 'hub', ['google', 'linkedin', 'indeed']).map(item => item.sourceId).join() === 'linkedin',
+        'after Skip only the platform that was cut short is reported');
+
+      let data = { ...start, ...buildSourceCoverageCommitPatch(start, afterSkip, 'hub') };
+      assert(data.sourceCoverage.google.coverageStartedAt === run1 && data.sourceCoverage.linkedin.coverageStartedAt === bookmark,
+        'the skipped platform moves its date; the other keeps it');
+      assert(data.sourceQueryProgress?.google === undefined, 'the skipped platform starts clean');
+      assert(JSON.stringify(sourceOwedKeysForRun(data, ['google', 'indeed'], 'Canada')) === '{"google":["u2"]}',
+        'the listing it could not read is owed; the one Solve read is not');
+      assert(Object.keys(sourceOwedKeysForRun(data, ['google'], 'Toronto, Ontario, Canada')).length === 0, 'owed listings belong to their search location');
+      assert(data.sourceReadLedger.indeed.keys.join() === 'i1', 'a finished platform keeps what it read');
+
+      // Later scans: each one that still cannot read it uses one of its scans.
+      for (let scan = 1; scan <= SOURCE_OWED_MAX_SCANS; scan++) {
+        const at = run1 + scan * day;
+        Object.assign(data, buildSourceCoverageCommitPatch(data, {
+          runId: `r${scan + 1}`, collectionStartedAt: at, collectionCompletedAt: at + 1000,
+          completedSourceIds: ['google'], participatingSourceIds: ['google'], locationKey: 'Canada', readContextKey: 'p',
+        }, 'hub'));
+        const owed = sourceOwedKeysForRun(data, ['google'], 'Canada').google || [];
+        assert(owed.length === (scan < SOURCE_OWED_MAX_SCANS ? 1 : 0), `after scan ${scan} the owed list holds ${owed.length}`);
+      }
+      assert(data.sourceOwedListings.google === undefined, 'an owed listing is given up after three scans');
+
+      // A scan that reads the owed listing clears it at once; a scan the platform sits out leaves it alone.
+      let other = { ...start, ...buildSourceCoverageCommitPatch(start, afterSkip, 'hub') };
+      Object.assign(other, buildSourceCoverageCommitPatch(other, {
+        runId: 'r2', collectionStartedAt: run1 + day, collectionCompletedAt: run1 + day + 1, completedSourceIds: ['indeed'],
+        participatingSourceIds: ['indeed'], locationKey: 'Canada', readContextKey: 'p',
+      }, 'hub'));
+      assert(other.sourceOwedListings.google.listings[0].attempts === 0, 'a scan the platform did not take part in uses none of its scans');
+      Object.assign(other, buildSourceCoverageCommitPatch(other, {
+        runId: 'r3', collectionStartedAt: run1 + 2 * day, collectionCompletedAt: run1 + 2 * day + 1, completedSourceIds: ['google'],
+        participatingSourceIds: ['google'], locationKey: 'Canada', readContextKey: 'p', readKeysBySource: { google: ['u2'] },
+      }, 'hub'));
+      assert(other.sourceOwedListings.google === undefined, 'an owed listing that is read is no longer owed');
+
+      // The scraper opens an owed card even when it is older than the window.
+      const windowStart = run1;
+      const cards = [
+        { source: 'google', title: 'Old owed', url: 'https://www.google.com/search?q=a#htidocid=u2', posted: '20 days ago' },
+        { source: 'google', title: 'Old other', url: 'https://www.google.com/search?q=a#htidocid=zz', posted: '20 days ago' },
+        { source: 'google', title: 'Undated', url: 'https://www.google.com/search?q=a#htidocid=yy', posted: '' },
+      ];
+      const stats = { windowDropped: 0 };
+      const picked = selectManualSourcePageJobs(cards, [], null, windowStart, stats, job => job.title === 'Old owed');
+      assert(picked.map(job => job.title).join() === 'Old owed,Undated' && stats.windowDropped === 1,
+        `the owed card survives the window drop, got ${picked.map(job => job.title).join()}`);
+      assert(filterJobsByPostedSince(picked, windowStart).length === 2 && filterJobsByAge(picked, 3).length === 2,
+        'the later window checks keep it too');
+      assert(selectManualSourcePageJobs(cards.map(card => ({ ...card, postedWindowExempt: undefined })), [], null, windowStart, null, () => { throw new Error('x'); })
+        .map(job => job.title).join() === 'Undated', 'a failing lookup treats the card as not owed');
     },
   },
 ];

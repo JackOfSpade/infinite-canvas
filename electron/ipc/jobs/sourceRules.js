@@ -218,7 +218,7 @@ export const applyFinalJobTitleRelevanceGate = acceptProviderSearchResults;
  * list card carries before its description is opened, so the next scan can
  * recognise the card without opening it.
  */
-export function listingReadProgress(jobs) {
+export function listingReadProgress(jobs, readElsewhereKeys = null) {
   const readKeys = [];
   const unreadListings = [];
   const seen = new Set();
@@ -227,6 +227,7 @@ export function listingReadProgress(jobs) {
     if (!key || seen.has(key)) continue;
     seen.add(key);
     if (!job?.descriptionDeferredReason && hasResolvedJobDescription(job)) readKeys.push(key);
+    else if (readElsewhereKeys?.has(key)) readKeys.push(key);
     else if (unreadListings.length < 200) {
       unreadListings.push({
         key,
@@ -237,6 +238,36 @@ export function listingReadProgress(jobs) {
     }
   }
   return { readKeys, unreadListings };
+}
+
+/**
+ * The keys of one platform's unread listings that another platform read in the
+ * same scan. The scan scores that other copy, so this one is not owed: it counts
+ * as read and is not opened again. "Same job" is the scan's own cross-platform
+ * rule (`dedupJobsAcrossSources`), so nothing is matched here that the scan
+ * would not have merged anyway.
+ */
+export function listingsReadElsewhere(sourceId, jobsBySource) {
+  const isRead = job => !job?.descriptionDeferredReason && hasResolvedJobDescription(job);
+  const readElsewhere = [];
+  for (const [otherId, jobs] of Object.entries(jobsBySource || {})) {
+    if (otherId === sourceId) continue;
+    for (const job of Array.isArray(jobs) ? jobs : []) {
+      if (isRead(job)) readElsewhere.push(job?.source ? job : { ...job, source: otherId });
+    }
+  }
+  const keys = new Set();
+  if (readElsewhere.length === 0) return keys;
+  const unread = (Array.isArray(jobsBySource?.[sourceId]) ? jobsBySource[sourceId] : [])
+    .filter(job => !isRead(job))
+    .map(job => (job?.source ? job : { ...job, source: sourceId }));
+  if (unread.length === 0) return keys;
+  const kept = new Set(dedupJobsAcrossSources([...readElsewhere, ...unread]));
+  for (const job of unread) {
+    const key = sourceJobKey(job);
+    if (key && !kept.has(job)) keys.add(key);
+  }
+  return keys;
 }
 
 export function hasResolvedJobDescription(job) {

@@ -4,6 +4,7 @@ import {
   fetchDiceListings,
   fetchLinkedInJobs,
   linkedInNextStart,
+  shouldRetryLinkedInThrottle,
   fetchRemoteOKJobs,
   fetchUSAJobs,
   fetchWeWorkRemotelyJobs,
@@ -202,6 +203,21 @@ export default [
       assert.deepEqual(starts, ['0', '0'], 'the retry asks for the page that was refused');
       assert.equal(recovered.items.length, 10);
       assert.equal(recovered.warning, null, 'a 429 that clears on retry leaves no warning');
+      // A retry that times out after a 429 is the same throttle, so the page is
+      // asked for again instead of ending the platform (live run 2026-11-18).
+      let timedOutCalls = 0;
+      const timedOutController = new AbortController();
+      const afterTimeout = await withFetch(() => {
+        timedOutCalls++;
+        if (timedOutCalls === 1) return new Response('', { status: 429 });
+        if (timedOutCalls === 2) throw new TypeError('fetch failed');
+        return respond(cards(10));
+      }, () => fetchLinkedInJobs(['a'], timedOutController.signal, 7, 'Toronto', ({ detail }) => { if (/p1$/u.test(detail)) timedOutController.abort(); }, { throttleRetryWaitsMs: [0, 0, 0, 0] }));
+      assert.equal(afterTimeout.items.length, 10, 'the page is read once LinkedIn answers again');
+      assert.equal(afterTimeout.warning, null);
+      assert.equal(shouldRetryLinkedInThrottle({ ok: false, status: 0, warning: { code: 'api-fetch-failed' } }, false), false,
+        'a dropped request with no throttle before it is not retried on the long schedule');
+      assert.equal(shouldRetryLinkedInThrottle({ ok: false, status: 403 }, true), false, 'another refusal is not a throttle');
       // `start` is a row offset: a 10-card page is followed by row 10, not row 25.
       assert.equal(linkedInNextStart(0, 10), 10);
       assert.equal(linkedInNextStart(10, 10), 20);

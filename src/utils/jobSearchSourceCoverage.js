@@ -266,6 +266,131 @@ function unreadListingList(value) {
 }
 
 /**
+ * How many later scans a listing stays owed after its platform's date moved
+ * past it. Each scan that takes part and still cannot read it uses one.
+ */
+export const SOURCE_OWED_MAX_SCANS = 3;
+
+function owedListingList(value) {
+  const attemptsByKey = new Map();
+  for (const entry of Array.isArray(value) ? value : []) {
+    const attempts = Number(entry?.attempts);
+    if (typeof entry?.key === 'string' && !attemptsByKey.has(entry.key)) {
+      attemptsByKey.set(entry.key, Number.isSafeInteger(attempts) && attempts > 0 ? attempts : 0);
+    }
+  }
+  return unreadListingList(value).map(listing => ({ ...listing, attempts: attemptsByKey.get(listing.key) || 0 }));
+}
+
+/**
+ * Every listing a platform's description was read for, kept across scans
+ * whether or not the platform finished. A card with one of these keys is not
+ * opened again: it was already judged by the scan that read it. This is what
+ * stops an undated card, or one in the days two scans both cover, from being
+ * opened on every scan. Held per search location and per job preferences.
+ */
+export function normalizeSourceReadLedger(raw) {
+  const normalized = {};
+  if (!isPlainRecord(raw)) return normalized;
+  for (const sourceId of Object.keys(raw)) {
+    if (!isSafeSourceId(sourceId) || !isPlainRecord(raw[sourceId])) continue;
+    const keys = readKeyList(raw[sourceId].keys);
+    if (keys.length === 0) continue;
+    normalized[sourceId] = {
+      keys,
+      readContextKey: readContextKeyOf(raw[sourceId].readContextKey),
+      locationKey: typeof raw[sourceId].locationKey === 'string' ? raw[sourceId].locationKey : '',
+    };
+  }
+  return normalized;
+}
+
+/**
+ * Listings a platform still owes after its date moved past them: Skip was
+ * pressed with every result list fully walked and only these descriptions
+ * missing. Later scans open one if it turns up in the results, whatever its
+ * date, and give up after `SOURCE_OWED_MAX_SCANS` scans.
+ */
+export function normalizeSourceOwedListings(raw) {
+  const normalized = {};
+  if (!isPlainRecord(raw)) return normalized;
+  for (const sourceId of Object.keys(raw)) {
+    if (!isSafeSourceId(sourceId) || !isPlainRecord(raw[sourceId])) continue;
+    const listings = owedListingList(raw[sourceId].listings).filter(listing => listing.attempts < SOURCE_OWED_MAX_SCANS);
+    if (listings.length === 0) continue;
+    normalized[sourceId] = {
+      listings,
+      locationKey: typeof raw[sourceId].locationKey === 'string' ? raw[sourceId].locationKey : '',
+    };
+  }
+  return normalized;
+}
+
+/** Keys of the listings each platform still owes, for the next run to open even when they are older than its window. */
+export function sourceOwedKeysForRun(data, sourceIds, searchLocationText) {
+  const locationKey = String(searchLocationText || '').trim();
+  const owed = normalizeSourceOwedListings(data?.sourceOwedListings);
+  const out = {};
+  for (const sourceId of uniqueSourceIds(sourceIds)) {
+    if (!hasOwn(owed, sourceId) || owed[sourceId].locationKey !== locationKey) continue;
+    out[sourceId] = owed[sourceId].listings.map(listing => listing.key);
+  }
+  return out;
+}
+
+/**
+ * Record what a Solve pass recovered on the staged result of the same run: the
+ * listings it read count as read and leave that platform's not-done list.
+ * Returns the same object when nothing changes.
+ */
+export function applyResolvedListingsToPendingCoverage(pending, sourceId, resolvedKeys) {
+  if (!isPlainRecord(pending) || !isSafeSourceId(sourceId)) return pending;
+  const keys = readKeyList(resolvedKeys);
+  if (keys.length === 0) return pending;
+  const keySet = new Set(keys);
+  const readBefore = isPlainRecord(pending.readKeysBySource) ? pending.readKeysBySource : {};
+  const progressBefore = isPlainRecord(pending.sourceQueryProgress) ? pending.sourceQueryProgress : null;
+  const entry = progressBefore && isPlainRecord(progressBefore[sourceId]) ? progressBefore[sourceId] : null;
+  const unreadAfter = entry && Array.isArray(entry.unreadListings)
+    ? entry.unreadListings.filter(listing => !keySet.has(listing?.key))
+    : null;
+  // Every result list was walked and the last unread listing has now been
+  // read: nothing is missing, so the platform finished and its date moves.
+  const completed = uniqueSourceIds(pending.completedSourceIds);
+  const finishedNow = unreadAfter !== null && unreadAfter.length === 0 && entry.unreadListings.length > 0
+    && uniqueSourceIds(pending.walkCompleteSourceIds).includes(sourceId) && !completed.includes(sourceId);
+  return {
+    ...pending,
+    readKeysBySource: { ...readBefore, [sourceId]: readKeyList([...(readBefore[sourceId] || []), ...keys]) },
+    ...(unreadAfter !== null
+      ? { sourceQueryProgress: { ...progressBefore, [sourceId]: { ...entry, unreadListings: unreadAfter } } }
+      : {}),
+    ...(finishedNow ? { completedSourceIds: [...completed, sourceId] } : {}),
+  };
+}
+
+/**
+ * Record a Skip on the staged result of the same run. A platform whose every
+ * result list was walked to its end is missing only the descriptions of known
+ * listings; those are saved as owed, so its date moves like a finished
+ * platform's and no scan re-walks the same days for them. A platform whose
+ * walk was cut short is left as it is: results it never saw cannot be owed.
+ * Returns the same object when nothing changes.
+ */
+export function applySourceSkipToPendingCoverage(pending, sourceId) {
+  if (!isPlainRecord(pending) || !isSafeSourceId(sourceId)) return pending;
+  if (!uniqueSourceIds(pending.walkCompleteSourceIds).includes(sourceId)) return pending;
+  const completed = uniqueSourceIds(pending.completedSourceIds);
+  const skipped = uniqueSourceIds(pending.skippedSourceIds);
+  if (completed.includes(sourceId) && skipped.includes(sourceId)) return pending;
+  return {
+    ...pending,
+    completedSourceIds: completed.includes(sourceId) ? completed : [...completed, sourceId],
+    skippedSourceIds: skipped.includes(sourceId) ? skipped : [...skipped, sourceId],
+  };
+}
+
+/**
  * Normalize the saved per-platform progress at the trust boundary.
  *
  * A platform blocked part-way keeps both halves of its work until its date
@@ -343,13 +468,18 @@ export function sourceReadKeysForRun(data, sourceIds, searchLocationText, readCo
   const locationKey = String(searchLocationText || '').trim();
   const contextKey = readContextKeyOf(readContextKey);
   const progress = currentSourceQueryProgress(data);
+  const ledger = normalizeSourceReadLedger(data?.sourceReadLedger);
   const out = {};
   for (const sourceId of uniqueSourceIds(sourceIds)) {
-    if (!hasOwn(progress, sourceId) || progress[sourceId].locationKey !== locationKey) continue;
-    if (!progress[sourceId].readKeys?.length) continue;
-    // Read under other job preferences: every listing is read and judged again.
-    if (progress[sourceId].readContextKey !== contextKey) continue;
-    out[sourceId] = [...progress[sourceId].readKeys];
+    // Read under other job preferences, or for another location: every listing
+    // is read and judged again.
+    const fromLedger = hasOwn(ledger, sourceId) && ledger[sourceId].locationKey === locationKey
+      && ledger[sourceId].readContextKey === contextKey ? ledger[sourceId].keys : [];
+    // Saved by a build that kept read listings with the blocked-run progress.
+    const fromProgress = hasOwn(progress, sourceId) && progress[sourceId].locationKey === locationKey
+      && progress[sourceId].readContextKey === contextKey ? progress[sourceId].readKeys || [] : [];
+    const keys = readKeyList([...fromProgress, ...fromLedger]);
+    if (keys.length > 0) out[sourceId] = keys;
   }
   return out;
 }
@@ -372,6 +502,9 @@ export function buildSourceCoverageCommitPatch(
     sourceQueryProgress,
     locationKey,
     readContextKey,
+    readKeysBySource,
+    skippedSourceIds,
+    participatingSourceIds,
   },
   nodeId,
 ) {
@@ -412,51 +545,107 @@ export function buildSourceCoverageCommitPatch(
     };
   }
 
+  const location = String(locationKey || '').trim();
+  const contextKey = readContextKeyOf(readContextKey);
+  const reported = isPlainRecord(sourceQueryProgress) ? sourceQueryProgress : {};
+  const reportedRead = isPlainRecord(readKeysBySource) ? readKeysBySource : {};
+
+  // Read listings go to the lasting ledger for every platform that reported
+  // any, finished or not. Listings judged under other job preferences or for
+  // another location are not carried: this run read everything again.
+  const ledgerBefore = normalizeSourceReadLedger(data?.sourceReadLedger);
+  const nextLedger = { ...ledgerBefore };
+  for (const sourceId of new Set([...Object.keys(reportedRead), ...Object.keys(reported)])) {
+    if (!isSafeSourceId(sourceId)) continue;
+    const fresh = readKeyList([
+      ...(Array.isArray(reportedRead[sourceId]) ? reportedRead[sourceId] : []),
+      ...(Array.isArray(reported[sourceId]?.readKeys) ? reported[sourceId].readKeys : []),
+    ]);
+    const prior = hasOwn(ledgerBefore, sourceId) ? ledgerBefore[sourceId] : null;
+    const priorKeys = prior && prior.locationKey === location && prior.readContextKey === contextKey ? prior.keys : [];
+    const legacy = hasOwn(priorProgress, sourceId) && priorProgress[sourceId].locationKey === location
+      && priorProgress[sourceId].readContextKey === contextKey ? priorProgress[sourceId].readKeys || [] : [];
+    const keys = readKeyList([...legacy, ...priorKeys, ...fresh]);
+    if (keys.length > 0) nextLedger[sourceId] = { keys, readContextKey: contextKey, locationKey: location };
+  }
+  const readSetFor = sourceId => new Set(hasOwn(nextLedger, sourceId) && nextLedger[sourceId].locationKey === location
+    && nextLedger[sourceId].readContextKey === contextKey ? nextLedger[sourceId].keys : []);
+
   // A finished platform starts clean. An unfinished one adds the queries this
   // run finished to those it already had, so the next run skips them all.
   const nextProgress = { ...priorProgress };
   for (const sourceId of completedIds) delete nextProgress[sourceId];
-  const reported = isPlainRecord(sourceQueryProgress) ? sourceQueryProgress : {};
   for (const sourceId of Object.keys(reported)) {
     if (!isSafeSourceId(sourceId) || completedIds.includes(sourceId)) continue;
     const finished = finishedQueryList(reported[sourceId]?.finishedQueries);
-    const read = readKeyList(reported[sourceId]?.readKeys);
-    const unread = unreadListingList(reported[sourceId]?.unreadListings);
-    if (finished.length === 0 && read.length === 0 && unread.length === 0) continue;
+    const read = readSetFor(sourceId);
+    // The not-done list is this run's own: it re-walked the unfinished queries,
+    // so anything an earlier run could not read was either read now or came
+    // back unread again.
+    const unreadListings = unreadListingList(reported[sourceId]?.unreadListings).filter(listing => !read.has(listing.key));
+    if (finished.length === 0 && unreadListings.length === 0) continue;
     const prior = hasOwn(priorProgress, sourceId) ? priorProgress[sourceId] : null;
-    const sameLocation = prior && prior.locationKey === String(locationKey || '').trim();
-    // Listings read by an earlier blocked run stay read. The not-done list is
-    // this run's own: it re-walked the unfinished queries, so anything an
-    // earlier run could not read was either read now or came back unread again.
-    // ...unless the job preferences changed: this run then read every listing
-    // again, and only what it read itself was judged under the new ones.
-    const contextKey = readContextKeyOf(readContextKey);
-    const sameContext = sameLocation && prior.readContextKey === contextKey;
-    const readKeys = readKeyList([...(sameContext ? prior.readKeys || [] : []), ...read]);
-    const readSet = new Set(readKeys);
-    const unreadListings = unread.filter(listing => !readSet.has(listing.key));
+    const sameLocation = prior && prior.locationKey === location;
     nextProgress[sourceId] = {
       finishedQueries: finishedQueryList([...(sameLocation ? prior.finishedQueries : []), ...finished]),
       oldestStartedAt: sameLocation ? Math.min(prior.oldestStartedAt, start) : start,
       bookmarkAt: null,
-      locationKey: String(locationKey || '').trim(),
-      ...(readKeys.length > 0 ? { readKeys, readContextKey: contextKey } : {}),
+      locationKey: location,
       ...(unreadListings.length > 0 ? { unreadListings } : {}),
     };
   }
   // An unfinished platform's bookmark does not move in this commit, though the
   // seeding above may have just written it down for the first time. Tie every
-  // kept entry to the bookmark as it now stands so it is still recognised next run.
+  // kept entry to the bookmark as it now stands so it is still recognised next
+  // run. Read listings live in the ledger now, so an entry holding nothing
+  // else is dropped.
   for (const sourceId of Object.keys(nextProgress)) {
+    const { readKeys: _readKeys, readContextKey: _readContextKey, ...entry } = nextProgress[sourceId];
+    if (entry.finishedQueries.length === 0 && !(entry.unreadListings?.length > 0)) {
+      delete nextProgress[sourceId];
+      continue;
+    }
     nextProgress[sourceId] = {
-      ...nextProgress[sourceId],
+      ...entry,
       bookmarkAt: hasOwn(next, sourceId) ? next[sourceId].coverageStartedAt : null,
     };
+  }
+
+  // Owed listings. Each platform that took part uses one of an owed listing's
+  // scans unless it read the listing; a platform that Skip moved on adds the
+  // listings it could not read.
+  const owedBefore = normalizeSourceOwedListings(data?.sourceOwedListings);
+  const nextOwed = { ...owedBefore };
+  const skipped = new Set(uniqueSourceIds(skippedSourceIds));
+  const participants = uniqueSourceIds(participatingSourceIds);
+  for (const sourceId of participants.length > 0 ? participants : new Set([...completedIds, ...Object.keys(reported)])) {
+    if (!isSafeSourceId(sourceId)) continue;
+    const prior = hasOwn(owedBefore, sourceId) && owedBefore[sourceId].locationKey === location ? owedBefore[sourceId].listings : [];
+    const read = readSetFor(sourceId);
+    const kept = [];
+    const keptKeys = new Set();
+    for (const listing of prior) {
+      if (read.has(listing.key) || listing.attempts + 1 >= SOURCE_OWED_MAX_SCANS) continue;
+      kept.push({ ...listing, attempts: listing.attempts + 1 });
+      keptKeys.add(listing.key);
+    }
+    if (skipped.has(sourceId) && completedIds.includes(sourceId)) {
+      const priorKeys = new Set(prior.map(listing => listing.key));
+      for (const listing of unreadListingList(reported[sourceId]?.unreadListings)) {
+        if (read.has(listing.key) || priorKeys.has(listing.key) || keptKeys.has(listing.key)) continue;
+        kept.push({ ...listing, attempts: 0 });
+        keptKeys.add(listing.key);
+      }
+    }
+    if (kept.length > 0) nextOwed[sourceId] = { listings: kept, locationKey: location };
+    else if (hasOwn(owedBefore, sourceId) && owedBefore[sourceId].locationKey === location) delete nextOwed[sourceId];
   }
   const hadProgress = Object.keys(normalizeSourceQueryProgress(data?.sourceQueryProgress)).length > 0;
   return {
     sourceCoverage: next,
     ...(hadProgress || Object.keys(nextProgress).length > 0 ? { sourceQueryProgress: nextProgress } : {}),
+    ...(Object.keys(ledgerBefore).length > 0 || Object.keys(nextLedger).length > 0 ? { sourceReadLedger: nextLedger } : {}),
+    ...(Object.keys(owedBefore).length > 0 || Object.keys(nextOwed).length > 0 ? { sourceOwedListings: nextOwed } : {}),
   };
 }
 
