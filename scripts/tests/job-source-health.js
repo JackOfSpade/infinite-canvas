@@ -3,8 +3,8 @@ import { assessSourceHealth, DESCRIPTIONS_NOT_FETCHED_CODE, descriptionsNotFetch
 import { collectionScopeCaveatsFromSourceResults, describeSourceHealthFailures, normalizeCollectionScopeCaveats, sourceHealthCaveats } from '../../src/utils/jobCollectionScopeCaveats.js';
 import { AUTOMATIC_DESCRIPTION_SOLVE_WAIT_MS, automaticDescriptionSolveDue, EMPLOYER_POSTING_READ_SOURCE_IDS, employerPostingReadOnSkip, isJobSourceWarningGating } from '../../src/utils/jobSourceWarningPolicy.js';
 import { EMPLOYER_POSTING_READ_MAX_LISTINGS, readListingsFromEmployerPostings } from '../../electron/ipc/jobs/employerPostingRead.js';
-import { listingReadProgress, listingsReadElsewhere } from '../../electron/ipc/jobs/sourceRules.js';
-import { applyResolvedListingsToPendingCoverage } from '../../src/utils/jobSearchSourceCoverage.js';
+import { linkedInWalkComplete, listingReadProgress, listingsReadElsewhere } from '../../electron/ipc/jobs/sourceRules.js';
+import { applyResolvedListingsToPendingCoverage, applySourceSolveToPendingCoverage, buildSourceCoverageCommitPatch, sourcesWithoutDateProgress } from '../../src/utils/jobSearchSourceCoverage.js';
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { appendWalkGuard, CHALLENGE_ESCALATE_MS, descriptionPanelPacing, DETAIL_BLOCK_MAX_TOTAL_REPROBES, detailBlockCooldownMs, panelWindowWaitMs, revealLowGrowthStop, selectManualSourcePageJobs, WALK_GUARD_MAX } from '../../electron/ipc/browser/manualScraper.js';
 import { linkedInEnrichedRow } from '../../electron/extractors/apiExtractors.js';
@@ -425,6 +425,47 @@ export default [
       const all = applyResolvedListingsToPendingCoverage(partly, 'google', ['b']);
       assert.deepEqual(all.completedSourceIds, ['indeed', 'google']);
       assert.deepEqual(applyResolvedListingsToPendingCoverage(pending, 'linkedin', ['x']).completedSourceIds, ['indeed']);
+    },
+  },
+  {
+    name: 'LinkedIn counts as fully walked only when every query finished in this run or an earlier blocked one',
+    run() {
+      const queries = ['a', 'b', 'c'];
+      assert.equal(linkedInWalkComplete(queries, ['a', 'b', 'c']), true);
+      assert.equal(linkedInWalkComplete(queries, ['a', 'c']), false, 'a query cut short by a block');
+      assert.equal(linkedInWalkComplete(queries, ['b', 'c'], ['b', 'c']), true, 'query a finished in an earlier blocked run and was left out');
+      assert.equal(linkedInWalkComplete(queries, ['b'], ['b', 'c']), false);
+      assert.equal(linkedInWalkComplete([], []), false);
+    },
+  },
+  {
+    name: 'A Solve that clears a fully walked platform moves its date and keeps what it could not read as owed',
+    run() {
+      const start = { sourceCoverage: { linkedin: { coverageStartedAt: 1000, completedAt: 2000, runId: 'r0' } } };
+      const pending = { runId: 'r', collectionStartedAt: 5000, collectionCompletedAt: 6000, completedSourceIds: [],
+        participatingSourceIds: ['linkedin'], walkCompleteSourceIds: ['linkedin'], locationKey: 'Canada', readContextKey: 'p',
+        sourceQueryProgress: { linkedin: { finishedQueries: ['q'], unreadListings: [{ key: 'a', title: 'A', company: 'C', url: 'https://l.test/a' }, { key: 'b', title: 'B', company: 'C', url: '' }] } } };
+      assert.equal(sourcesWithoutDateProgress(start, pending, 'hub', ['linkedin'])[0].walkComplete, true);
+      assert.equal(sourcesWithoutDateProgress(start, pending, 'hub', ['linkedin'])[0].unreadListings, 2);
+
+      // Still blocked after the pass: the user can Solve again or Skip.
+      const stillBlocked = applySourceSolveToPendingCoverage(pending, 'linkedin', ['a'], false);
+      assert.deepEqual(stillBlocked.completedSourceIds, []);
+      assert.equal(sourcesWithoutDateProgress(start, stillBlocked, 'hub', ['linkedin']).length, 1);
+
+      // Block cleared with one listing that can never be read.
+      const cleared = applySourceSolveToPendingCoverage(pending, 'linkedin', ['a'], true);
+      assert.deepEqual(cleared.completedSourceIds, ['linkedin']);
+      assert.equal(sourcesWithoutDateProgress(start, cleared, 'hub', ['linkedin']).length, 0, 'no stalled-date popup');
+      const data = { ...start, ...buildSourceCoverageCommitPatch(start, cleared, 'hub') };
+      assert.equal(data.sourceCoverage.linkedin.coverageStartedAt, 5000);
+      assert.deepEqual(data.sourceOwedListings.linkedin.listings.map(listing => listing.key), ['b']);
+
+      // A pass that read nothing but cleared the block also finishes it.
+      assert.deepEqual(applySourceSolveToPendingCoverage(pending, 'linkedin', [], true).completedSourceIds, ['linkedin']);
+      // A walk that was cut short is never finished by a Solve.
+      const cutShort = { ...pending, walkCompleteSourceIds: [] };
+      assert.deepEqual(applySourceSolveToPendingCoverage(cutShort, 'linkedin', ['a', 'b'], true).completedSourceIds, []);
     },
   },
   {

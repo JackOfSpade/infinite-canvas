@@ -119,7 +119,7 @@ import {
   sourcesBehindLatest,
   coverageSourceIdsForLocation,
   sourceFinishedQueriesForRun,
-  applyResolvedListingsToPendingCoverage,
+  applySourceSolveToPendingCoverage,
   applySourceSkipToPendingCoverage,
   sourceOwedKeysForRun,
   sourceReadContextKey,
@@ -1654,7 +1654,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           const names = stalledSources.map(entry => JOB_SOURCE_BY_ID[entry.sourceId]?.name || entry.sourceId);
           EventLogger.error(
             `[JobSearch][${id}] Scan date did not move run=${runId}: `
-            + stalledSources.map(entry => `${entry.sourceId} resumes ${entry.resumesFrom == null ? 'unset' : new Date(entry.resumesFrom).toISOString()}`).join(', '),
+            + stalledSources.map(entry => `${entry.sourceId} resumes ${entry.resumesFrom == null ? 'unset' : new Date(entry.resumesFrom).toISOString()}`
+              + ` (result lists ${entry.walkComplete ? 'fully walked' : 'not fully walked'}, ${entry.unreadListings} listing(s) unread)`).join(', '),
           );
           addToast({
             title: `Scan date did not move: ${names.join(', ')}`,
@@ -7905,11 +7906,18 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // not open those listings again.
       const resolvedRunId = e.detail?.jobRunId || jobRunIdRef.current || null;
       const resolvedKeys = items.map(item => sourceJobKey(item?.source ? item : { ...item, source: resolvedSourceId })).filter(Boolean);
+      const sourceGateCleared = !remaining.some(w => w?.sourceId === resolvedSourceId && isJobSourceWarningGating(w));
       updateGlobal(id, (node) => {
         const staged = node?.data?.pendingSourceCoverage;
+        // A Solve that leaves this platform with nothing to act on ends the
+        // user's chance to Skip it, so its date moves here (see the helper).
+        // Without this the platform re-read the same days on every scan.
         const next = staged?.runId && staged.runId === resolvedRunId
-          ? applyResolvedListingsToPendingCoverage(staged, resolvedSourceId, resolvedKeys)
+          ? applySourceSolveToPendingCoverage(staged, resolvedSourceId, resolvedKeys, sourceGateCleared)
           : staged;
+        if (next !== staged && next.completedSourceIds !== staged.completedSourceIds) {
+          EventLogger.log(`[JobSearch][${id}] Solve on ${resolvedSourceId} finished it: every result list was walked, so its date moves and any listing still unread stays owed`);
+        }
         return {
           pendingJobs: mergedPending,
           jobCount: mergedPending.length,

@@ -241,6 +241,19 @@ export function listingReadProgress(jobs, readElsewhereKeys = null) {
 }
 
 /**
+ * Whether LinkedIn's result lists were all walked to their end: every query
+ * either finished in this run or was left out of it because an earlier blocked
+ * run had already finished it. `ranQueries` is null when this run ran them all.
+ */
+export function linkedInWalkComplete(queries, finishedQueries, ranQueries = null) {
+  const all = Array.isArray(queries) ? queries : [];
+  if (all.length === 0) return false;
+  const finished = new Set(Array.isArray(finishedQueries) ? finishedQueries : []);
+  const ran = new Set(Array.isArray(ranQueries) ? ranQueries : all);
+  return all.every(query => finished.has(query) || !ran.has(query));
+}
+
+/**
  * The keys of one platform's unread listings that another platform read in the
  * same scan. The scan scores that other copy, so this one is not owed: it counts
  * as read and is not opened again. "Same job" is the scan's own cross-platform

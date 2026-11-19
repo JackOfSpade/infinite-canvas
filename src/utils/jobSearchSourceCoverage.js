@@ -391,6 +391,20 @@ export function applySourceSkipToPendingCoverage(pending, sourceId) {
 }
 
 /**
+ * Record a finished Solve pass on the staged result of the same run. What it
+ * read counts as read. When the pass also leaves the platform with no block to
+ * act on (`gateCleared`), the run carries on by itself and the user can no
+ * longer Skip, so the platform is treated as Skip treats it: with every result
+ * list walked its date moves, and listings that still could not be read (no
+ * link, a page that will not load) stay owed. Returns the same object when
+ * nothing changes.
+ */
+export function applySourceSolveToPendingCoverage(pending, sourceId, resolvedKeys, gateCleared) {
+  const read = applyResolvedListingsToPendingCoverage(pending, sourceId, resolvedKeys);
+  return gateCleared === true ? applySourceSkipToPendingCoverage(read, sourceId) : read;
+}
+
+/**
  * Normalize the saved per-platform progress at the trust boundary.
  *
  * A platform blocked part-way keeps both halves of its work until its date
@@ -668,7 +682,14 @@ export function sourcesWithoutDateProgress(data, pendingSourceCoverage, nodeId, 
     .filter(sourceId => !hasOwn(after, sourceId) || !hasOwn(before, sourceId)
       ? !uniqueSourceIds(pendingSourceCoverage?.completedSourceIds).includes(sourceId)
       : after[sourceId].coverageStartedAt <= before[sourceId].coverageStartedAt)
-    .map(sourceId => ({ sourceId, resumesFrom: jobSearchSourceAnchor(afterData, nodeId, sourceId).timestamp }));
+    .map(sourceId => ({
+      sourceId,
+      resumesFrom: jobSearchSourceAnchor(afterData, nodeId, sourceId).timestamp,
+      // Why it stalled, for the log: a walk cut short cannot be skipped past,
+      // while a full walk with unread listings is waiting on Solve or Skip.
+      walkComplete: uniqueSourceIds(pendingSourceCoverage?.walkCompleteSourceIds).includes(sourceId),
+      unreadListings: unreadListingList(pendingSourceCoverage?.sourceQueryProgress?.[sourceId]?.unreadListings).length,
+    }));
 }
 
 /**

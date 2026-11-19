@@ -33,7 +33,7 @@ import { getJobsSettings } from '../settings.js';
 import { CANCEL_CAUSE_LABELS, CHECKPOINT_PRESERVING_ABORT_CAUSES, JobOperationSupersededError, admitContinuationProviderWork, checkpointContinuationBeforeReply, claimExactJobRunExecution, isJobOperationSupersededError, normalizeCareerSnapshotIdentifier, requireSavedJobRecoveryCanvas, shouldDiscardJobRunAfterAbort } from './analysisStore.js';
 import { abortableDelay, authoritativeFreshJobSearchWindow, buildJobTasks, completedJobSourceIds, effectiveJobSearchWindow, enrichLinkedInDescriptionsLocked, getEgressIp, glassdoorPostedBucket, listWalkStoppedByProviderBlock, manualAiPreSearchRecoveryWindow, narrowJobSearchSourceWindows, runCooldownProbe, selectIndeedResumePlan, withFreshManualScraperTelemetry } from './collection.js';
 import { reconcileSearchFunnel, validateExactResumeRun } from './scoring.js';
-import { ACTIVE_SOURCE_IDS, ACTIVE_SOURCE_ID_SET, BACKGROUND_PROVIDER_ONLY_SOURCE_IDS, BROWSER_SCRAPE_ORDER, EXACT_RESUME_PROVIDER_ONLY_SOURCE_IDS, JOB_SOURCE_DISPLAY_NAMES, WALK_GUARD_WARNING_CODE, acceptProviderSearchResults, boundedDedupProvenance, boundedRecoveryBlockedUrls, canRecoverGatheredRunDirectly, capPlatformJobsAfterWindow, dedupByTitleCompany, extractExecutedGoogleQueryStrings, filterAndDedupJobsByPostedSince, filterJobsByDescriptionEvidence, getCompletedQueriesFromDetail, getEffectiveSourceWarning, getQueryProgressTotal, hasResolvedJobDescription, jobSourceAuthPreflightScope, jobSourceRecoveryDisposition, linkedInBrowserUnavailableWarning, linkedInShortDescriptionWarning, listingReadProgress, listingsReadElsewhere, mergeJobSourceCollectionCap, mergeRoleScreenedJobs, orderedBlockedManualSourceUrls, reconcileTitleRelevanceFunnel, refreshManualSourceUrlIndex, sanitizeWalkGuards, synthScrapeWarning, walkGuardWarning } from './sourceRules.js';
+import { ACTIVE_SOURCE_IDS, ACTIVE_SOURCE_ID_SET, BACKGROUND_PROVIDER_ONLY_SOURCE_IDS, BROWSER_SCRAPE_ORDER, EXACT_RESUME_PROVIDER_ONLY_SOURCE_IDS, JOB_SOURCE_DISPLAY_NAMES, WALK_GUARD_WARNING_CODE, acceptProviderSearchResults, boundedDedupProvenance, boundedRecoveryBlockedUrls, canRecoverGatheredRunDirectly, capPlatformJobsAfterWindow, dedupByTitleCompany, extractExecutedGoogleQueryStrings, filterAndDedupJobsByPostedSince, filterJobsByDescriptionEvidence, getCompletedQueriesFromDetail, getEffectiveSourceWarning, getQueryProgressTotal, hasResolvedJobDescription, jobSourceAuthPreflightScope, jobSourceRecoveryDisposition, linkedInBrowserUnavailableWarning, linkedInShortDescriptionWarning, linkedInWalkComplete, listingReadProgress, listingsReadElsewhere, mergeJobSourceCollectionCap, mergeRoleScreenedJobs, orderedBlockedManualSourceUrls, reconcileTitleRelevanceFunnel, refreshManualSourceUrlIndex, sanitizeWalkGuards, synthScrapeWarning, walkGuardWarning } from './sourceRules.js';
 import { clearLinkedInCeiling, jobsTelemetry, linkedinCeiling, rememberLinkedInCeiling } from './state.js';
 import { canWriteJobResolveTelemetry, indeedPreflightObservationNote, indeedWarningRequiresManualVerification, recordHistoryWrite, recordJobSourceDispatch, recordJobSourceProgress, recordJobsSourceScope, recordLinkedinEnrichPass, restoreJobsTelemetryIfCurrentRun, syncIndeedSessionStatusFromScrape } from './telemetry.js';
 import electronPkg from 'electron';
@@ -2846,7 +2846,10 @@ export function registerSearchHandlers(ctx) {
           Number(data.gathered) - data.jobs.length - capOverflow
             - Number(data.crossQueryDuplicates || 0)
             - Number(data.collectionAgeDropped || 0)
-            - Number(data.platformDuplicateDropped || 0),
+            - Number(data.platformDuplicateDropped || 0)
+            // Listings that name another country are removed before the
+            // platform allowance, so they are missing from `data.jobs` too.
+            - Number(data.countryScopeDropped || 0),
         );
         if (unattributed > 0) bySource[sid].unattributedShortfall = unattributed;
         if (capOverflow > 0) {
@@ -3217,24 +3220,38 @@ export function registerSearchHandlers(ctx) {
             const jobsBySource = Object.fromEntries(Object.entries(sourceResults || {})
               .map(([sourceId, result]) => [sourceId, result?.jobs]));
             for (const sourceId of activeSourceIds) {
-              const readsCards = sourceId === 'indeed' || tasks.some(task => task?.sourceId === sourceId);
+              // LinkedIn's result lists carry no descriptions: its listings are
+              // read one by one afterwards, and only the rows that reached that
+              // step need reading, so its read and unread listings come from
+              // that pool rather than from the raw result rows.
+              const isLinkedIn = sourceId === 'linkedin';
+              const readsCards = isLinkedIn || sourceId === 'indeed' || tasks.some(task => task?.sourceId === sourceId);
+              const cardRows = isLinkedIn
+                ? descriptionRecoveryJobs.filter(job => job?.source === 'linkedin')
+                : sourceResults[sourceId]?.jobs;
               // Unread here but read on another platform this scan: not owed.
-              const readElsewhere = readsCards ? listingsReadElsewhere(sourceId, jobsBySource) : null;
+              const readElsewhere = readsCards && !isLinkedIn ? listingsReadElsewhere(sourceId, jobsBySource) : null;
               if (readElsewhere?.size > 0) logger.info(`[Jobs][${sourceId}] ${readElsewhere.size} unread listing(s) were read on another platform this scan and count as read`);
               if (readsCards) {
-                const readKeys = listingReadProgress(sourceResults[sourceId]?.jobs, readElsewhere).readKeys;
+                const readKeys = listingReadProgress(cardRows, readElsewhere).readKeys;
                 if (readKeys.length > 0) sourceReadKeysReported[sourceId] = readKeys;
               }
               if (completedSourceIds.includes(sourceId)) continue;
-              if (readsCards && sourceId !== 'indeed') {
+              const linkedIn = isLinkedIn
+                ? (Array.isArray(httpResults) ? httpResults : []).find(result => result?.sourceId === 'linkedin')
+                : null;
+              if (isLinkedIn) {
+                if (linkedInWalkComplete(queries, linkedIn?.finishedQueries, carriedQueriesBySource.linkedin)) {
+                  sourceWalkCompleteIds.push(sourceId);
+                }
+              } else if (readsCards && sourceId !== 'indeed') {
                 const ledger = finalState.manifest.sources?.[sourceId]?.queries || {};
                 const walked = queries.every((_query, index) => ledger[`#${index}`]?.terminal === true
                   || carriedQueryPlans?.[sourceId]?.[index]?.terminal === true);
                 if (queries.length > 0 && walked) sourceWalkCompleteIds.push(sourceId);
               }
               let finished = [];
-              if (sourceId === 'linkedin') {
-                const linkedIn = (Array.isArray(httpResults) ? httpResults : []).find(result => result?.sourceId === 'linkedin');
+              if (isLinkedIn) {
                 finished = Array.isArray(linkedIn?.finishedQueries) ? linkedIn.finishedQueries : [];
               } else if (BROWSER_SCRAPE_ORDER.includes(sourceId)) {
                 const ledger = finalState.manifest.sources?.[sourceId]?.queries || {};
@@ -3245,7 +3262,7 @@ export function registerSearchHandlers(ctx) {
               // Listing-level progress for a platform read card by card: what
               // this run read (not opened again next time) and what came back
               // unread (the work still owed).
-              const listingProgress = readsCards ? listingReadProgress(sourceResults[sourceId]?.jobs, readElsewhere) : null;
+              const listingProgress = readsCards ? listingReadProgress(cardRows, readElsewhere) : null;
               if (finished.length > 0 || listingProgress?.unreadListings.length > 0) {
                 sourceQueryProgress[sourceId] = {
                   finishedQueries: finished,
