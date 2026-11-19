@@ -1,8 +1,43 @@
 import { googleJobsDocumentId, isGoogleJobsInternalUrl } from './jobListingUrl.js';
 
+const TRACKING_PARAM_RE = /^(utm_.+|trk|trackingId|refId)$/i;
+// Kept in step with OFFICIAL_LEVELS in electron/ipc/officialPostingFields.js.
+const OFFICIAL_POSTING_LEVELS = ['L1', 'L2', 'L3', 'L4'];
+
+// The employer's own posting page names one job whichever board listed it.
+// Two spellings are returned: the page address as given, and the same address
+// without parameters that only repeat its last path segment or record where the
+// visitor came from (Greenhouse serves /jobs/123 and /jobs/123?gh_jid=123).
+export function officialPostingUrlKeys(raw) {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:') return [];
+    url.hostname = url.hostname.toLowerCase().replace(/^www\./, '');
+    url.hash = '';
+    url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+    for (const key of [...url.searchParams.keys()]) {
+      if (TRACKING_PARAM_RE.test(key)) url.searchParams.delete(key);
+    }
+    url.searchParams.sort();
+    const full = url.href;
+    const lastSegment = decodeURIComponent(url.pathname.split('/').pop() || '');
+    for (const [key, value] of [...url.searchParams.entries()]) {
+      if (key === 'gh_src' || (lastSegment && value === lastSegment)) url.searchParams.delete(key);
+    }
+    return [...new Set([full, url.href])];
+  } catch { return []; }
+}
+
+// Only a verified employer-source posting counts; a lead or a miss names nothing.
+function verifiedOfficialPostingKeys(posting) {
+  if (!posting || typeof posting !== 'object' || Array.isArray(posting)) return [];
+  if (!OFFICIAL_POSTING_LEVELS.includes(posting.level) || !['found', 'link-only'].includes(posting.outcome)) return [];
+  return officialPostingUrlKeys(posting.sourceUrl || posting.officialApplyUrl);
+}
+
 // Match postings, never just title/company: a later requisition can reuse both.
 export function applicationListingKeys(job = {}) {
-  const keys = [];
+  const keys = [...verifiedOfficialPostingKeys(job.officialPosting)];
   for (const row of [job, ...(Array.isArray(job.postingVariants) ? job.postingVariants : [])]) {
     for (const raw of [row?.url, row?.googleCardUrl]) {
       try {
@@ -19,7 +54,7 @@ export function applicationListingKeys(job = {}) {
         url.hostname = url.hostname.toLowerCase().replace(/^www\./, '');
         // Other job sites may use fragment routes too; preserve them.
         for (const key of [...url.searchParams.keys()]) {
-          if (/^(utm_.+|trk|trackingId|refId)$/i.test(key)) url.searchParams.delete(key);
+          if (TRACKING_PARAM_RE.test(key)) url.searchParams.delete(key);
         }
         url.searchParams.sort();
         url.pathname = url.pathname.replace(/\/+$/, '') || '/';

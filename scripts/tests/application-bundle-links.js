@@ -148,6 +148,54 @@ export default [
       assert.equal(prior.id, '123e4567-e89b-42d3-a456-426614174888');
     });
   } },
+  { name: 'a verified employer posting identifies the job across boards, and nothing weaker does', run() {
+    const official = (extra = {}) => ({ level: 'L2', outcome: 'found', sourceUrl: 'https://job-boards.greenhouse.io/acme/jobs/123', ...extra });
+    const key = 'https://job-boards.greenhouse.io/acme/jobs/123';
+    const onGoogle = applicationListingKeys({ googleCardUrl: 'https://www.google.com/search?udm=8&htidocid=AbC123', officialPosting: official() });
+    const onLinkedIn = applicationListingKeys({ url: 'https://ca.linkedin.com/jobs/view/eng-at-acme-1', officialPosting: official({ sourceUrl: `${key}?gh_jid=123&gh_src=xyz` }) });
+    assert.ok(onGoogle.includes(key) && onGoogle.includes('google-job:AbC123'));
+    assert.ok(onLinkedIn.includes(key) && onLinkedIn.includes(`${key}?gh_jid=123&gh_src=xyz`));
+    assert.deepEqual(filterAppliedListings([{ url: 'https://ca.linkedin.com/jobs/view/eng-at-acme-1', officialPosting: official() }], new Set(onGoogle)).removed, 1);
+    // A sibling requisition, an unverified lead, a miss and a malformed record add no key.
+    assert.ok(!applicationListingKeys({ officialPosting: official({ sourceUrl: 'https://job-boards.greenhouse.io/acme/jobs/124?gh_jid=124' }) }).includes(key));
+    for (const officialPosting of [official({ level: 'L5' }), official({ outcome: 'not-found' }), official({ outcome: 'closed' }),
+      official({ sourceUrl: 'http://job-boards.greenhouse.io/acme/jobs/123' }), official({ sourceUrl: 'not a url' }), [official()], 'x', null]) {
+      assert.deepEqual(applicationListingKeys({ officialPosting }), [], JSON.stringify(officialPosting));
+    }
+    assert.deepEqual(applicationListingKeys({ officialPosting: official({ outcome: 'link-only', sourceUrl: '', officialApplyUrl: `${key}/` }) }), [key]);
+    // A parameter that carries the id on a shared path is identity and stays.
+    assert.deepEqual(applicationListingKeys({ officialPosting: official({ sourceUrl: 'https://acme.test/careers/job?reqId=77' }) }), ['https://acme.test/careers/job?reqId=77']);
+  } },
+  { name: 'a bundle saved before official keys existed is matched through its saved listing header', async run() {
+    await withReceiptFixture(async ({ canvasFilePath, out }) => {
+      const official = 'https://job-boards.greenhouse.io/acme/jobs/123';
+      const card = { nodeId: 'other-board', url: 'https://ca.linkedin.com/jobs/view/eng-at-acme-9', ...FIXTURE_JOB,
+        officialPosting: { level: 'L2', outcome: 'found', sourceUrl: `${official}?gh_jid=123` } };
+      const sibling = { ...card, nodeId: 'sibling', officialPosting: { level: 'L2', outcome: 'found', sourceUrl: 'https://job-boards.greenhouse.io/acme/jobs/124' } };
+      const save = async (listing, hashed = listing) => {
+        const auditPath = path.join(out, 'Generation Audit.json');
+        const audit = JSON.parse(await fs.readFile(auditPath, 'utf8'));
+        audit.finalArtifacts.originalJobListingSha256 = crypto.createHash('sha256').update(hashed).digest('hex');
+        await fs.writeFile(auditPath, JSON.stringify(audit));
+        await fs.writeFile(path.join(out, 'Original Job Listing.md'), listing);
+      };
+      const listing = check => `# Senior Engineer\n\n**Company:** Acme Corp\n**Official posting:** <${official}>\n**Official posting check:** ${check}\n\n---\n\nBody\n**Official posting:** <https://job-boards.greenhouse.io/acme/jobs/124>\n`;
+      // No listing file: the bundle still loads and the card is only a repost.
+      let result = await findSavedApplicationLinks({ canvasFilePath, jobs: [card, sibling] });
+      assert.deepEqual([result.links.length, result.roleMatches.map(m => m.nodeId)], [0, ['other-board', 'sibling']]);
+      await save(listing('Exact official posting verified'));
+      result = await findSavedApplicationLinks({ canvasFilePath, jobs: [card, sibling] });
+      assert.deepEqual(result.links.map(l => l.nodeId), ['other-board']);
+      assert.equal(result.links[0].localApplication.savedDir, out);
+      assert.deepEqual(result.roleMatches.map(m => m.nodeId), ['sibling']);
+      assert.ok((await loadAppliedListingKeys(canvasFilePath)).has(official));
+      // An unverified header, or bytes the audit does not bind, name nothing.
+      await save(listing('No exact official posting found'));
+      assert.equal((await findSavedApplicationLinks({ canvasFilePath, jobs: [card] })).links.length, 0);
+      await save(listing('Exact official posting verified'), 'other bytes');
+      assert.equal((await findSavedApplicationLinks({ canvasFilePath, jobs: [card] })).links.length, 0);
+    });
+  } },
   { name: 'loadAppliedListingKeys returns verified listing keys and an empty set without receipts', async run() {
     await withReceiptFixture(async ({ canvasFilePath }) => {
       const keys = await loadAppliedListingKeys(canvasFilePath);

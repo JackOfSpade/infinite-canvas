@@ -1,4 +1,4 @@
-import { applicationListingKeys, selectPriorRoleApplication, selectSavedApplicationBundle } from '../../src/utils/applicationBundleIdentity.js';
+import { applicationListingKeys, officialPostingUrlKeys, selectPriorRoleApplication, selectSavedApplicationBundle } from '../../src/utils/applicationBundleIdentity.js';
 import { applicationWorkflowProgress } from './applicationWorkflowProgress.js';
 import { applicationUnitDiagnostics, bootstrapApplicationUnitState, advanceApplicationUnitState, locateGateFindings } from './applicationGateFindings.js';
 import { applicationUnitRegistry, structuredDocumentDigest, unitDigest, mergeUnitPatches, diffUnits } from './applicationUnitPatches.js';
@@ -15671,7 +15671,9 @@ export function localAiHandoffEvent({ type, resultRaw, revisionRound = null, res
     type: cleanText(type, 80),
     resultSha256: contentHash(resultRaw),
     revisionRound: Number.isFinite(revisionRound) ? revisionRound : null,
-    resume: resumeFit ? {
+    // The document a single-document job does not produce was never measured;
+    // its stand-in fit must not be recorded as a page count.
+    resume: resumeFit && !resumeFit.absent ? {
       pageCount: Number.isFinite(resumeFit.pageCount) ? resumeFit.pageCount : null,
       targetPageCount: Number.isFinite(resumeFit.targetPageCount) ? resumeFit.targetPageCount : null,
       layoutIssues: safeMeasuredLayoutIssues(resumeFit.layoutIssues),
@@ -15691,7 +15693,7 @@ export function localAiHandoffEvent({ type, resultRaw, revisionRound = null, res
       })).slice(0, 4),
       layout: handoffEventLayout(resumeFit.layout, resumeFit.contentUtilization),
     } : null,
-    coverLetter: coverLetterFit ? {
+    coverLetter: coverLetterFit && !coverLetterFit.absent ? {
       pageCount: Number.isFinite(coverLetterFit.pageCount) ? coverLetterFit.pageCount : null,
       targetPageCount: Number.isFinite(coverLetterFit.targetPageCount) ? coverLetterFit.targetPageCount : null,
       layoutIssues: safeMeasuredLayoutIssues(coverLetterFit.layoutIssues),
@@ -18234,6 +18236,20 @@ async function readVerifiedSavedApplicationBundles(canvas) {
       // A regenerated folder must never adopt an older receipt's job id.
       audit ??= JSON.parse(await readOwnedFile(dir, path.join(dir, 'Generation Audit.json'), { maxBytes: 4 * 1024 * 1024 }));
       if (audit.jobId !== jobId || audit.finalArtifacts?.resultSha256 !== receipt.resultSha256) continue;
+      // Receipts written before the employer posting joined the listing
+      // identity lack its key. The saved listing header records it, and the
+      // audit binds that file's exact bytes. A bundle whose header cannot be
+      // read keeps the keys it has.
+      try {
+        const listing = await readOwnedFile(dir, path.join(dir, 'Original Job Listing.md'), { maxBytes: 4 * 1024 * 1024 });
+        if (audit.finalArtifacts?.originalJobListingSha256 === contentHash(listing)) {
+          const header = listing.split(/\r?\n---\r?\n/)[0];
+          const official = /^\*\*Official posting:\*\*[ \t]+<([^>\r\n]+)>[ \t]*$/m.exec(header)?.[1];
+          if (official && /^\*\*Official posting check:\*\*[ \t]+(?:Exact official posting verified|Previously verified official posting)/m.test(header)) {
+            listingKeys = [...new Set([...listingKeys, ...officialPostingUrlKeys(official)])].sort();
+          }
+        }
+      } catch { /* scraped-link keys still identify this bundle */ }
       const auditJob = audit.job && typeof audit.job === 'object' ? audit.job : {};
       const str = value => (typeof value === 'string' ? value : '');
       bundles.push({ listingKeys, importedAt: receipt.importedAt,

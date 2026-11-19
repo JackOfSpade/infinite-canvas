@@ -611,6 +611,9 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
       const cards = allNodes.filter(node => node.type === 'jobcard' && !node.data?.localApplication);
       const jobs = cards.map(node => ({ nodeId: node.id, url: node.data?.url,
         googleCardUrl: node.data?.googleCardUrl, postingVariants: node.data?.postingVariants,
+        // A card found on another board is the applied job when its verified employer posting is the same page.
+        ...(node.data?.officialPosting ? { officialPosting: { level: node.data.officialPosting.level, outcome: node.data.officialPosting.outcome,
+          sourceUrl: node.data.officialPosting.sourceUrl, officialApplyUrl: node.data.officialPosting.officialApplyUrl } } : {}),
         title: typeof node.data?.title === 'string' ? node.data.title : '',
         company: typeof node.data?.company === 'string' ? node.data.company : '',
         location: typeof node.data?.location === 'string' ? node.data.location : '' }));
