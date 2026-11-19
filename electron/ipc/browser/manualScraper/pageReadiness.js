@@ -170,8 +170,9 @@ export function classifyManualChallengeSignals(signals = {}) {
     || signals.hasCloudflareTurnstileWidget
     || Number(signals.visibleRecaptchaFrames) > 0
     || Number(signals.visibleHCaptchaFrames) > 0
-    || signals.hasDataDomeFrame
-    || signals.hasDataDomeScript
+    // DataDome's block view has no captcha to solve, so it must not count
+    // as something a person can clear.
+    || ((signals.hasDataDomeFrame || signals.hasDataDomeScript) && !signals.hasDataDomeBlockFrame)
   );
   // `verification-text` is the ONLY verdict derived from free page prose, so it
   // is the only one an ordinary listing can trip by itself. Left uncorroborated
@@ -193,6 +194,7 @@ export function classifyManualChallengeSignals(signals = {}) {
     && !interstitialSized
     && !signals.verificationCompleted;
   const hardBlockCandidate = (!!signals.hasTerminalHardBlockText
+    || !!signals.hasDataDomeBlockFrame
     || signals.reason === 'verification-text'
     || signals.reason === 'google-sorry-recaptcha')
     && !textOnlyUncorroborated;
@@ -337,6 +339,14 @@ export async function getChallengeSignals(page) {
     // script that DataDome injects on every challenge page.
     const hasDataDomeFrame  = !!document.querySelector('iframe[src*="captcha-delivery.com"], iframe[title*="DataDome"]');
     const hasDataDomeScript = !!document.querySelector('script[src*="captcha-delivery.com"]');
+    // The frame's own address says which view DataDome served: `t=fe` is a
+    // captcha a person can solve, `t=bv` is the block view ("Access is
+    // temporarily restricted") with nothing to solve. Its text is in another
+    // origin, so this parameter is the only readable difference between them.
+    const hasDataDomeBlockFrame = [...document.querySelectorAll('iframe[src*="captcha-delivery.com"]')]
+      .some((frame) => {
+        try { return new URL(frame.src).searchParams.get('t') === 'bv'; } catch { return false; }
+      });
 
     // Google's "unusual traffic" interstitial (google.com/sorry/index) — a reCAPTCHA
     // "I'm not a robot" wall served when Google flags the session/IP. The reCAPTCHA
@@ -388,6 +398,7 @@ export async function getChallengeSignals(page) {
       hasIndeedCloudflareMarker,
       hasDataDomeFrame,
       hasDataDomeScript,
+      hasDataDomeBlockFrame,
     };
   }, MANUAL_VERIFICATION_TEXT_MARKERS, MANUAL_HARD_BLOCK_TEXT_MARKERS).catch((error) => ({
     isChallenge: false,
@@ -414,6 +425,7 @@ export async function getChallengeSignals(page) {
     hasIndeedCloudflareMarker: false,
     hasDataDomeFrame: false,
     hasDataDomeScript: false,
+    hasDataDomeBlockFrame: false,
   }));
   return classifyManualChallengeSignals(evaluated);
 }
@@ -441,6 +453,7 @@ export function formatChallengeEvidence(signals, key = null) {
     signals.hasIndeedCloudflareMarker ? 'indeedCfMarker=yes' : null,
     signals.hasDataDomeFrame ? 'dataDomeFrame=yes' : null,
     signals.hasDataDomeScript ? 'dataDomeScript=yes' : null,
+    signals.hasDataDomeBlockFrame ? 'dataDomeBlockFrame=yes' : null,
     signals.evaluationError ? `evaluateError=${JSON.stringify(signals.evaluationError)}` : null,
     signals.bodyHead ? `bodyHead=${JSON.stringify(signals.bodyHead)}` : null,
   ].filter(Boolean);
@@ -686,6 +699,7 @@ export async function waitForReady(page, sourceId, overlayBase, signal, resumeUr
             hcaptchaFrames: Number(signals.visibleHCaptchaFrames) || 0,
             dataDomeFrame: !!signals.hasDataDomeFrame,
             dataDomeScript: !!signals.hasDataDomeScript,
+            dataDomeBlockFrame: !!signals.hasDataDomeBlockFrame,
           },
         });
         await updateOverlay(page, {
@@ -752,6 +766,7 @@ export async function waitForReady(page, sourceId, overlayBase, signal, resumeUr
             hcaptchaFrames: Number(signals?.visibleHCaptchaFrames) || 0,
             dataDomeFrame: !!signals?.hasDataDomeFrame,
             dataDomeScript: !!signals?.hasDataDomeScript,
+            dataDomeBlockFrame: !!signals?.hasDataDomeBlockFrame,
           },
           browserProfile: BROWSER_LAUNCH_PROFILE,
           blockId,

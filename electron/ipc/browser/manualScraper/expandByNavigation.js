@@ -382,12 +382,18 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
           zipRecruiterClosedJobRedirect: isZipRecruiterClosedDetailRedirect(rawPageInfo.finalUrl),
         };
 
-        const appcastTemporarilyRestricted = sourceId === 'ziprecruiter'
+        // Appcast shows its restriction either as page text or inside
+        // DataDome's block frame. The frame can arrive after the first probe,
+        // so this is asked again after a foreground wait ends in a hard block.
+        const isAppcastRestricted = (signals) => sourceId === 'ziprecruiter'
           && isAppcastTemporaryRestriction({
-            url: rawPageInfo.finalUrl || fetchPage.url(),
+            url: signals?.url || rawPageInfo.finalUrl || fetchPage.url(),
             visibleText: rawPageInfo.visibleText,
+            dataDomeBlocked: !!signals?.hasDataDomeBlockFrame,
           });
-        if (appcastTemporarilyRestricted) {
+        // 'retry' re-opens this row after the list page reloaded; 'stop' ends
+        // the detail pass.
+        const recoverFromAppcastRestriction = async () => {
           const title = (job.title || job.url || '?').slice(0, 65);
           const retryNumber = zipRecruiterAppcastRestrictionRetries + 1;
           const recoveryAllowed = retryNumber <= ZIPRECRUITER_APPCAST_RESTRICTED_RECOVERY_RETRIES
@@ -421,11 +427,11 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
               detailPage = null;
               fetchPage = page;
             }
-            if (!await waitForAbortableDelay(waitMs, signal)) break;
+            if (!await waitForAbortableDelay(waitMs, signal)) return 'stop';
             await page.reload({ waitUntil: 'domcontentloaded', timeout: 12_000 }).catch(() => {});
             await injectOverlay(page).catch(() => {});
             const resultsReady = await waitForReady(page, sourceId, overlayBase, signal, listUrl);
-            if (!['ok', 'recovered'].includes(resultsReady)) break;
+            if (!['ok', 'recovered'].includes(resultsReady)) return 'stop';
             try {
               detailPage = await createDetailPage();
               fetchPage = detailPage;
@@ -433,8 +439,7 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
               detailPage = null;
               fetchPage = page;
             }
-            i--; // retry the exact outbound detail navigation after list-page refresh
-            continue;
+            return 'retry';
           }
 
           logger.warn(`[BrowserScraper] ZipRecruiter Appcast restriction persisted after the bounded recovery; stopping detail enrichment for this source`);
@@ -447,6 +452,13 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
             evidence: `Appcast temporarily restricted the ZipRecruiter outbound detail redirect for "${job.title || 'an untitled listing'}" after one safe recovery (close detail tab, wait, reload results, retry). Detail requests stopped to avoid escalating the restriction.`,
             suggestion: 'Wait before retrying, or switch ProtonVPN to a new working location. Then click Retry after IP change to reopen the saved ZipRecruiter results page and retry the detail pass. The app will not control your VPN or attempt to bypass the restriction.',
           };
+          return 'stop';
+        };
+        if (isAppcastRestricted(challengeSignals)) {
+          if (await recoverFromAppcastRestriction() === 'retry') {
+            i--; // retry the exact outbound detail navigation after list-page refresh
+            continue;
+          }
           break;
         }
 
@@ -504,6 +516,7 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
               hcaptchaFrames: Number(challengeSignals?.visibleHCaptchaFrames) || 0,
               dataDomeFrame: !!challengeSignals?.hasDataDomeFrame,
               dataDomeScript: !!challengeSignals?.hasDataDomeScript,
+              dataDomeBlockFrame: !!challengeSignals?.hasDataDomeBlockFrame,
             };
             recordManualScraperTelemetry({
               phase: 'detail-challenge', srcName: overlayBase.srcName,
@@ -654,6 +667,13 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
                 },
               }, { updateActive: false });
 
+              if (detailWaitResult === 'hard-block' && isAppcastRestricted(postWaitSignals)) {
+                if (await recoverFromAppcastRestriction() === 'retry') {
+                  i--;
+                  continue;
+                }
+                break;
+              }
               if (detailWaitResult === 'ok' || detailWaitResult === 'recovered') {
                 detailChallengeResolved = true;
                 logger.info(`[BrowserScraper] ${overlayBase.srcName}: detail verification resolved; continuing "${job.title || job.url || '?'}"`);

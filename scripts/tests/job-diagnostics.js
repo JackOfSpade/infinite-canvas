@@ -12953,6 +12953,34 @@ export default [
           visibleText: restrictedCopy,
         }),
       'only Appcast click redirects carrying both visible restriction markers enter the ZipRecruiter recovery path');
+      // 2026-11-19: Appcast served the restriction inside DataDome's block
+      // frame (t=bv). The top document held only the collector overlay's 38
+      // characters, so the text proof could never match and the scraper waited
+      // for a solve that page does not offer.
+      assert(isAppcastTemporaryRestriction({
+        url: 'https://click.appcast.io/t/abc?cid=1',
+        visibleText: 'Job Collector 0 jobs collected Pause',
+        dataDomeBlocked: true,
+      })
+        && !isAppcastTemporaryRestriction({
+          url: 'https://www.ziprecruiter.com/jobs/abc',
+          visibleText: '',
+          dataDomeBlocked: true,
+        }),
+      'an Appcast click redirect showing DataDome\'s block frame is the restriction even when its text is unreadable');
+      const dataDomeBlockView = classifyManualChallengeSignals({
+        isChallenge: true, reason: 'datadome-captcha', bodyTextLength: 38,
+        hasDataDomeFrame: true, hasDataDomeScript: true, hasDataDomeBlockFrame: true,
+      });
+      const dataDomeCaptcha = classifyManualChallengeSignals({
+        isChallenge: true, reason: 'datadome-captcha', bodyTextLength: 38,
+        hasDataDomeFrame: true, hasDataDomeScript: true, hasDataDomeBlockFrame: false,
+      });
+      assert(dataDomeBlockView.isHardBlock && !dataDomeBlockView.interactive
+        && resolveManualDetailChallengeDisposition({ signals: dataDomeBlockView }).disposition === 'terminal-stop'
+        && dataDomeCaptcha.interactive && !dataDomeCaptcha.isHardBlock
+        && resolveManualDetailChallengeDisposition({ signals: dataDomeCaptcha }).disposition === 'foreground-wait',
+      'DataDome\'s block view stops instead of waiting on the user, while its solvable captcha still waits');
       assert(zipRecruiterAppcastRestrictionBackoffMs(1) === 6_000
         && zipRecruiterAppcastRestrictionBackoffMs(2) === 12_000
         && zipRecruiterAppcastRestrictionBackoffMs(99) === 15_000

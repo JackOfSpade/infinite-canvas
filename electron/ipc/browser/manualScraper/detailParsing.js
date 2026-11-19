@@ -424,9 +424,11 @@ export function zipRecruiterRetryAfterMs(value, now = Date.now()) {
  * is an outbound click.appcast.io redirect reached from a still-working
  * ZipRecruiter results page. Require both the host and its visible copy so an
  * ordinary Appcast job page or another site's generic wording cannot trigger
- * the recovery.
+ * the recovery. Appcast also serves the same restriction through DataDome's
+ * block frame, whose copy sits in another origin and never reaches
+ * `visibleText`; there the host plus that frame is the proof.
  */
-export function isAppcastTemporaryRestriction({ url = '', visibleText = '' } = {}) {
+export function isAppcastTemporaryRestriction({ url = '', visibleText = '', dataDomeBlocked = false } = {}) {
   let isAppcastClick = false;
   try {
     const parsed = new URL(String(url || '').trim());
@@ -435,6 +437,7 @@ export function isAppcastTemporaryRestriction({ url = '', visibleText = '' } = {
     return false;
   }
   if (!isAppcastClick) return false;
+  if (dataDomeBlocked) return true;
   const text = String(visibleText || '').replace(/\s+/g, ' ').trim().toLowerCase();
   return text.includes('access is temporarily restricted')
     && text.includes('unusual activity from your device or network');

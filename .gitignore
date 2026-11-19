@@ -12,6 +12,7 @@ dist
 dist-ssr
 dist-electron
 release/
+release-interview/
 
 # Sensitive — secrets, signing keys, env variants
 .env
