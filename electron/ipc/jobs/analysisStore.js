@@ -1324,7 +1324,7 @@ export async function discardJobAnalysisSnapshot(canvasFilePath, nodeId, { trash
     // rather than making a later report guess that re-analysis erased data.
     await recordAnalysisRecoveryLifecycle({
       operation: 'discard', result: failure ? 'partial' : 'discarded',
-      reason: lifecycleReason === 'career-data-clear' ? 'career-data-clear' : 'run-discard',
+      reason: ['career-data-clear', 'scrape-clear', 'node-delete'].includes(lifecycleReason) ? lifecycleReason : 'run-discard',
       canvasFilePath, ownerId: owner, runId: requestedRunId,
       discardedArtifacts: Object.values(artifacts).filter(artifact => artifact?.cleared === true).length,
     });

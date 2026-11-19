@@ -804,7 +804,7 @@ export function discardDeletedJobAnalysisSnapshots(nodes, canvasFilePath, onFail
       continue;
     }
     try {
-      Promise.resolve(discardSnapshot(discard)).then((result) => {
+      Promise.resolve(discardSnapshot({ ...discard, clearKind: 'node-delete' })).then((result) => {
         const safeNoop = isSafeJobAnalysisCleanupNoop(result);
         if (result?.success !== true || (result?.ok !== true && !safeNoop)) {
           const detail = result?.error || result?.reason;

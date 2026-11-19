@@ -435,6 +435,26 @@ export default [
     },
   },
   {
+    name: 'a discard receipt names the action that removed the saved analysis',
+    run: async () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-analysis-lifecycle-reason-'));
+      const journal = path.join(dir, 'analysis-recovery-lifecycle.json');
+      try {
+        for (const reason of ['scrape-clear', 'node-delete', 'career-data-clear', 'not-a-reason']) {
+          await recordJobAnalysisRecoveryLifecycle(journal, { operation: 'discard', result: 'discarded', reason,
+            canvasFilePath: '/private/canvas.json', ownerId: 'hub-private' });
+        }
+        const events = readJobAnalysisRecoveryLifecycle(journal, { canvasFilePath: '/private/canvas.json', ownerIds: new Set(['hub-private']) }).events;
+        assert(events.map(event => event.reason).sort().join() === 'career-data-clear,node-delete,scrape-clear,unknown',
+          'each discard keeps its own reason and an unlisted one is recorded as unknown');
+        // Clear Scrape keeps the career files, so its receipt must not claim a career-data clear.
+        const handler = fs.readFileSync(new URL('../../electron/ipc/jobs/coreHandlers.js', import.meta.url), 'utf8');
+        assert(handler.includes("clearKind === 'scrape' ? 'scrape-clear' : clearKind === 'node-delete' ? 'node-delete' : 'career-data-clear'"),
+          'the discard handler maps the clear type to its receipt reason');
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    },
+  },
+  {
     name: 'job analysis recovery lifecycle is bounded, privacy-safe, and survives a snapshot discard',
     run: async () => {
       const dir = fs.mkdtempSync(path.join('/tmp', 'ic-analysis-lifecycle-'));

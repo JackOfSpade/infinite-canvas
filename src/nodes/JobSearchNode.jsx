@@ -11963,6 +11963,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         promise: Promise.resolve().then(() => window.electronAPI.discardJobAnalysisSnapshot({
           canvasFilePath, nodeId: id, runId: jobAnalysisClearedRunId,
           clearedAt: jobAnalysisClearedAt, operationAuthority: clearAuthority,
+          // Clear Scrape keeps the career files; the receipt must not say they were cleared.
+          clearKind: clearsCareer ? 'career' : 'scrape',
         })),
       });
     } else {

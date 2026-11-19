@@ -619,7 +619,7 @@ Return a JSON object with four arrays of search query strings:
     }
   });
 
-  handleSafe('discard-job-analysis-snapshot', async (_event, { canvasFilePath, nodeId, runId = null, clearedAt = null, operationAuthority = null } = {}) => {
+  handleSafe('discard-job-analysis-snapshot', async (_event, { canvasFilePath, nodeId, runId = null, clearedAt = null, operationAuthority = null, clearKind = null } = {}) => {
     // Global bundle removal is reserved for the explicit career-data Clear
     // tombstone. Board cancellation must use the exact-run endpoint below.
     const authority = jobAnalysisOperationAuthorityReceipt(operationAuthority);
@@ -630,6 +630,8 @@ Return a JSON object with four arrays of search query strings:
       runId,
       clearedAt,
       trashItem: (p) => shell.trashItem(p),
+      // Diagnostic label only: which user action removed the saved analysis.
+      lifecycleReason: clearKind === 'scrape' ? 'scrape-clear' : clearKind === 'node-delete' ? 'node-delete' : 'career-data-clear',
     });
   });
 

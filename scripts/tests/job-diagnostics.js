@@ -6198,6 +6198,17 @@ export default [
           && !defaultBroad.includes('January 2, 2026'),
         'the empty/default broad-report path must remain private; only explicit FULL or APPOUTPUT consents to application prose');
 
+        for (const [label, markdown] of [
+          ['cleared card', generateMarkdown({ ...payload, nodes: [], filterCode: 'APPOUTPUT' }, 901).markdown],
+          ['other window', generateMarkdown({ ...payload, filterCode: 'APPOUTPUT' }, 902).markdown],
+        ]) {
+          assert(markdown.includes('- Withheld: this app process holds a final application output')
+            && markdown.includes('It was not audited.')
+            && !markdown.includes('no final application-output snapshot is retained')
+            && !markdown.includes('cover-0: I built reliable release systems.')
+            && !markdown.includes('Letter Candidate'),
+          `an output withheld from a ${label} report must say so without attaching its text`);
+        }
         recordApplicationTelemetry({ source: 'local-ai', attemptId: 'application-output-gone', nodeId, windowId: 901, status: 'completed' });
         const unavailable = generateMarkdown({ ...payload, filterCode: 'APPOUTPUT' }, 901).markdown;
         assert(unavailable.includes('Unavailable/removed: no final application-output snapshot is retained')

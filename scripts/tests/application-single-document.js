@@ -15,7 +15,7 @@ import {
 } from '../../electron/ipc/applicationDocumentScope.js';
 import { mergeApplicationDocument } from '../../electron/ipc/applicationBundleMerge.js';
 import { archiveV2Content } from '../../electron/ipc/applicationV2EvidenceArchive.js';
-import { __queueLegacyLocalApplicationFixtureForTests, buildLocalGenerationAuditArtifact, savedResumeTextForCoverStart, withApplicationDocumentStart } from '../../electron/ipc/localAiApplication.js';
+import { __queueLegacyLocalApplicationFixtureForTests, buildLocalGenerationAuditArtifact, localAiHandoffEvent, savedResumeTextForCoverStart, withApplicationDocumentStart } from '../../electron/ipc/localAiApplication.js';
 import { buildResumeDocument, embedApplicationSyncConfig } from '../../electron/ipc/resumeHtml.js';
 import { applicationSyncConfig, mergeSelectedApplicationPanel, workspacePanelsMatchBundle } from '../../electron/ipc/applicationSync.js';
 import { documentSnapshot, editSummaries, logGeneratedBundle, improvementStatus } from '../../electron/ipc/applicationEditLog.js';
@@ -362,6 +362,13 @@ export default [
       assert.equal(fitRejectionMessage({ resumeFit: realFit, letterFit: ABSENT_DOCUMENT_FIT }), null);
       const measured = fitMeasurement({ resumeFit: realFit, letterFit: ABSENT_DOCUMENT_FIT });
       assert.equal(measured.coverLetter.absent, true);
+      // The handoff trace records page counts only for a document that was rendered.
+      const event = localAiHandoffEvent({ type: 'result-imported', resultRaw: '{}',
+        resumeFit: { ...realFit, targetPageCount: 1 }, coverLetterFit: { ...ABSENT_DOCUMENT_FIT, targetPageCount: 1 } });
+      assert.equal(event.coverLetter, null);
+      assert.equal(event.resume.pageCount, realFit.pageCount);
+      assert.equal(localAiHandoffEvent({ type: 'result-imported', resultRaw: '{}',
+        resumeFit: { ...ABSENT_DOCUMENT_FIT, targetPageCount: 1 }, coverLetterFit: { ...realFit, targetPageCount: 1 } }).resume, null);
       assert.equal(sameFitMeasurement(measured, measured), true, 'a stuck trim is still recognised when one document is absent');
       assert.equal(normalizeApplicationDocumentScope(undefined), null);
       assert.equal(normalizeApplicationDocumentScope('cover'), 'cover');

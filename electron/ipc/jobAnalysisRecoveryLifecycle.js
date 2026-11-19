@@ -18,7 +18,7 @@ const RESULTS = new Set(['saved', 'rotated', 'selected', 'discarded', 'completed
 const RECOVERY_MODES = new Set(['automatic', 'manual', 'direct', 'restart', 'reanalyze-saved-jobs', 'unknown']);
 const REASONS = new Set([
   'normal-save', 'reanalysis-save', 'description-recovery-save', 'current-unavailable',
-  'corrupt-current', 'legacy-fallback', 'career-data-clear', 'node-delete',
+  'corrupt-current', 'legacy-fallback', 'career-data-clear', 'scrape-clear', 'node-delete',
   'run-discard', 'cleanup-failed', 'retired-before-write', 'reanalysis-score-complete', 'unknown',
 ]);
 const tails = new Map();

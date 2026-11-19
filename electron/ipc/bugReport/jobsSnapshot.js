@@ -124,12 +124,17 @@ export function buildApplicationOutputReportSnapshot(currentNodeIds, reportWindo
   // from being appended to an unrelated diagnostic report.
   const ownsCurrentCard = typeof application?.nodeId === 'string'
     && currentNodeIds?.has?.(application.nodeId) === true;
-  if (!ownsCurrentCard) return buildApplicationOutputMarkdown(null);
+  // Withholding is not absence: say which one this is, so a report filed after
+  // the card was cleared does not read as a run that produced no output.
+  const withheld = '\n## Application Output Evidence (APPOUTPUT)\n- Withheld: this app process holds a final application output, but the card it belongs to is not on this report\'s canvas (cleared, deleted, or in another window), so its text is not attached. It was not audited. The saved bundle folder still holds the documents; file the report before clearing the card to include them here.\n';
+  const hasOutput = !!application?.applicationOutput && typeof application.applicationOutput === 'object';
+  if (!ownsCurrentCard) return hasOutput ? withheld : buildApplicationOutputMarkdown(null);
   const scope = application ? pipelineScope(application.nodeId, application.windowId, currentNodeIds, reportWindowId, {
     label: 'Application card',
     deletedNoun: 'card',
   }) : null;
-  return buildApplicationOutputMarkdown(scope?.foreign ? null : application);
+  if (scope?.foreign) return hasOutput ? withheld : buildApplicationOutputMarkdown(null);
+  return buildApplicationOutputMarkdown(application);
 }
 
 export function buildJobsConfigSnapshot() {
