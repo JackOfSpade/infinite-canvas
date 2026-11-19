@@ -7,7 +7,7 @@ export function buildJobCompensationSnapshot(nodes, snapshot = null) {
   const rows = report.rows.slice(0, 1000);
   const count = Number.isSafeInteger(report.inspectedCards) && report.inspectedCards >= rows.length ? report.inspectedCards : rows.length;
   const lines = ['\n## Job Card Salary Audit (JOBPAY)',
-    '> Current saved card assessments, including collapsed cards and nested canvases; survives process restarts through card data. Fixed codes and counts only. No listing prose, salary amounts, career data or research URLs. A market recommendation is not an advertised-pay verdict. Personal guidance checks validate the saved shape and range bounds; they do not revalidate source evidence or establish that the career pin is current.',
+    '> Current saved card assessments, including collapsed cards and nested canvases; survives process restarts through card data. Fixed codes, counts and one ratio only (posted maximum against typical researched pay, in percent). No listing prose, salary amounts, career data or research URLs. A market recommendation is not an advertised-pay verdict. Personal guidance checks validate the saved shape and range bounds; they do not revalidate source evidence or establish that the career pin is current.',
     `- Cards: ${count} inspected · ${rows.length} shown · ${count - rows.length} omitted · scan truncated: ${report.scanTruncated === true ? 'yes' : 'no'}.`];
   const totals = Object.fromEntries([...COMPENSATION_REPORT_STATUSES].map(status => [status, 0]));
   const recommendationTotals = Object.fromEntries([...COMPENSATION_RECOMMENDATION_STATUSES].map(status => [status, 0]));
@@ -23,7 +23,9 @@ export function buildJobCompensationSnapshot(nodes, snapshot = null) {
     const recommendationCheck = COMPENSATION_RECOMMENDATION_CHECKS.has(row?.recommendationCheck) ? row.recommendationCheck : 'absent';
     const evidenceCount = Number.isSafeInteger(row?.recommendationEvidenceCount) ? Math.max(0, Math.min(6, row.recommendationEvidenceCount)) : 0;
     recommendationTotals[recommendationStatus]++;
-    return `- card #${id} · ${status} · reason ${reason} · advertised pay ${row?.advertised === true ? 'present' : 'absent'} · offer ${offerReason} · market range ${row?.marketRange === true ? 'present' : 'absent'} · sources ${sources} · verdict check ${threshold} · personal guidance ${recommendationStatus}/${recommendationCheck} · career pin ${row?.recommendationCareerPin === true ? 'present' : 'absent'} · cited evidence ${evidenceCount}`;
+    const gap = Number.isFinite(row?.typicalGapPercent) ? Math.max(-999, Math.min(999, Math.round(row.typicalGapPercent * 10) / 10)) : null;
+    const gapText = gap === null ? '' : ` · posted max ${gap > 0 ? '+' : ''}${gap}% vs typical`;
+    return `- card #${id} · ${status} · reason ${reason} · advertised pay ${row?.advertised === true ? 'present' : 'absent'} · offer ${offerReason} · market range ${row?.marketRange === true ? 'present' : 'absent'} · sources ${sources} · verdict check ${threshold}${gapText} · personal guidance ${recommendationStatus}/${recommendationCheck} · career pin ${row?.recommendationCareerPin === true ? 'present' : 'absent'} · cited evidence ${evidenceCount}`;
   });
   lines.push(`- Shown verdicts: ${Object.entries(totals).map(([status, n]) => `${status}=${n}`).join(' · ')}.`,
     `- Shown personal guidance: ${Object.entries(recommendationTotals).map(([status, n]) => `${status}=${n}`).join(' · ')}.`, ...details);

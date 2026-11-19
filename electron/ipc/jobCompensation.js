@@ -367,14 +367,20 @@ export function typicalCompetitiveBand(ranges, currency = '') {
   };
 }
 
-// A source whose midpoint sits this far from the median midpoint is describing
+// A source whose centre sits this far from the median midpoint is describing
 // a different level or specialty, not the same market. 1.6x is deliberately
 // loose: it removes the wild outlier without narrowing the band for mere
 // disagreement between credible surveys.
 const COMPETITIVE_RANGE_OUTLIER_FACTOR = 1.6;
 
-function rangeMidpoint(range) {
-  return (Number(range.min) + Number(range.max)) / 2;
+// The centre of one source's range is its geometric midpoint, not the
+// arithmetic one. Pay is right-skewed (the percentile estimate below already
+// reads it as log-normal), so the arithmetic middle of a low-to-high spread
+// sits above what most people earn, and the wider the spread the worse the
+// overstatement. For a published 25th–75th band this is exactly the log-normal
+// median; for a narrow band the two centres differ by well under 1%.
+function rangeCentre(range) {
+  return Math.sqrt(Number(range.min) * Number(range.max));
 }
 
 function medianOf(values) {
@@ -393,12 +399,12 @@ function medianOf(values) {
 export function retainConsistentCompetitiveRanges(ranges, currency = '') {
   const valid = validCompetitiveRanges(ranges, currency);
   if (valid.length < 3) return { retained: valid, excluded: [] };
-  const center = medianOf(valid.map(rangeMidpoint));
+  const center = medianOf(valid.map(rangeCentre));
   if (!(center > 0)) return { retained: valid, excluded: [] };
   const retained = [];
   const excluded = [];
   for (const range of valid) {
-    const midpoint = rangeMidpoint(range);
+    const midpoint = rangeCentre(range);
     if (midpoint < center / COMPETITIVE_RANGE_OUTLIER_FACTOR || midpoint > center * COMPETITIVE_RANGE_OUTLIER_FACTOR) {
       excluded.push(range);
     } else {
@@ -415,14 +421,15 @@ export function retainConsistentCompetitiveRanges(ranges, currency = '') {
 }
 
 /**
- * The typical researched pay: the median of the retained sources' midpoints,
- * rounded. A single lowest-low floor let one cheap survey make almost any
- * offer look competitive, so the verdict compares against this instead.
+ * The typical researched pay: the median of the retained sources' centres
+ * (see rangeCentre), rounded. A single lowest-low floor let one cheap survey
+ * make almost any offer look competitive, so the verdict compares against
+ * this instead.
  */
 export function competitiveFloor(ranges, currency = '') {
   const { retained, disagreement } = retainConsistentCompetitiveRanges(ranges, currency);
   if (disagreement) return null;
-  const center = medianOf(retained.map(rangeMidpoint));
+  const center = medianOf(retained.map(rangeCentre));
   if (center === null) return null;
   // Rounding must not push the figure outside the band the card shows, which
   // is now the typical band rather than the union: the saved assessment is
@@ -469,6 +476,32 @@ export function typicalPayPercentile(ranges, amount, currency = '') {
   if (!Number.isFinite(mu) || !(sigma > 0)) return null;
   const percentile = Math.round(100 * standardNormalCdf((Math.log(value) - mu) / sigma));
   return { percentile: Math.min(99, Math.max(1, percentile)), sourceCount: bands.length };
+}
+
+/**
+ * Where a posting's highest stated cash pay sits against the researched
+ * market, as one of three tiers:
+ *
+ *   competitive   the maximum reaches typical pay;
+ *   lower_market  the maximum is inside the market band but under typical pay;
+ *   below_market  the maximum does not reach the bottom of the market band.
+ *
+ * Both cut points are figures the research itself produced, so there is no
+ * tuned margin to maintain. A single cut at typical pay turned a gap smaller
+ * than the disagreement between two surveys into a red verdict; with two cuts
+ * a small error in the research can move a posting one tier, never from green
+ * to red. Weak evidence also widens the middle tier on its own: sources that
+ * publish only a full low-to-high spread give a low band bottom and a high
+ * centre, so fewer postings are called either way. Typical pay is clamped into
+ * the band, so when the band is a single figure the middle tier is empty.
+ */
+export function compensationVerdictTier(offerMax, band, typicalPay) {
+  const max = Number(offerMax);
+  const low = Number(band?.min);
+  const typical = Number(typicalPay);
+  if (!(max > 0) || !(low > 0) || !(typical > 0)) return '';
+  if (max >= typical) return 'competitive';
+  return max >= low ? 'lower_market' : 'below_market';
 }
 
 /**
@@ -700,19 +733,19 @@ export function compensationAssessment({ offer, competitiveRanges, marketCurrenc
       ]),
     };
   }
-  // This is the entire threshold: the stated maximum (or fixed amount) must
-  // reach typical researched pay — the median midpoint of the retained
-  // sources — not the single lowest low any one source published. No buffer
-  // is applied.
-  const status = offer.max < floor ? 'below_market' : 'competitive';
+  // The stated maximum (or fixed amount) is placed against the researched
+  // band and its typical pay; see compensationVerdictTier for the three tiers.
+  const status = compensationVerdictTier(offer.max, band, floor);
   // A posted floor above the entire displayed band is still competitive pay,
   // but it also proves the benchmark does not describe this job. Say so, so
   // nobody reads the market range as what this employer pays.
   const aboveCeiling = offer.min > band.max;
   const money = (value) => `${offer.currency ? `${offer.currency} ` : ''}${Math.round(value).toLocaleString('en-US')}`;
-  const typicalMarket = `${money(floor)}, the median midpoint of ${retained.length} comparable sources`;
+  const typicalMarket = `${money(floor)}, the middle of ${retained.length} comparable source${retained.length === 1 ? '' : 's'}`;
   const decision = status === 'below_market'
-    ? `The listing's highest stated guaranteed cash salary (${money(offer.max)}) is below typical researched pay (${typicalMarket}).`
+    ? `The listing's highest stated guaranteed cash salary (${money(offer.max)}) does not reach the bottom of the researched market range (${money(band.min)}).`
+    : status === 'lower_market'
+      ? `The listing's highest stated guaranteed cash salary (${money(offer.max)}) is inside the researched market range (${money(band.min)} to ${money(band.max)}) but under typical researched pay (${typicalMarket}), so this posting pays in the lower part of the market.`
     : aboveCeiling
       ? `The listing's lowest stated guaranteed cash salary (${money(offer.min)}) is above the top of the researched market range (${money(band.max)}), so that benchmark likely reflects a different level, employer tier or specialty than this job. Desired-salary guidance uses the employer's posted band instead.`
       : `The listing's highest stated guaranteed cash salary (${money(offer.max)}) reaches typical researched pay (${typicalMarket}).`;
@@ -726,7 +759,8 @@ export function compensationAssessment({ offer, competitiveRanges, marketCurrenc
   return {
     ...base,
     status,
-    reasonCode: status === 'below_market' ? 'offered_max_below_typical_market'
+    reasonCode: status === 'below_market' ? 'offered_max_below_market_range'
+      : status === 'lower_market' ? 'offered_max_below_typical_market'
       : aboveCeiling ? 'offered_min_above_competitive_ceiling' : 'offered_reaches_typical_market',
     competitiveRange: band,
     reportedSpan: merged,

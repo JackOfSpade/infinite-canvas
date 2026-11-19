@@ -17,6 +17,7 @@ export const COMPENSATION_COMPARISON_REASONS = new Set([
   'market_range_recommended', 'market_range_unavailable', 'market_evidence_unavailable',
   'offered_max_below_competitive_floor', 'offered_reaches_competitive_floor',
   'offered_max_below_typical_market', 'offered_reaches_typical_market',
+  'offered_max_below_market_range',
   'offered_min_above_competitive_ceiling', 'location_conflict', 'market_sources_disagree',
   'below_fit_threshold', 'fit_score_unavailable', 'comparison_location_unavailable',
   'market_currency_unavailable', 'experience_band_unavailable', 'research_interrupted',
@@ -72,8 +73,9 @@ export function jobCompensationDisplay(job = {}, assessment = normalizeCompensat
     : COMPENSATION_OFFER_REASONS.has(storedReason)
     ? storedReason
     : retainedOffer ? 'usable_cash_salary' : salary ? 'unknown' : advertised.reasonCode || 'no_cash_salary';
-  const determined = ['competitive', 'below_market'].includes(assessment.status);
+  const determined = ['competitive', 'lower_market', 'below_market'].includes(assessment.status);
   const label = assessment.status === 'competitive' ? 'Competitive cash pay'
+    : assessment.status === 'lower_market' ? 'Lower end of market cash pay'
     : assessment.status === 'below_market' ? 'Likely below-market cash pay'
       : 'Cannot determine pay competitiveness';
   const reasons = determined ? [] : [

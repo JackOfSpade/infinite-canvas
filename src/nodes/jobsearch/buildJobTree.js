@@ -188,7 +188,7 @@ const DEFAULT_RANGES = [
 // can preserve a single, safe representation. A missing/unknown assessment is
 // deliberately a neutral legacy state: opening an old canvas must never imply
 // that new compensation research was run.
-const COMPENSATION_STATUSES = new Set(['competitive', 'below_market', 'market_recommendation', 'uncertain', 'not_evaluated']);
+const COMPENSATION_STATUSES = new Set(['competitive', 'lower_market', 'below_market', 'market_recommendation', 'uncertain', 'not_evaluated']);
 // These records are renderer-facing, potentially persisted AI output. Keep an
 // absurd value from becoming a very long disclosure (or, worse, supporting a
 // semantic green/red result). This is the same generous annual-cash ceiling
@@ -411,7 +411,7 @@ function normalizedReportedSpan(value) {
  * returns true; any other status, or a safe verdict, is left alone.
  */
 function downgradeUnsafeComparison(normalized, floorPresent) {
-  const isVerdict = normalized.status === 'competitive' || normalized.status === 'below_market';
+  const isVerdict = ['competitive', 'lower_market', 'below_market'].includes(normalized.status);
   if (!isVerdict) return false;
   const { offered, competitiveRange } = normalized;
   const downgrade = (reasonCode, justification) => {
@@ -434,7 +434,16 @@ function downgradeUnsafeComparison(normalized, floorPresent) {
     return downgrade('incompatible_comparison_period', 'Compensation research did not retain reliably annualized cash figures, so no green or red conclusion is shown.');
   }
   const floor = normalized.competitiveFloor > 0 ? normalized.competitiveFloor : competitiveRange.min;
-  if ((normalized.status === 'competitive') !== (offered.max >= floor)) {
+  const expected = offered.max >= floor ? 'competitive'
+    : offered.max >= competitiveRange.min ? 'lower_market' : 'below_market';
+  // Before the lower-market tier existed, every posting under typical pay was
+  // saved as below_market. Those figures are sound; only the label was too
+  // strong, so re-read it from the saved numbers instead of withholding it.
+  if (normalized.status === 'below_market' && expected === 'lower_market') {
+    normalized.status = 'lower_market';
+    return false;
+  }
+  if (normalized.status !== expected) {
     return downgrade('inconsistent_comparison_verdict', 'The saved cash-pay conclusion conflicts with its salary ranges. Re-combine saved results on the Job Board to refresh the comparison.');
   }
   return false;
@@ -514,6 +523,8 @@ export function normalizeCompensationAssessment(value) {
     } else if (!normalized.justification) {
       normalized.justification = normalized.status === 'competitive'
         ? 'The advertised guaranteed cash salary reaches typical researched pay for this role and location.'
+        : normalized.status === 'lower_market'
+          ? 'The advertised guaranteed cash salary is inside the researched market range but under typical researched pay for this role and location.'
         : normalized.status === 'below_market'
           ? 'The advertised guaranteed cash salary is below the researched competitive range for this role and location.'
           : normalized.status === 'market_recommendation'

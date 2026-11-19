@@ -1,7 +1,7 @@
 import { normalizeCompensationAssessment } from '../nodes/jobsearch/buildJobTree.js';
 import { COMPENSATION_COMPARISON_REASONS, jobCompensationDisplay } from './jobCompensationDisplay.js';
 
-export const COMPENSATION_REPORT_STATUSES = new Set(['competitive', 'below_market', 'market_recommendation', 'uncertain', 'not_evaluated']);
+export const COMPENSATION_REPORT_STATUSES = new Set(['competitive', 'lower_market', 'below_market', 'market_recommendation', 'uncertain', 'not_evaluated']);
 export const COMPENSATION_THRESHOLD_CHECKS = new Set(['consistent', 'inconsistent', 'no_comparison']);
 export const COMPENSATION_RECOMMENDATION_STATUSES = new Set(['personalized', 'market_estimate', 'unavailable', 'absent']);
 export const COMPENSATION_RECOMMENDATION_CHECKS = new Set(['valid_saved_guidance', 'invalid_saved_guidance', 'unavailable', 'absent']);
@@ -31,7 +31,13 @@ export function collectJobCompensationReport(nodes, { flat = false } = {}) {
       // Typical researched pay when the saved assessment carries it; saved
       // assessments that predate the field keep the old lowest-low floor.
       const threshold = assessment.competitiveFloor > 0 ? assessment.competitiveFloor : assessment.competitiveRange.min;
-      const reachesFloor = assessment.offered.max >= threshold;
+      const expectedStatus = assessment.offered.max >= threshold ? 'competitive'
+        : assessment.offered.max >= assessment.competitiveRange.min ? 'lower_market' : 'below_market';
+      // How far the posted maximum sits from typical pay, as a whole percent.
+      // A ratio, not an amount: it shows how close a verdict was to its cut
+      // point without putting any salary figure in the report.
+      const gapPercent = display.determined && threshold > 0 && assessment.offered.max > 0
+        ? Math.max(-999, Math.min(999, Math.round((assessment.offered.max / threshold - 1) * 1000) / 10)) : null;
       const personal = assessment.personalRecommendation;
       const rawPersonal = job.compensationAssessment?.personalRecommendation;
       rows.push({
@@ -44,7 +50,8 @@ export function collectJobCompensationReport(nodes, { flat = false } = {}) {
         sourceCount: assessment.sourceLinks.length,
         thresholdCheck: assessment.reasonCode === 'inconsistent_comparison_verdict' ? 'inconsistent'
           : !display.determined ? 'no_comparison'
-          : (assessment.status === 'competitive') === reachesFloor ? 'consistent' : 'inconsistent',
+          : assessment.status === expectedStatus ? 'consistent' : 'inconsistent',
+        typicalGapPercent: gapPercent,
         recommendationStatus: personal?.status || 'absent',
         recommendationCheck: personal?.isInvalid === true || rawPersonal?.isInvalid === true ? 'invalid_saved_guidance'
           : !personal ? 'absent' : personal.status === 'unavailable' ? 'unavailable' : 'valid_saved_guidance',

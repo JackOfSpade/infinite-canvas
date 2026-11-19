@@ -170,7 +170,7 @@ function assessmentQuality(value) {
   const assessment = value && typeof value === 'object' ? value : null;
   if (Number(assessment?.schemaVersion) !== 1) return 0;
   const status = String(assessment.status || '').trim().toLowerCase();
-  if (status === 'competitive' || status === 'below_market') return 4;
+  if (status === 'competitive' || status === 'lower_market' || status === 'below_market') return 4;
   if (status === 'uncertain') return 3;
   if (status === 'not_evaluated') return 1;
   return 0;

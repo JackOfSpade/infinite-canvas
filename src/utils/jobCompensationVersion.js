@@ -10,7 +10,11 @@
 //    a sourced exchange rate when a source's currency differs (2026-11-08).
 // 6: the verdict uses every confirmed comparable source instead of at most five, and the card no longer lists research links (2026-11-09).
 // 7: the market range is the typical band (median of source lows to median of source highs) instead of the union, and typical pay is clamped into it; the union is kept as reportedSpan for diagnosis (2026-11-09).
-export const JOB_COMPENSATION_METHOD_VERSION = 7;
+// 8: the pay verdict has three tiers (reaches typical pay / inside the market
+//    range but under typical pay / under the market range) instead of one cut
+//    at typical pay, and a source's centre is its geometric midpoint, so a
+//    wide low-to-high spread no longer overstates typical pay (2026-11-18).
+export const JOB_COMPENSATION_METHOD_VERSION = 8;
 
 export function jobBoardSalaryNeedsRefresh(boardData, careerSnapshotId) {
   return String(careerSnapshotId || '') !== String(boardData?.salaryCareerSnapshotId || '')

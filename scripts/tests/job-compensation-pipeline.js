@@ -1298,11 +1298,13 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
       && !filteredUncapped.some(source => ['duplicate', 'foreign currency', 'not comparable'].includes(source.sourceName)),
     'an uncapped selection must still drop URL duplicates, other currencies and non-comparable ranges');
     // One merged CAD 85,000–130,000 source: typical researched pay is its
-    // midpoint, CAD 107,500, not the CAD 85,000 low.
+    // geometric centre, CAD 105,119, not the CAD 85,000 low.
     const atTypical = { ...canadian, max: 107500 };
     assert(compensationAssessment({ offer: atTypical, competitiveRanges: [merged] }).status === 'competitive', 'offer maximum reaching typical researched pay is competitive');
-    assert(compensationAssessment({ offer: { ...canadian, max: 107499 }, competitiveRanges: [merged] }).status === 'below_market', 'no hidden buffer below typical researched pay');
-    assert(compensationAssessment({ offer: canadian, competitiveRanges: [merged] }).status === 'below_market', 'reaching only the lowest source low is no longer competitive');
+    assert(compensationAssessment({ offer: { ...canadian, max: 105119 }, competitiveRanges: [merged] }).status === 'competitive'
+      && compensationAssessment({ offer: { ...canadian, max: 105118 }, competitiveRanges: [merged] }).status === 'lower_market', 'a maximum just under typical researched pay is lower-market, not competitive and not below market');
+    assert(compensationAssessment({ offer: canadian, competitiveRanges: [merged] }).status === 'lower_market', 'reaching only the lowest source low is no longer competitive');
+    assert(compensationAssessment({ offer: { ...canadian, min: 60000, max: 84999 }, competitiveRanges: [merged] }).status === 'below_market', 'a maximum under the bottom of the market range is below market');
     const withEvidence = compensationAssessment({
       offer: atTypical,
       competitiveRanges: [merged],
@@ -1745,7 +1747,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
       && /that range's note must state the original figures, the original currency, the rate used, and the rate source date/u.test(extractionPrompt)
       && /Without such a rate, mark that range comparable=false/u.test(extractionPrompt),
     'the assessment prompt must allow cross-currency conversion only from a rate quoted in the same cohort grounded section');
-    assert(COMPENSATION_RESEARCH_PROMPT_VERSION === 3 && JOB_COMPENSATION_METHOD_VERSION === 7,
-      `the typical-band market range must bump the method version, got ${COMPENSATION_RESEARCH_PROMPT_VERSION} and ${JOB_COMPENSATION_METHOD_VERSION}`);
+    assert(COMPENSATION_RESEARCH_PROMPT_VERSION === 3 && JOB_COMPENSATION_METHOD_VERSION === 8,
+      `the three-tier verdict must bump the method version, got ${COMPENSATION_RESEARCH_PROMPT_VERSION} and ${JOB_COMPENSATION_METHOD_VERSION}`);
   },
 }];

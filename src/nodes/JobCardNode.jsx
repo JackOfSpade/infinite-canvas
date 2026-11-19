@@ -79,6 +79,7 @@ function scoreColor(score) {
 
 const COMPENSATION_BORDER_COLORS = {
   competitive: '#22c55e',
+  lower_market: '#eab308',
   below_market: '#ef4444',
 };
 const COMPENSATION_NEUTRAL_BORDER = 'rgba(255,255,255,0.12)';
@@ -2106,7 +2107,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             compensationBorderColor === COMPENSATION_NEUTRAL_BORDER ? 'text-white/45' : ''
           }`}
           // The title is the exact colour of the card's border (green for a
-          // competitive cash verdict, red for below-market) so the two read as
+          // competitive cash verdict, amber for lower-end, red for below-market) so the two read as
           // one signal; neutral verdicts keep the muted title.
           style={compensationBorderColor === COMPENSATION_NEUTRAL_BORDER ? undefined : { color: compensationBorderColor }}
           onClick={(e) => {

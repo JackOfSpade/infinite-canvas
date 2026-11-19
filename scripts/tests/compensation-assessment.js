@@ -464,13 +464,24 @@ export default [
         { min: 71000, max: 125000, currency: 'CAD' },
       ];
       const cad = compensationAssessment({ offer, competitiveRanges: cadSources, marketCurrency: 'CAD' });
-      assert(cad.status === 'below_market',
-        'a CAD 70-90k offer must not be called competitive against a 62.4k source low when typical pay is 97.5k');
-      assert(cad.competitiveFloor === 97500, 'typical researched pay must be the median midpoint of the comparable sources');
-      assert(cad.reasonCode === 'offered_max_below_typical_market', 'the below-market verdict must use the typical-market reason code');
+      assert(cad.status === 'lower_market',
+        `a CAD 70-90k offer inside the 68.5k-121k band but under typical pay is lower-market, never competitive and never red, got ${cad.status}`);
+      // Centres are geometric: 95,140 / 82,049 / 94,916 / 94,207 -> median 94,561.
+      assert(cad.competitiveFloor === 94561, `typical researched pay must be the median geometric centre of the comparable sources, got ${cad.competitiveFloor}`);
+      assert(cad.reasonCode === 'offered_max_below_typical_market', 'the lower-market verdict must use the typical-market reason code');
+      const underBand = compensationAssessment({
+        offer: { ...offer, min: 55000, max: 68499 }, competitiveRanges: cadSources, marketCurrency: 'CAD',
+      });
+      assert(underBand.status === 'below_market' && underBand.reasonCode === 'offered_max_below_market_range'
+        && underBand.justification.includes('does not reach the bottom of the researched market range (CAD 68,500).'),
+      `only a maximum under the bottom of the market band is below market, got ${underBand.status}/${underBand.reasonCode}`);
+      assert(compensationAssessment({ offer: { ...offer, max: 68500 }, competitiveRanges: cadSources, marketCurrency: 'CAD' }).status === 'lower_market'
+        && compensationAssessment({ offer: { ...offer, max: 94561 }, competitiveRanges: cadSources, marketCurrency: 'CAD' }).status === 'competitive'
+        && compensationAssessment({ offer: { ...offer, max: 94560 }, competitiveRanges: cadSources, marketCurrency: 'CAD' }).status === 'lower_market',
+      'a posting a few dollars either side of a cut point moves one tier, never from competitive to below market');
       assert(cad.excludedSourceCount === 0 && cad.competitiveRange.min === 68500 && cad.competitiveRange.max === 121000,
         'four consistent sources give the median low to the median high, not the 62.4k–145k union');
-      assert(cad.justification.includes('is below typical researched pay (CAD 97,500, the median midpoint of 4 comparable sources).'),
+      assert(cad.justification.includes('is inside the researched market range (CAD 68,500 to CAD 121,000) but under typical researched pay (CAD 94,561, the middle of 4 comparable sources)'),
         'the decision sentence must name typical researched pay and the comparable-source count');
 
       const outlier = compensationAssessment({
@@ -482,8 +493,8 @@ export default [
         ],
         marketCurrency: 'CAD',
       });
-      assert(outlier.excludedSourceCount === 1 && outlier.competitiveFloor === 112500,
-        'a source whose midpoint sits far below the others must be excluded from typical researched pay');
+      assert(outlier.excludedSourceCount === 1 && outlier.competitiveFloor === 112054,
+        'a source whose centre sits far below the others must be excluded from typical researched pay');
       assert(outlier.competitiveRange.min === 102500 && outlier.competitiveRange.max === 122500,
         'the typical band must cover only the retained sources');
       assert(outlier.justification.includes('1 source(s) whose range sat far from the others were left out of this comparison.'),
@@ -494,14 +505,14 @@ export default [
         competitiveRanges: [{ min: 60000, max: 80000, currency: 'CAD' }, { min: 90000, max: 110000, currency: 'CAD' }],
         marketCurrency: 'CAD',
       });
-      assert(pair.excludedSourceCount === 0 && pair.competitiveFloor === 85000,
-        'two sources are never filtered, and their typical pay is the mean of both midpoints');
+      assert(pair.excludedSourceCount === 0 && pair.competitiveFloor === 84390,
+        'two sources are never filtered, and their typical pay is the mean of both geometric centres');
 
-      const atFloor = compensationAssessment({ offer: { ...offer, max: 97500 }, competitiveRanges: cadSources, marketCurrency: 'CAD' });
+      const atFloor = compensationAssessment({ offer: { ...offer, max: 94561 }, competitiveRanges: cadSources, marketCurrency: 'CAD' });
       assert(atFloor.status === 'competitive' && atFloor.reasonCode === 'offered_reaches_typical_market',
         'an offer maximum exactly equal to typical researched pay must count as competitive');
 
-      assert(competitiveFloor(cadSources, 'CAD') === 97500
+      assert(competitiveFloor(cadSources, 'CAD') === 94561
         && retainConsistentCompetitiveRanges([
           { min: 60000, max: 80000, currency: 'CAD' }, { min: 90000, max: 110000, currency: 'CAD' },
         ], 'CAD').excluded.length === 0,
@@ -526,8 +537,8 @@ export default [
       'a Canadian card compared against a German market must record both countries');
       assert(berlin.status === 'uncertain' && berlin.reasonCode === 'location_conflict',
         `a country conflict must not colour the card green or red, got ${berlin.status}/${berlin.reasonCode}`);
-      assert(berlin.competitiveRange?.min === 77000 && berlin.competitiveFloor === 97000,
-        'the researched range and typical pay stay available as context');
+      assert(berlin.competitiveRange?.min === 77000 && berlin.competitiveFloor === 94916,
+        `the researched range and typical pay stay available as context, got ${berlin.competitiveFloor}`);
       assert(berlin.justification.includes('Pay was not judged: the card lists Canada but the location found for this job is in Germany'),
         'the withheld verdict must be explained in the justification');
       const normalized = normalizeCompensationAssessment(berlin);
@@ -544,7 +555,7 @@ export default [
         cardLocation: 'Toronto, ON',
         comparisonLocation: { display: 'Toronto, Ontario, Canada', country: 'Canada' },
       });
-      assert(sameCountry.locationMismatch === null && sameCountry.status === 'below_market'
+      assert(sameCountry.locationMismatch === null && sameCountry.status === 'lower_market'
         && !sameCountry.justification.includes('Pay was not judged'),
       'a card in the same country as the compared market keeps its verdict');
       assert(compensationLocationMismatch('Toronto, ON', { display: 'Toronto, Ontario, Canada', country: 'Canada' }) === null,
@@ -793,7 +804,8 @@ export default [
         `reportedSpan must keep the union the old rule displayed, got ${JSON.stringify(result.reportedSpan)}`);
       assert(result.competitiveRange.max === 110000,
         'the wide 60,000–140,000 source must not stretch the displayed range the way the union did');
-      assert(result.competitiveFloor === 100000, 'typical pay stays the median of the source midpoints');
+      assert(result.competitiveFloor === 99499,
+        `typical pay is the median geometric centre, so the wide 60,000–140,000 source cannot pull it up, got ${result.competitiveFloor}`);
       assert(result.competitiveFloor >= result.competitiveRange.min && result.competitiveFloor <= result.competitiveRange.max,
         'typical pay is clamped into the typical band');
       assert(result.status === 'competitive');
@@ -808,6 +820,56 @@ export default [
       assert(noBand.competitiveRange === null && noBand.reportedSpan === null,
         'an assessment without a competitive range has no reported span either');
       assert(normalizeCompensationAssessment(noBand).reportedSpan === null, 'the renderer never requires a reported span');
+    },
+  },
+  {
+    name: 'A posting just under typical pay is lower-market on the card, and a saved red verdict for it is re-read',
+    run() {
+      // The reported case: CAD 105,800-132,300 posted against two full-range
+      // sources. The maximum sat 1.5% under the old arithmetic typical pay and
+      // the card went red although the posting is inside the market range.
+      const offer = { usable: true, min: 105800, max: 132300, currency: 'CAD', period: 'annual' };
+      const sources = [
+        { min: 104000, max: 150000, currency: 'CAD', note: 'full range' },
+        { min: 115894, max: 167578, currency: 'CAD', note: 'full range' },
+      ];
+      const fresh = compensationAssessment({ offer, competitiveRanges: sources, marketCurrency: 'CAD' });
+      assert(fresh.competitiveRange.min === 109947 && fresh.competitiveRange.max === 158789,
+        `the fixture must reproduce the reported market range, got ${JSON.stringify(fresh.competitiveRange)}`);
+      assert(fresh.status !== 'below_market',
+        `a posting inside the market range must never be red, got ${fresh.status}`);
+      const lowerOffer = { ...offer, max: 125000 };
+      const lower = compensationAssessment({ offer: lowerOffer, competitiveRanges: sources, marketCurrency: 'CAD' });
+      assert(lower.status === 'lower_market' && lower.reasonCode === 'offered_max_below_typical_market',
+        `a maximum inside the range but under typical pay is lower-market, got ${lower.status}/${lower.reasonCode}`);
+      const normalizedLower = normalizeCompensationAssessment(lower);
+      const display = jobCompensationDisplay({ compensationAssessment: lower }, normalizedLower);
+      assert(normalizedLower.status === 'lower_market' && display.determined && display.label === 'Lower end of market cash pay',
+        `the lower-market tier must survive normalization and show its own label, got ${normalizedLower.status}/${display.label}`);
+
+      // What the previous method saved for the reported card.
+      const savedRed = {
+        ...fresh, status: 'below_market', reasonCode: 'offered_max_below_typical_market', competitiveFloor: 134368,
+      };
+      const reread = normalizeCompensationAssessment(savedRed);
+      assert(reread.status === 'lower_market' && reread.reasonCode === 'offered_max_below_typical_market',
+        `a saved red verdict whose maximum is inside the market range must be re-read as lower-market, not withheld, got ${reread.status}/${reread.reasonCode}`);
+      const stillRed = normalizeCompensationAssessment({
+        ...savedRed, offered: { ...offer, min: 90000, max: 105000 },
+      });
+      assert(stillRed.status === 'below_market', 'a saved red verdict under the bottom of the market range stays red');
+      const contradictory = normalizeCompensationAssessment({ ...savedRed, status: 'competitive' });
+      assert(contradictory.status === 'uncertain' && contradictory.reasonCode === 'inconsistent_comparison_verdict',
+        'a saved green verdict under typical pay is still withheld as inconsistent');
+
+      const report = collectJobCompensationReport([{ id: 'card-1', type: 'jobcard', data: { compensationAssessment: savedRed } }]);
+      assert(report.rows[0].status === 'lower_market' && report.rows[0].thresholdCheck === 'consistent'
+        && report.rows[0].typicalGapPercent === -1.5,
+      `the report must carry the tier and how far the maximum sat from typical pay, got ${JSON.stringify(report.rows[0])}`);
+      const rendered = buildJobCompensationSnapshot([], report);
+      assert(rendered.includes('posted max -1.5% vs typical') && rendered.includes('lower_market=1')
+        && !/132[,.]?300|134[,.]?368/.test(rendered),
+      'the rendered audit shows the gap as a ratio and never a salary amount');
     },
   },
 ];
