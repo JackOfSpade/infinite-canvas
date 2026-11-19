@@ -15,6 +15,9 @@ export function solveIpcFailureMessage(result) {
   if (/chrome.*(?:launch|start)|failed to launch|spawn\s+(?:enoent|eacces)|permission/i.test(raw)) {
     return 'The verification browser could not start. Close any verification windows, then try Solve again.';
   }
+  if (/could not be saved/i.test(raw)) {
+    return 'Solve ran, but its result could not be saved, so nothing changed. Try Solve again.';
+  }
   return 'Solve did not start. Please try again.';
 }
 

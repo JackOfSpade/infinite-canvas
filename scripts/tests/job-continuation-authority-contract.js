@@ -272,16 +272,89 @@ export async function runSourceRecoveryPublicationContract() {
   }
 }
 
+/**
+ * Report 2026-11-19: three Solves on LinkedIn each left a ~10 MB terminal
+ * result in the sidecar, the fourth write crossed the file limit, and every
+ * later Solve failed with "could not be saved for exact restart replay".
+ */
+async function runRepeatedSolveRetirementContract() {
+  const sender = { once() {} };
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ic-repeated-solve-'));
+  const canvasFilePath = path.join(dir, 'canvas.json');
+  try {
+    await fs.writeFile(canvasFilePath, '{}');
+    const careerSnapshotId = 'a'.repeat(64);
+    const operationAuthority = (await claimJobAnalysisOperationAuthority({
+      canvasFilePath, hubId: 'hub', operationId: 'repeated-solve-contract',
+      semanticBase: { kind: 'search', careerSnapshotId },
+    })).receipt;
+    const row = { source: 'linkedin', title: 'Engineer', company: 'Example', url: 'https://example.invalid/job', snippet: 'Job description. '.repeat(50) };
+    let snapshot = buildJobAnalysisSnapshot({
+      jobs: [row], descriptionRecoveryJobs: [row], profile: {}, careerData: {}, careerSnapshotId,
+      operationAuthority, nodeId: 'hub', snapshotContext: { sourceHubId: 'hub', runId: 'run', canvasFilePath },
+    }).snapshot;
+    await __saveJobAnalysisSnapshotForTests(snapshot);
+    assert.equal((await __createDescriptionRecoveryCheckpointForTests(snapshot)).saved, true);
+    // ~5 MB per result: seven of them cannot share one 32 MB sidecar.
+    const bulk = 'x'.repeat(5 * 1024 * 1024);
+    let last = null;
+    for (let pass = 1; pass <= 7; pass++) {
+      const begun = await beginJobContinuation(canvasFilePath, {
+        nodeId: 'hub', parentRunId: 'run', profileFingerprint: 'c'.repeat(64),
+        kind: 'source-recovery', operation: 'resolve-job-source', sourceId: 'linkedin',
+        careerSnapshotId, operationAuthority, recoveryMode: 'manual', now: Date.now(),
+      });
+      assert.equal(begun.ok, true, `Solve ${pass} begins: ${JSON.stringify(begun)}`);
+      const execution = await claimJobContinuation(canvasFilePath, { ...begun.intent, allowManualResume: true }, { sender });
+      assert.equal(execution.ok, true, `Solve ${pass} claims: ${JSON.stringify(execution)}`);
+      const ownership = {
+        nodeId: 'hub', parentRunId: 'run', intentId: execution.intent.intentId, leaseToken: execution.leaseToken,
+        operation: 'resolve-job-source', careerSnapshotId, operationAuthority,
+        parentArtifactFingerprint: execution.intent.parentArtifactFingerprint,
+      };
+      const jobs = [{ ...row, snippet: `Recovered pass ${pass}. `.repeat(50) }];
+      const next = buildJobAnalysisSnapshot({
+        jobs, descriptionRecoveryJobs: jobs, profile: {}, careerData: {}, careerSnapshotId,
+        operationAuthority, nodeId: 'hub', snapshotContext: { sourceHubId: 'hub', runId: 'run', canvasFilePath },
+      }).snapshot;
+      const published = await __saveDescriptionRecoverySnapshotIfCurrentForTests(next, {
+        nodeId: 'hub', jobRunId: 'run', sender, continuation: ownership,
+      });
+      assert.equal(published.saved, true, `Solve ${pass} publishes its parent: ${JSON.stringify(published)}`);
+      const result = { resolved: true, items: jobs, replaceSourceItems: true, bulk, pass };
+      const receipt = await checkpointJobContinuationResult(canvasFilePath, { ...ownership, result }, { sender });
+      assert.equal(receipt.saved, true, `Solve ${pass} saves its result after earlier Solves: ${JSON.stringify(receipt)}`);
+      assert.equal(releaseJobContinuationExecution(execution.intent.intentId, execution.leaseToken, sender), true);
+      last = { ownership, result };
+      snapshot = next;
+    }
+    const listed = await listJobContinuations(canvasFilePath, 'hub');
+    assert.equal(listed.length, 1, 'only the Solve whose parent is still current is retained');
+    const replayExecution = await claimJobContinuation(canvasFilePath, { ...listed[0], allowManualResume: true }, { sender });
+    assert.equal(replayExecution.ok, true, 'the latest Solve stays claimable for restart replay');
+    const replay = await readJobContinuationResult(canvasFilePath, { ...last.ownership, leaseToken: replayExecution.leaseToken }, { sender });
+    assert.equal(replay.found, true);
+    assert.equal(replay.result.pass, 7, 'the retained result is the latest Solve');
+    releaseJobContinuationExecution(replayExecution.intent.intentId, replayExecution.leaseToken, sender);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
 export default [{
   name: 'job continuation authority contract: renderer claim scope, sealed parent, exact S1→S2→S3, and late checkpoint fence',
   run: runJobContinuationAuthorityContract,
 }, {
   name: 'source recovery publication preserves authority and exact restart replay for LinkedIn and generic rebuilds',
   run: runSourceRecoveryPublicationContract,
+}, {
+  name: 'repeated Solves on one source retire superseded saved results instead of overflowing the continuation file',
+  run: runRepeatedSolveRetirementContract,
 }];
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   await runJobContinuationAuthorityContract();
   await runSourceRecoveryPublicationContract();
+  await runRepeatedSolveRetirementContract();
   console.log('job continuation authority contract passed, including all 4 renderer claim paths');
 }

@@ -431,6 +431,35 @@ async function deriveParentArtifactUnderAuthority(canvasFilePath, record, identi
   return { ok: false, reason: 'parent-artifact-superseded' };
 }
 
+/**
+ * A source recovery rewrites its own sealed parent, so each later Solve on the
+ * same run leaves the earlier Solve's intent pointing at bytes that no longer
+ * exist. Every claim, replay and acknowledgement re-validates the parent, so
+ * such an intent can never run or be read again, yet it kept its terminal
+ * result (up to MAX_TERMINAL_RESULT_BYTES) because a same-process
+ * acknowledgement is refused. Three or four Solves on a large source then
+ * pushed the sidecar past MAX_FILE_BYTES and every later Solve failed at its
+ * durability barrier. Drop only what is provably unreachable: same run, same
+ * parent slot as the intent being written (whose bytes were just read), no
+ * live execution, and a parent the host itself reports as superseded.
+ */
+async function dropSupersededSourceRecoveryIntents(canvasFilePath, record, store, keep) {
+  const retained = [];
+  for (const intent of store.intents) {
+    const candidate = intent.intentId !== keep.intentId
+      && intent.kind === 'source-recovery'
+      && intent.parentRunId === keep.parentRunId
+      && intent.parentArtifactSlot === keep.parentArtifactSlot
+      && ![...executionsByLeaseToken.values()].some(execution => execution.intentId === intent.intentId);
+    if (candidate) {
+      const parent = await validateStoredParentArtifact(canvasFilePath, record, intent);
+      if (!parent.ok && parent.reason === 'parent-artifact-superseded') continue;
+    }
+    retained.push(intent);
+  }
+  store.intents = retained;
+}
+
 /* Authority lock is always acquired before the continuation mutex. */
 async function withExactContinuationAuthority(canvasFilePath, args, { sender = null, requireLease = false } = {}, callback) {
   const desired = normalizeIdentity(args);
@@ -619,6 +648,7 @@ export async function beginJobContinuation(canvasFilePath, args = {}) {
     store.intents = existing
       ? store.intents.map(candidate => candidate.intentId === intentId ? intent : candidate)
       : [...store.intents, intent];
+    await dropSupersededSourceRecoveryIntents(ownerCanvasFilePath, record, store, intent);
     try {
       await atomicWrite(filePath, store);
       return { ok: true, intent: publicIntent(intent) };
@@ -753,7 +783,7 @@ export async function checkpointJobContinuationResult(canvasFilePath, {
   const admitted = await withExactContinuationAuthority(canvasFilePath, {
     ...execution.intent,
     nodeId: ownerNodeId, parentRunId: runToken, intentId: token, leaseToken, operation: op,
-  }, { sender, requireLease: true }, async ({ store, intent: existing, filePath }) => {
+  }, { sender, requireLease: true }, async ({ store, intent: existing, filePath, ownerCanvasFilePath, record }) => {
     if (existing.parentRunId !== runToken || existing.operation !== op) return { saved: false, reason: 'ownership-mismatch' };
     const terminalResult = {
       operation: op,
@@ -764,6 +794,8 @@ export async function checkpointJobContinuationResult(canvasFilePath, {
     store.intents = store.intents.map(intent => intent.intentId === token
       ? { ...intent, terminalResult, updatedAt: terminalResult.completedAt }
       : intent);
+    // This Solve's own publication is what supersedes the previous Solve.
+    await dropSupersededSourceRecoveryIntents(ownerCanvasFilePath, record, store, existing);
     try {
       await atomicWrite(filePath, store);
       return {

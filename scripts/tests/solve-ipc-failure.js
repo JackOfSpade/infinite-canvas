@@ -157,6 +157,15 @@ export default [
         'profile collisions receive retry guidance');
       assert(/did not reach the site/i.test(solveIpcFailureMessage({ error: 'Captcha navigation stuck at about:blank' })),
         'blank navigation receives targeted guidance');
+      assert(/could not be saved/i.test(solveIpcFailureMessage({ error: 'The resolve-job-source result could not be saved for exact restart replay.' })),
+        'a Solve that ran but failed its save is not reported as a Solve that never started');
+      // Report 2026-11-19: the provider emitted `done`, then the reply barrier
+      // failed. The card kept the checkmark while the hub still counted the
+      // source as blocked.
+      const cardSource = fs.readFileSync(new URL('../../src/nodes/JobSourceCardNode.jsx', import.meta.url), 'utf8');
+      const restoreAt = cardSource.indexOf('&& (solveIpcResult || !isTerminalSourceStatus(prev.status))');
+      assert(restoreAt > cardSource.indexOf('let solveIpcResult = error?.solveIpcResult || null;'),
+        'a failed Solve IPC restores the card warning even after a terminal progress beat');
       const generic = solveIpcFailureMessage({ error: 'line one\nline two\n'.repeat(100) });
       assert(generic.length < 100 && !generic.includes('line one'),
         'raw multi-line diagnostics never become persisted card copy');
@@ -225,7 +234,7 @@ export default [
         && jobSource.includes("if (!resolverAlive()) { solveOutcome = 'interrupted'; return; }")
         && jobSource.includes('retireContinuationAsSuperseded = true;')
         && jobSource.includes("solveOutcome = 'fenced';")
-        && jobSource.includes("title: 'Solve could not open'")
+        && jobSource.includes("? 'Solve result was not saved' : 'Solve could not open',")
         && jobSource.includes('warningForSolveIpcFailure(prevForRestore?.warning, solveIpcResult)'),
       'job-source rejected invokes are normalized to friendly Solve feedback and restored warning state');
       assert(jobSource.includes('if (!failureError.solveIpcResult) {\n            EventLogger.error('),
@@ -352,7 +361,9 @@ export default [
     name: 'job-source Solve restores from a null progress state without throwing',
     run: () => {
       const jobSource = fs.readFileSync(new URL('../../src/nodes/JobSourceCardNode.jsx', import.meta.url), 'utf8');
-      const anchor = 'prev && (prev?.jobRunId || null) === (jobRunId || null) && !isTerminalSourceStatus(prev.status)';
+      // The early-return restore keeps the whole predicate on one line; the
+      // Solve-failure restore wraps after the run-token half.
+      const anchor = 'prev && (prev?.jobRunId || null) === (jobRunId || null)';
       // Pull each real updater out of the file by balancing setProgress's own
       // parens, so this exercises the shipped predicates rather than a copy.
       const updaters = [];
@@ -375,6 +386,19 @@ export default [
         'both the early-return restore and the Solve-failure restore still share the run-token predicate');
 
       const prevForRestore = { jobRunId: 'run-1', status: 'error', warning: { sourceId: 'indeed', severity: 'block' } };
+      // Report 2026-11-19: a provider `done` beat followed by a failed reply
+      // left the card with a checkmark while the hub still counted the source
+      // as blocked. A real IPC failure restores over that beat; a cancellation
+      // (no failure envelope) still yields to it, as asserted below.
+      const failedRestore = new Function(
+        'jobRunId', 'prevForRestore', 'isTerminalSourceStatus', 'warningForSolveIpcFailure', 'solveIpcResult',
+        `return (${updaters[1]});`,
+      )('run-1', prevForRestore, isTerminalSourceStatus, (warning) => warning, { success: false, error: 'could not be saved' });
+      const restoredOverDone = failedRestore({ jobRunId: 'run-1', status: 'done' });
+      assert(restoredOverDone?.status === 'error' && restoredOverDone.warning === prevForRestore.warning,
+        'a failed Solve IPC puts the warning back even after the provider reported done');
+      assert(failedRestore({ jobRunId: 'run-2', status: 'done' })?.jobRunId === 'run-2',
+        'a failed Solve IPC still leaves a newer generation alone');
       for (const updaterSrc of updaters) {
         const updater = new Function(
           'jobRunId',

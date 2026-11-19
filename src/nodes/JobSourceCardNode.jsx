@@ -1501,7 +1501,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
             EventLogger.error(`[JobSource][${data.hubId}/${data.sourceId}] Resolve did not start or complete:`, error);
           }
           addToast({
-            title: 'Solve could not open',
+            title: /could not be saved/i.test(message) ? 'Solve result was not saved' : 'Solve could not open',
             description: message,
             type: 'error',
             dedupeKey: `job-solve-failed:${data.hubId}:${data.sourceId}`,
@@ -1518,8 +1518,15 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       // that fails before any progress beat lands leaves `prev` null, and an
       // unguarded `prev.status` would throw inside the state updater on exactly
       // the failure path whose job is to put the actionable warning back.
+      //
+      // A failed Solve IPC restores over a terminal beat too. The provider can
+      // emit its `done` beat and then fail at the reply barrier (the result
+      // could not be saved), so nothing was applied. Keeping that `done` left
+      // the card with a checkmark and no warning while the hub still counted
+      // the source as blocked.
       setProgress(prev => (
-        prev && (prev?.jobRunId || null) === (jobRunId || null) && !isTerminalSourceStatus(prev.status)
+        prev && (prev?.jobRunId || null) === (jobRunId || null)
+          && (solveIpcResult || !isTerminalSourceStatus(prev.status))
           ? (solveIpcResult
             ? { ...prevForRestore, warning: warningForSolveIpcFailure(prevForRestore?.warning, solveIpcResult) }
             : prevForRestore)
