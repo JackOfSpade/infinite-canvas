@@ -140,3 +140,18 @@ export function formatSalaryCurrencyLabel(salary, location) {
   if (!info) return 'Currency not specified';
   return info.inferred ? `${info.currency} · inferred from location` : info.currency;
 }
+
+/**
+ * The currency label beside a card's salary. The listing's own text and place
+ * come first. When they name no currency but the pay check read the same offer
+ * in one (a city-only Glassdoor.ca listing found by a Canada search reads as
+ * CAD), show that reading, marked as inferred, instead of "not specified".
+ */
+export function salaryCurrencyChipLabel(salary, location, assessment = null) {
+  const label = formatSalaryCurrencyLabel(salary, location);
+  if (label !== 'Currency not specified') return label;
+  const currency = String(assessment?.offered?.currency || '').trim().toUpperCase();
+  return assessment?.currencyInferredFromLocation === true && /^[A-Z]{3}$/.test(currency)
+    ? `${currency} · inferred by the pay check`
+    : label;
+}

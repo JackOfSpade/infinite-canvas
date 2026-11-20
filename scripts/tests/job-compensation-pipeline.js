@@ -1373,6 +1373,29 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     );
     assert(worldwideCanadianRemote?.display === 'Toronto, Ontario, Canada',
       'a worldwide outside-region remote role may use a Canadian residence for compensation');
+    // Glassdoor.ca gives a city alone. Its "$" is read as CAD only when the
+    // listing is on glassdoor.ca AND its Job Search was for Canada.
+    {
+      const gd = { title: 'Software Engineer', company: 'X', location: 'Toronto', salary: '$126K - $163K (Employer provided)',
+        source: 'glassdoor', url: 'https://www.glassdoor.ca/job-listing/x.htm?jl=1', compensationSearchCountry: 'CA' };
+      const read = job => parseGuaranteedCashOffer(job, resolveCompensationLocation(job, { workMode: 'hybrid' }, {}));
+      const inferredCad = read(gd);
+      assert(inferredCad.usable && inferredCad.currency === 'CAD' && inferredCad.currencyInferredFromLocation === true
+        && /glassdoor\.ca/.test(inferredCad.currencyBasisNote) && /Canada/.test(inferredCad.currencyBasisNote),
+      'a city-only glassdoor.ca listing from a Canada search reads "$" as CAD and says why');
+      assert(resolveCompensationMarketCurrency({ ...gd, salary: '' }, 'Toronto').currency === 'CAD',
+        'the same rule gives a salaryless listing its market currency');
+      for (const [label, job] of [
+        ['a search for another country', { ...gd, compensationSearchCountry: 'US' }],
+        ['no search country', { ...gd, compensationSearchCountry: undefined }],
+        ['another Glassdoor site', { ...gd, url: 'https://www.glassdoor.com/job-listing/x.htm?jl=1' }],
+        ['a lookalike host', { ...gd, url: 'https://glassdoor.ca.example.com/x' }],
+        ['another board', { ...gd, source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/1' }],
+      ]) assert(read(job).reasonCode === 'currency_unclear', `${label} must not get the glassdoor.ca reading`);
+      assert(read({ ...gd, location: 'Seattle, WA' }).currency === 'USD', 'a place that names its region decides by itself');
+      assert(read({ ...gd, salary: 'US$126K - US$163K' }).currency === 'USD' && !read({ ...gd, salary: 'US$126K - US$163K' }).currencyBasisNote,
+        'a stated currency always wins');
+    }
     const originScopedResidence = compensationResidencesForJob(
       { compensationRemoteResidences: { usa: { city: 'Denver', subdivision: 'Colorado', country: 'United States' } } },
       { usa: { city: 'Austin', subdivision: 'Texas', country: 'United States' } },

@@ -168,6 +168,43 @@ const OTHER_ATTACHED_RE = new RegExp(`${ATTACHED_AMOUNT}(?:\\/\\s*(?:h|hr|hour|w
 // "Paid bi-weekly" says when a salary is paid, not what it is: on its own it does not set the pay period.
 const PAYROLL_PHRASE_RE = /\b(?:paid|pay\s+(?:schedule|period)|payroll)\b[^.;,)]{0,20}?\b(?:bi-?\s?weekly|semi-?\s?monthly|fortnightly|weekly|monthly|twice\s+(?:a|per)\s+month|every\s+(?:two|2|other)\s+weeks?)\b/gi;
 
+// A job board's country site shows pay in that country's currency with a bare
+// "$". Only the sites checked against saved listings are here.
+const BOARD_SITE_CURRENCIES = [
+  { source: 'glassdoor', host: /(?:^|\.)glassdoor\.ca$/i, site: 'glassdoor.ca', countryCode: 'CA', country: 'Canada', currency: 'CAD' },
+];
+
+/**
+ * Currency for a bare "$" when the listing's place names no country.
+ * Glassdoor.ca gives a city alone ("Toronto", "Burnaby"), so neither the pay
+ * nor the place says which dollar it is, and the card got no pay verdict.
+ *
+ * Two things must agree: the listing is on the board's own site for a country,
+ * and the Job Search that collected it was for that same country
+ * (`compensationSearchCountry`, attached per origin search for the pay check).
+ * A search for another country that the board redirected to this site does not
+ * qualify, and neither does a listing whose place names a country or region.
+ * An inference, never a stated currency: callers disclose it.
+ */
+export function boardSiteSalaryCurrency(job = {}, placeText = '') {
+  const place = String(placeText || job.location || '').trim();
+  if (!place || /\bremote\b/i.test(place)) return null;
+  const searchCountry = String(job.compensationSearchCountry || '').trim().toUpperCase();
+  if (!searchCountry) return null;
+  let host = '';
+  try { host = new URL(String(job.url || '')).hostname; } catch { return null; }
+  const entry = BOARD_SITE_CURRENCIES.find(candidate => candidate.source === String(job.source || '').toLowerCase()
+    && candidate.countryCode === searchCountry && candidate.host.test(host));
+  if (!entry) return null;
+  // Any place on the listing that names a country or region decides by itself.
+  if ([place, job.location].some(text => inferSalaryCurrency('', text || ''))) return null;
+  return {
+    currency: entry.currency,
+    inferred: true,
+    note: `The listing names no country, so its "$" was read as ${entry.currency}: it is listed on ${entry.site} and was found by a search for ${entry.country}.`,
+  };
+}
+
 /** Parse only stated, recurring cash compensation. Never manufactures an offer. */
 export function parseGuaranteedCashOffer(job = {}, comparisonLocation = null) {
   // Scrapers occasionally leave `salary` as whitespace while preserving a
@@ -286,7 +323,8 @@ export function parseGuaranteedCashOffer(job = {}, comparisonLocation = null) {
   const explicitCurrencies = explicitSalaryCurrencies(cashText);
   if (explicitCurrencies.length > 1) return { usable: false, reasonCode: 'currency_unclear' };
   const statedCurrency = explicitCurrencies[0] || (/^[A-Z]{3}$/.test(suppliedCurrency) ? suppliedCurrency : '');
-  const inferred = inferSalaryCurrency(cashText, comparisonDisplay || job.location || '');
+  const inferred = inferSalaryCurrency(cashText, comparisonDisplay || job.location || '')
+    || boardSiteSalaryCurrency(job, comparisonDisplay);
   const currency = statedCurrency || inferred?.currency || '';
   if (!currency) return { usable: false, reasonCode: 'currency_unclear' };
   if (!rangeAmounts.length && /\bstarting\s+(?:at|from)\b/i.test(text)) {
@@ -308,6 +346,7 @@ export function parseGuaranteedCashOffer(job = {}, comparisonLocation = null) {
     fixed,
     currency,
     currencyInferredFromLocation: !statedCurrency && Boolean(inferred?.inferred),
+    ...(!statedCurrency && inferred?.note ? { currencyBasisNote: inferred.note } : {}),
     ...(currencyAmbiguous ? { currencyAmbiguous: true } : {}),
     period: 'annual',
     annualized,
@@ -559,10 +598,12 @@ export function resolveCompensationMarketCurrency(job = {}, comparisonLocation =
     .map(value => String(value ?? '').trim())
     .filter(Boolean)
     .join(' ');
-  const resolved = inferSalaryCurrency(listingCurrencyText, display || job.location || '');
+  const resolved = inferSalaryCurrency(listingCurrencyText, display || job.location || '')
+    || (explicitSalaryCurrencies(listingCurrencyText).length ? null : boardSiteSalaryCurrency(job, display));
   return {
     currency: resolved?.currency || '',
     inferredFromLocation: Boolean(resolved?.inferred),
+    ...(resolved?.note ? { basisNote: resolved.note } : {}),
   };
 }
 
@@ -626,7 +667,8 @@ export function compensationAssessment({ offer, competitiveRanges, marketCurrenc
     locationMismatch: mismatch
       ? { cardLocation: mismatch.cardLocation, cardCountry: mismatch.cardCountry, comparedCountry: mismatch.comparedCountry }
       : null,
-    justification: String(justification || '').slice(0, 2400),
+    // How a bare "$" was read when the listing named no country.
+    justification: [String(justification || '').trim(), String(offer?.currencyBasisNote || '').trim()].filter(Boolean).join(' ').slice(0, 2400),
     sourceLinks: sanitizeLinks(sourceLinks),
     researchedAt,
     currencyInferredFromLocation: Boolean(currencyInferredFromLocation || offer?.currencyInferredFromLocation),

@@ -12,7 +12,7 @@ import { useIsMountedRef } from '../hooks/useIsMountedRef';
 import { usePublishJobRunStatus } from '../hooks/usePublishJobRunStatus';
 import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
 import { computeJobTreeView, isCompensationRecommendationCurrent, JOB_TREE_LAYOUT_RESTORE_KEY, normalizeCompensationAssessment, shouldReflowMeasuredJobCard } from './jobsearch/buildJobTree';
-import { formatSalaryCurrencyLabel } from '../utils/salaryCurrency';
+import { salaryCurrencyChipLabel } from '../utils/salaryCurrency';
 import { summarizeJobListingUrl } from '../utils/jobListingUrl';
 import { brokenLocalAiJobDriveState, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, revealSavedLocalApplicationOutputOnce, unregisterMountedJobCard } from '../utils/localAiFallback';
 import { hubCardFilter, isUnscoredPlaceholderCard, jobCardClosedAtMostOfficialSource } from '../utils/jobCardFilters';
@@ -615,13 +615,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     && ['failed', 'invalid', 'blocked', 'render-retry-required', 'revision-required', 'revision-exhausted', 'status-error'].includes(localApplication.status));
   const postingDisplay = useMemo(() => officialPostingDisplay(data), [data]);
   const unverifiedCompanyRules = unverifiedCompanyPreferences(data);
-  const salaryCurrencyLabel = useMemo(
-    () => formatSalaryCurrencyLabel(postingDisplay.salary, postingDisplay.location),
-    [postingDisplay.salary, postingDisplay.location]
-  );
   const compensationAssessment = useMemo(
     () => normalizeCompensationAssessment(data.compensationAssessment),
     [data.compensationAssessment]
+  );
+  const salaryCurrencyLabel = useMemo(
+    () => salaryCurrencyChipLabel(postingDisplay.salary, postingDisplay.location, compensationAssessment),
+    [postingDisplay.salary, postingDisplay.location, compensationAssessment]
   );
   const compensationDisplay = useMemo(() => jobCompensationDisplay(data, compensationAssessment), [data, compensationAssessment]);
   const personalRecommendation = compensationAssessment.personalRecommendation;
@@ -2026,7 +2026,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           {postingDisplay.salary && (
             <div className="text-emerald-400/80 text-xs mt-0.5">
               <span>{postingDisplay.salary}</span>
-              <span className="text-emerald-300/60" title={salaryCurrencyLabel.includes('inferred') ? 'Salary currency inferred from the job location' : 'Salary currency stated explicitly in the listing, when available'}>
+              <span className="text-emerald-300/60" title={salaryCurrencyLabel.includes('pay check') ? 'The listing names no currency or country. The pay check read it this way; its explanation says why.' : salaryCurrencyLabel.includes('inferred') ? 'Salary currency inferred from the job location' : 'Salary currency stated explicitly in the listing, when available'}>
                 {' · '}{salaryCurrencyLabel}
               </span>
             </div>

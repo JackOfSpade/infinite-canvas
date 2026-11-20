@@ -1098,7 +1098,7 @@ export function registerBoardHandlers(ctx) {
     } finally {
       // Renderer-injected per-origin residence context must never become card
       // or canvas data after it has served its one board-stage purpose.
-      for (const job of jobs) delete job?.compensationRemoteResidences;
+      for (const job of jobs) { delete job?.compensationRemoteResidences; delete job?.compensationSearchCountry; }
     }
   });
 

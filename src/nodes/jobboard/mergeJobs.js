@@ -139,11 +139,18 @@ function jobMatchScore(job) {
  * research; buildJobTreeNodes also uses an explicit whitelist, so it can never
  * become persisted card data.
  */
-export function attachCompensationRemoteResidences(jobs, residencesByOrigin = {}) {
-  return (Array.isArray(jobs) ? jobs : []).map((job) => ({
-    ...job,
-    compensationRemoteResidences: residencesByOrigin?.[job?.originHubId] || {},
-  }));
+export function attachCompensationRemoteResidences(jobs, residencesByOrigin = {}, searchCountryByOrigin = {}) {
+  return (Array.isArray(jobs) ? jobs : []).map((job) => {
+    // The country its Job Search was for. With the listing's own board site it
+    // tells the pay check which dollar a bare "$" is when the place names no
+    // country. Transient, like the residences.
+    const searchCountry = searchCountryByOrigin?.[job?.originHubId];
+    return {
+      ...job,
+      compensationRemoteResidences: residencesByOrigin?.[job?.originHubId] || {},
+      ...(typeof searchCountry === 'string' && searchCountry ? { compensationSearchCountry: searchCountry } : {}),
+    };
+  });
 }
 
 function normalizedAssessmentLocation(value) {

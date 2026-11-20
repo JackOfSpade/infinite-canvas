@@ -24,12 +24,13 @@ export default [
     name: 'salary rerun rebuilds Combine’s rows from cards plus the origin Search’s salary context',
     run: () => {
       const cards = [card('a', { compensationAssessment: { status: 'competitive' }, compensationCareerSnapshotId: 'x' }), card('b', { sourceJobKey: 'gone' })];
-      const modules = [{ id: 'search-1', remoteResidences: { canada: { country: 'Canada' } },
+      const modules = [{ id: 'search-1', remoteResidences: { canada: { country: 'Canada' } }, searchCountryCode: 'CA',
         scoredJobs: [{ sourceJobKey: 'key-a', compensationContext: { seniority: 'senior' } }] }];
       const { rows, matched } = compensationRowsFromCards(cards, modules);
       assert.equal(matched, 1);
       assert.deepEqual(rows[0].compensationContext, { seniority: 'senior' });
       assert.deepEqual(rows[0].compensationRemoteResidences, { canada: { country: 'Canada' } });
+      assert.equal(rows[0].compensationSearchCountry, 'CA', 'the origin Search’s country reaches a salary rerun as it reaches Combine');
       assert.equal(rows[0].compensationAssessment, undefined, 'the old answer is never sent back as input');
       assert.equal(rows[1].compensationContext, undefined, 'a card without a source row still gets researched from its own fields');
       assert.equal(rows[1].title, 'SE');

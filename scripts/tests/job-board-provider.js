@@ -5906,6 +5906,10 @@ export default [
       'each job must receive the residence map owned by its originHubId');
       assert(Object.keys(attached[2].compensationRemoteResidences).length === 0,
         'an unknown legacy origin must fail safely with no invented residence');
+      const withCountry = attachCompensationRemoteResidences(sourceJobs, residences, { 'search-ca': 'CA' });
+      assert(withCountry[1].compensationSearchCountry === 'CA' && !Object.hasOwn(withCountry[0], 'compensationSearchCountry')
+        && !Object.hasOwn(attached[1], 'compensationSearchCountry'),
+      'each job carries only its own Search’s country, and none when it is not supplied');
       assert(sourceJobs.every(job => !Object.hasOwn(job, 'compensationRemoteResidences')),
         'attaching transient research context must not mutate source modules’ stored scored jobs');
       return { origins: attached.length, sourceUntouched: true };
@@ -6194,7 +6198,7 @@ export default [
       const completion = combine.indexOf('[JobBoard] combine completed', publish);
       assert(snapshot > build && clear > snapshot && add > clear && publish > add && completion > publish,
         'a successful Re-combine must build first, snapshot once, replace the old cascade, then publish/log the completed board');
-      assert(combine.includes('union = attachCompensationRemoteResidences(union, remoteResidencesByOrigin)'),
+      assert(combine.includes('union = attachCompensationRemoteResidences(union, remoteResidencesByOrigin, searchCountryByOrigin)'),
         'Combine must attach each origin module’s residence map to the full union before the IPC call');
       assert(board.includes('const activeRequestId = compensationRequestIdRef.current;')
         && board.includes('if (!activeRequestId || payload?.nodeId !== id || payload?.requestId !== activeRequestId) return;'),

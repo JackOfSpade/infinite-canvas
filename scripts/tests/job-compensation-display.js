@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { normalizeCompensationAssessment } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { JOB_COMPENSATION_METHOD_VERSION, jobBoardSalaryNeedsRefresh } from '../../src/utils/jobCompensationVersion.js';
 import { jobCompensationDisplay } from '../../src/utils/jobCompensationDisplay.js';
-import { explicitSalaryCurrency, formatSalaryCurrencyLabel, inferSalaryCurrency } from '../../src/utils/salaryCurrency.js';
+import { explicitSalaryCurrency, formatSalaryCurrencyLabel, inferSalaryCurrency, salaryCurrencyChipLabel } from '../../src/utils/salaryCurrency.js';
 
 const range = (min, max, currency = 'CAD') => ({ min, max, currency, period: 'annual' });
 const comparison = (status, max = 100000) => ({ schemaVersion: 1, status,
@@ -105,6 +105,14 @@ export default [
       assert.equal(explicitSalaryCurrency('USD $100,000 / CAD $140,000'), null);
       assert.equal(inferSalaryCurrency('USD $100,000 / CAD $140,000', 'Toronto, ON'), null, 'location must not override several explicit currencies');
       assert.equal(formatSalaryCurrencyLabel('USD $100,000 / CAD $140,000', 'Toronto, ON'), 'Multiple currencies · see listing');
+      // The card's salary chip: the pay check's reading replaces "not specified" only.
+      const cadRead = { currencyInferredFromLocation: true, offered: { currency: 'CAD' } };
+      assert.equal(salaryCurrencyChipLabel('$126K - $163K', 'Toronto', cadRead), 'CAD · inferred by the pay check');
+      assert.equal(salaryCurrencyChipLabel('$126K - $163K', 'Toronto', null), 'Currency not specified');
+      assert.equal(salaryCurrencyChipLabel('$126K - $163K', 'Toronto', { currencyInferredFromLocation: false, offered: { currency: 'CAD' } }), 'Currency not specified');
+      assert.equal(salaryCurrencyChipLabel('$126K - $163K', 'Toronto', { currencyInferredFromLocation: true, offered: { currency: '' } }), 'Currency not specified');
+      assert.equal(salaryCurrencyChipLabel('US$126K', 'Toronto', cadRead), 'USD');
+      assert.equal(salaryCurrencyChipLabel('$126K', 'Seattle, WA', cadRead), 'USD · inferred from location');
       assert.equal(inferSalaryCurrency('$100,000', 'Toronto, ON / Austin, TX'), null, 'a multi-market location must not pick its first currency');
       assert.deepEqual(inferSalaryCurrency('CAD $100,000', 'Toronto, ON / Austin, TX'), { currency: 'CAD', inferred: false });
       assert.deepEqual(inferSalaryCurrency('$100,000', 'Toronto, Ontario, Canada'), { currency: 'CAD', inferred: true });

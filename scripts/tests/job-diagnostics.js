@@ -5620,6 +5620,24 @@ export default [
         && report.includes('run window: 2026-09-07 inclusive; provider horizon: 400d')
         && !report.includes('hubState: done, scraped: 3, results: 3'),
       'Node Diagnostics must keep post-filter counts, source selection, completion history, the effective run boundary, and re-scan readiness visible');
+      // A platform whose own date is older than the hub's decides where the
+      // next scan starts; the report must name that date, as the card does.
+      const behindPlatformReport = generateMarkdown({
+        description: 'Per-platform next window fixture.',
+        nodes: [{ id: 'job-hub-behind-platform', type: 'jobhub', data: {
+          hubState: 'done', enabledSourceIds: ['indeed', 'linkedin'],
+          lastCompletedRunAt: Date.UTC(2026, 8, 7, 14, 30, 0),
+          lastSearchCoverageStartedAt: Date.UTC(2026, 8, 6, 23, 30, 0),
+          sourceCoverage: {
+            indeed: { coverageStartedAt: Date.UTC(2026, 8, 6, 23, 30, 0), completedAt: Date.UTC(2026, 8, 7, 14, 30, 0) },
+            linkedin: { coverageStartedAt: new Date(2026, 8, 3, 12).getTime(), completedAt: new Date(2026, 8, 3, 13).getTime() },
+          },
+        } }],
+        edges: [], drawings: [], frontEndState: {}, nodeComponentStates: [],
+        nodeInternals: [{ id: 'job-hub-behind-platform', type: 'jobhub', position: { x: 0, y: 0 }, measured: { width: 260, height: 140 } }],
+      }).markdown;
+      assert(behindPlatformReport.includes('next window: 2026-09-03 through now (inclusive); anchor: source-coverage'),
+        'the next window starts at the oldest platform date still in the run, not at the hub date');
       const retainedHistoryReport = generateMarkdown({
         description: 'Retained history fixture.',
         nodes: [{ id: 'full-lookback-job-hub', type: 'jobhub', data: {
@@ -9517,6 +9535,21 @@ export default [
 {
     name: 'dedupJobsAcrossSources: location-aware cross-source dedup',
     run: () => {
+      // Same board, different listing ids: one opening posted under several
+      // employer profiles, or twice. Same title + full description + city.
+      const jd = 'Build customer-facing features for the mortgage product. '.repeat(20);
+      const gd = (company, id, extra = {}) => ({ title: 'Engineering Manager', company, location: 'Montreal', source: 'glassdoor', url: `https://www.glassdoor.ca/job-listing/x.htm?jl=${id}`, snippet: jd, ...extra });
+      const repostDrops = [];
+      const reposts = dedupJobsAcrossSources([
+        gd('Nesto Cloud', 1), gd('Nesto Group', 2), gd('Nesto', 3, { snippet: `${jd}\n#LI-Hybrid` }),
+        gd('Nesto', 4, { location: 'Toronto' }),
+        gd('Nesto', 5, { snippet: `${jd} Requires French.` }),
+        gd('Nesto', 6, { title: 'Senior Engineering Manager' }),
+        gd('Short', 7, { snippet: 'Brief teaser.' }), gd('Short Two', 8, { snippet: 'Brief teaser.' }),
+      ], { onDuplicate: entry => repostDrops.push(entry) });
+      assert(reposts.length === 6 && repostDrops.length === 2
+        && repostDrops.every(entry => entry.reason === 'same-source-full-description' && entry.kept.company === 'Nesto Cloud'),
+        `a same-board repost with the same title, full description and city collapses; another city, text, title or a short teaser does not (kept ${reposts.length}, dropped ${repostDrops.length})`);
       // Same posting scraped from two boards: different URL/source, one board
       // omits location — must still collapse (this is the whole point of
       // cross-source dedup: two boards showing the same job under two URLs).
@@ -9657,8 +9690,13 @@ export default [
         'a replay of an absorbed listing must resolve to the retained representative');
       const description = 'Requisition 101. ' + 'Build and operate connected products and support customers. '.repeat(15);
       const withDescriptions = [first, linked, concurrent].map(row => ({ ...row, snippet: description }));
-      assert(dedupJobsAcrossSources(withDescriptions).length === 2,
-        'matching full description text cannot erase a distinct requisition from an already represented board');
+      // Decided 2026-11-19: a second listing id on the same board with the same
+      // title, full description and city is a repost and collapses. Without a
+      // full description (above) the two ids still stay apart.
+      assert(dedupJobsAcrossSources(withDescriptions).length === 1,
+        'a same-board listing with the same title, full description and city is a repost of the retained one');
+      assert(dedupJobsAcrossSources(withDescriptions.map((row, index) => (index === 2 ? { ...row, location: 'Ottawa, ON' } : row))).length === 2,
+        'the same description posted on the same board for another city stays a distinct requisition');
     },
   },
 {

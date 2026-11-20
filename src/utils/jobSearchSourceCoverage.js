@@ -16,6 +16,11 @@ import {
 } from './jobSearchDateWindow.js';
 import { normalizeCompletionTimestamp } from './completionTimestamp.js';
 import { getCountryApplicableJobSourceIds } from './jobSourceCountryScope.js';
+import { ACTIVE_JOB_SOURCES } from './constants.js';
+import { normalizeJobCollectionLimits } from './jobCollectionLimits.js';
+import { getRunnableJobSourceIds, normalizeEnabledJobSourceIds } from './jobPlatformSelection.js';
+import { getSearchLocation, locationToLegacyText } from './jobSearchLocations.js';
+import { normalizeJobSearchInitialLookbackDays } from './jobSearchDateWindow.js';
 
 const PROTO_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
@@ -196,6 +201,26 @@ export function resolveJobSearchSourceWindows(
     }
   }
   return { sourceWindows, runWindow, runAnchor };
+}
+
+/**
+ * The window the Job Search card previews for its next scan: the broadest of
+ * the per-platform windows over the platforms the card has switched on and
+ * that can serve its country. Reports use this so they name the same start
+ * date as the card. A hub-level date alone is wrong whenever one platform's
+ * bookmark is older than the newest run's (Google still at the 18th while a
+ * Glassdoor-only run moved the hub date to the 19th).
+ */
+export function resolveNextJobSearchRunWindow(data, nodeId, now = new Date()) {
+  const runnable = getRunnableJobSourceIds(
+    normalizeEnabledJobSourceIds(data?.enabledSourceIds),
+    ACTIVE_JOB_SOURCES,
+    normalizeJobCollectionLimits(data?.collectionLimits),
+  );
+  const sourceIds = coverageSourceIdsForLocation(runnable, locationToLegacyText(getSearchLocation(data || {})));
+  const initialLookbackDays = normalizeJobSearchInitialLookbackDays(data?.initialLookbackDays ?? data?.maxAgeDays);
+  const { runWindow, runAnchor } = resolveJobSearchSourceWindows(data, nodeId, sourceIds, now, initialLookbackDays);
+  return { window: runWindow, anchor: runAnchor, initialLookbackDays };
 }
 
 const MAX_FINISHED_QUERIES_PER_SOURCE = 200;

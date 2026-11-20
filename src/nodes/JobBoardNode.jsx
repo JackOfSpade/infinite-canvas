@@ -685,6 +685,8 @@ function liveCombineInputs(boardId, nodes, edges) {
         jobPreferences: data.jobPreferences || '',
         searchBriefPlan: data.searchBriefPlan || null,
         remoteResidences,
+        // The country this Search is for; the pay check reads a bare "$" by it.
+        searchCountryCode: String((data.locationSnapshot?.searchLocation || getSearchLocation(data))?.countryCode || '').toUpperCase(),
         hubState: data.hubState || 'empty',
         include: !!terminal && isMergeableTerminalJobSearchOutcome(node, terminal)
           && (count > 0 || authoritativeEmpty)
@@ -3442,7 +3444,8 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         // Keep this transient routing input on the full union rather than
         // choosing one module's residence for every remote listing. The card
         // builder's explicit whitelist omits it after research is complete.
-        union = attachCompensationRemoteResidences(union, remoteResidencesByOrigin);
+        const searchCountryByOrigin = Object.fromEntries(readyAtCombine.map((module) => [module.id, module.searchCountryCode]));
+        union = attachCompensationRemoteResidences(union, remoteResidencesByOrigin, searchCountryByOrigin);
         const compensationResult = await window.electronAPI?.researchJobCompensation?.({
           jobs: union,
           nodeId: id,

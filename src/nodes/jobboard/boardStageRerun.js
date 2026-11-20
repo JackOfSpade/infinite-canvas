@@ -37,7 +37,7 @@ export function compensationRowsFromCards(cards, modules) {
       const key = cardSourceKey(row);
       if (key && !rows.has(key)) rows.set(key, row);
     }
-    byModule.set(module.id, { rows, remoteResidences: module.remoteResidences || {} });
+    byModule.set(module.id, { rows, remoteResidences: module.remoteResidences || {}, searchCountryCode: module.searchCountryCode || '' });
   }
   let matched = 0;
   const rows = cards.map(card => {
@@ -52,6 +52,7 @@ export function compensationRowsFromCards(cards, modules) {
       ...data,
       ...(context ? { compensationContext: context } : {}),
       compensationRemoteResidences: origin?.remoteResidences || {},
+      ...(origin?.searchCountryCode ? { compensationSearchCountry: origin.searchCountryCode } : {}),
     };
   });
   return { rows, matched };

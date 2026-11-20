@@ -43,7 +43,7 @@ import { writeSavedBugReport, buildClipboardPointer } from './bugReport/reportFi
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
 import { canAttemptJobSourceResolve, isJobSourceWarningGating } from '../../src/utils/jobSourceWarningPolicy.js';
 import { findJobSearchBoardActiveRecoveryOwner } from '../../src/utils/jobBoardSearchSelection.js';
-import { jobSearchNextAnchor, normalizeJobSearchInitialLookbackDays, resolveJobSearchDateWindow } from '../../src/utils/jobSearchDateWindow.js';
+import { resolveNextJobSearchRunWindow } from '../../src/utils/jobSearchSourceCoverage.js';
 import { isGoogleJobsInternalUrl, normalizeJobListingExternalUrl } from '../../src/utils/jobListingUrl.js';
 import { buildApplicationOutputReportSnapshot, buildJobBoardDiagnostics, buildJobCompletionAssessment, buildJobLinkSnapshot, buildJobRecoveryOfferSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown, jobSourceHealthAlarmItems } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
@@ -1100,14 +1100,12 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
             : d.locked || d.queuedModuleRun || cleanupPending
               ? 'blocked (Search is busy or completing saved cleanup)'
               : 'available on Job Search card';
-        const nextAnchor = jobSearchNextAnchor(d, n.id);
-        const initialLookbackDays = normalizeJobSearchInitialLookbackDays(
-          d.initialLookbackDays ?? d.maxAgeDays,
-        );
-        const nextWindow = resolveJobSearchDateWindow(nextAnchor.timestamp, new Date(), initialLookbackDays);
+        // The same per-platform resolution the Job Search card previews, so
+        // the report names the date the next scan really starts from.
+        const { window: nextWindow, anchor: nextAnchor, initialLookbackDays } = resolveNextJobSearchRunWindow(d, n.id);
         previewParts.push(
           `re-scan: ${rescanReadiness}`
-          + `; next window: ${localCalendarDateLabel(nextWindow.startDate)} through now (inclusive)`
+          + `; next window: ${localCalendarDateLabel(nextWindow.startTimestamp)} through now (inclusive)`
           + `; anchor: ${nextAnchor.source}`
           + `${nextAnchor.timestamp == null ? `; initial lookback: ${initialLookbackDays}d` : ''}`
           + `${nextWindow.capped ? `/${nextWindow.capReason || 'safety-cap'}` : ''}`,

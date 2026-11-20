@@ -191,6 +191,8 @@ function sourceListingIdentityKey(job) {
 // exact listing check must stay distinct from the title/company cross-board
 // heuristic: two concurrent requisitions can legitimately share title,
 // employer, and location while carrying different IDs / URLs.
+// The one exception is a repost with an identical full description (see
+// `repostMatch` in dedupJobsAcrossSources).
 function sameSourceListingIdentity(a, b) {
   const aIdentity = sourceListingIdentityKey(a);
   const bIdentity = sourceListingIdentityKey(b);
@@ -210,7 +212,10 @@ function sameSourceListingIdentity(a, b) {
 // still distinguish otherwise templated postings. Short snippets are excluded
 // because a shared boilerplate teaser is not strong enough evidence.
 function descriptionFingerprint(job) {
+  // "#LI-Hybrid", "#LI-DNI": LinkedIn distribution tags an employer's posting
+  // tool appends. Copies of one posting carry different ones.
   const text = String(job?.snippet || job?.description || '')
+    .replace(/#LI-[A-Za-z0-9]+/g, ' ')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
@@ -306,15 +311,25 @@ export function dedupJobsAcrossSources(jobs, { onDuplicate } = {}) {
         !sameSource(entry.rep) && (source || entry.rep.sourceRows.size > 0)
         && (city === null || entry.city === null || city === entry.city))?.rep
       : null;
-    const metadataMatch = !listingMatch && !contentMatch
+    // A repost on the SAME board: another listing id, but the same title, the
+    // same full description and the same city. Boards list one opening under
+    // several employer profiles ("Nesto", "Nesto Cloud", "Nesto Group") or
+    // twice a few hours apart; each copy was scored and shown as its own card.
+    // The city must be the same on both sides (two unread locations count as
+    // the same), so one description posted for several cities stays separate.
+    const repostMatch = !listingMatch && !contentMatch && contentKey && source
+      ? (contentGroups.get(contentKey) || []).find(entry => sameSource(entry.rep) && city === entry.city)?.rep
+      : null;
+    const metadataMatch = !listingMatch && !contentMatch && !repostMatch
       ? group.find(rep => !sameSource(rep) && (loc === null || rep.loc === null || loc === rep.loc))
       : null;
-    const match = listingMatch || contentMatch || metadataMatch;
+    const match = listingMatch || contentMatch || repostMatch || metadataMatch;
     if (match) {
       remember(match, job, source, listingIdentity, contentKey, city);
       onDuplicate?.({
         reason: listingMatch ? 'same-source-listing-id'
-          : contentMatch ? 'cross-source-full-description' : 'cross-source-title-company-location',
+          : contentMatch ? 'cross-source-full-description'
+            : repostMatch ? 'same-source-full-description' : 'cross-source-title-company-location',
         kept: match.job,
         dropped: job,
       });

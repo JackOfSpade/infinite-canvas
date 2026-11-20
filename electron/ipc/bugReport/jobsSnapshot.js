@@ -32,7 +32,7 @@ import { JOB_COLLECTION_AUTO_LABEL, JOB_COLLECTION_AUTO_LIMITS, normalizeJobColl
 import { consolidateBoardCascadeNodes, summarizeConsolidation } from '../../../src/utils/jobLocationConsolidation.js';
 import { classifyJobBoardSourceAdmission } from '../../../src/utils/jobBoardSourceAdmission.js';
 import { jobBoardPreferenceOverrideView } from '../../../src/utils/jobBoardPreferenceOverride.js';
-import { jobSearchNextAnchor, normalizeJobSearchInitialLookbackDays, resolveJobSearchDateWindow } from '../../../src/utils/jobSearchDateWindow.js';
+import { resolveNextJobSearchRunWindow } from '../../../src/utils/jobSearchSourceCoverage.js';
 import { describeSourceHealthFailures } from '../../../src/utils/jobCollectionScopeCaveats.js';
 
 // Per-source "Scrape pace" rows for the Active Browser Scrape block. The line
@@ -1144,7 +1144,9 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
       if (pagesWalked != null) {
         parts.push(String(sourceId).toLowerCase() === 'dice'
           ? `${pagesWalked} successfully fetched API page(s) (fan-out total)`
-          : `${pagesWalked} page request(s)`);
+          // Browser sources report the deepest page any one query reached, not
+          // the number of pages loaded across all queries.
+          : `deepest query walk ${pagesWalked} page(s)`);
       }
       // State the provider's own corpus size whenever the receipt retained it.
       // Without this the row reads the same whether the walk was exhaustive or
@@ -4254,10 +4256,16 @@ function connectedSourceDiagnosticSummary(source, selected, claimsByScope, scope
     searchWindow: { completionTimestamp: boardDiagnosticValue(rawSearchWindow, 'completionTimestamp') },
     initialLookbackDays: boardDiagnosticValue(data, 'initialLookbackDays')
       ?? boardDiagnosticValue(data, 'maxAgeDays'),
+    // Per-platform dates and the platform selection decide where the next
+    // scan starts; without them this line named the hub date instead.
+    sourceCoverage: boardDiagnosticValue(data, 'sourceCoverage'),
+    enabledSourceIds: boardDiagnosticValue(data, 'enabledSourceIds'),
+    collectionLimits: boardDiagnosticValue(data, 'collectionLimits'),
+    searchLocation: boardDiagnosticValue(data, 'searchLocation'),
+    preferredLocation: boardDiagnosticValue(data, 'preferredLocation'),
+    canonicalLocation: boardDiagnosticValue(data, 'canonicalLocation'),
   };
-  const nextAnchor = jobSearchNextAnchor(safeNextWindowData, sourceId);
-  const initialLookbackDays = normalizeJobSearchInitialLookbackDays(safeNextWindowData.initialLookbackDays);
-  const nextWindow = resolveJobSearchDateWindow(nextAnchor.timestamp, new Date(), initialLookbackDays);
+  const { window: nextWindow, anchor: nextAnchor, initialLookbackDays } = resolveNextJobSearchRunWindow(safeNextWindowData, sourceId);
   const nextWindowSummary = `${localCalendarDateLabel(nextWindow.startTimestamp)}→now/${nextAnchor.source}${nextAnchor.timestamp == null ? `/initial-${initialLookbackDays}d` : ''}${nextWindow.capped ? `/${nextWindow.capReason || 'cap'}` : ''}`;
   return `${boardDiagnosticIdList([sourceId], labelContext)} · selected=${selected.has(sourceId) ? 'yes' : 'no'} · hub-state=${receiptIdentifier(hubState, 'not retained')} · admission=${admissionKind} · selector-ready=${selector.ready === true ? 'yes' : selector.ready === false ? 'no' : 'not reproducible'} · selector-status=${selector.status} · selector-reason=${selector.reason} · re-scan=${rescanReadiness} · next-window=${nextWindowSummary} · fresh-capability=${consumption.freshCapability ? 'present' : 'absent'} · consumption-origin=${consumption.consumptionOrigin} · admission-version=${consumption.admissionVersion} · recovery-claim=${claimSummary || 'none'}`;
 }
@@ -6936,7 +6944,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           'provider-total', 'short-page', 'empty-page', 'end-of-results',
           'jobs-per-platform', 'pages-per-platform', 'page-ceiling', 'no-new-rows', 'page-error', 'query-error',
         ].includes(reason));
-        lines.push(`  - \`${k}\`: ${apiPageTotal ? 'successfully fetched' : 'walked'} ${v.pagesWalked} page${v.pagesWalked === 1 ? '' : 's'}${apiPageTotal ? ' across API fan-out queries' : ''}${v.stopReason ? ` → stopped: ${v.stopReason}` : ''}${dupNote}${flag}${blockFlag}`);
+        lines.push(`  - \`${k}\`: ${apiPageTotal ? 'successfully fetched' : 'walked'} ${v.pagesWalked} page${v.pagesWalked === 1 ? '' : 's'}${apiPageTotal ? ' across API fan-out queries' : ''}${v.stopReason ? ` → stopped: ${v.stopReason}` : ''}${apiPageTotal ? '' : ' · pages = the deepest single query walk, not every page loaded (Scrape pace counts those)'}${dupNote}${flag}${blockFlag}`);
       }
       // API/feed sources can paginate too. For API fan-out, the page total above
       // is summed across queries; this separate accounting says whether a
