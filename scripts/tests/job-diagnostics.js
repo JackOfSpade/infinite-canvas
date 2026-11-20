@@ -3760,6 +3760,37 @@ export default [
           }
         }
 
+        // Board research (company-research preferences, closed listings,
+        // official duplicates) removes cards after scoring, so a one-source
+        // Board's taxonomy input is the post-research count. That reduction
+        // reconciles only when the recorded removals account for every card.
+        for (const removed of [5, 4]) {
+          const output = generateMarkdown({
+            filterCode: 'FULL',
+            filterStats: {
+              hasJobNodes: true, currentNodeIds: [nodeId, 'researched-board'],
+              jobBoardStates: [{
+                id: 'researched-board', hubState: 'done', resultCount: 11, mergeUnique: 16,
+                locationPostingsCollapsed: 0, researchRemoved: removed, renderedCardCount: 11,
+                combineSignature: `${nodeId}=fingerprint`, connectedSourceHubIds: [nodeId],
+              }],
+            },
+            nodes: [{ id: nodeId, type: 'jobhub', data: {} }], edges: [], drawings: [],
+            frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+          }).markdown;
+          const assessment = output.slice(output.indexOf('## Job Completion Assessment'), output.indexOf('## Job Search Pipeline'));
+          if (removed === 5) {
+            assert(assessment.includes('✅ **VERIFIED COMPLETE**') && !assessment.includes('≠ taxonomy input'),
+              'cards removed by Board research reconcile scored against taxonomy input');
+            assert(assessment.includes('16 merged − 5 removed by research = 11 cards')
+              && assessment.includes('after 5 removed by Board research; this hub scored 16 job(s)'),
+              'the completion summary names the research removals');
+          } else {
+            assert(assessment.includes('⚠️ **INDETERMINATE**') && assessment.includes('scored 16 ≠ taxonomy input 11'),
+              'an unexplained research gap still flags');
+          }
+        }
+
         telemetry.bucketing.input = originalTaxonomyInput;
 
         const boardSourceMismatch = generateMarkdown({
