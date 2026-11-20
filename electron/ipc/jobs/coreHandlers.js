@@ -10,7 +10,8 @@ import { beginJobContinuation, claimJobContinuation, completeJobContinuation, li
 import { blankJobPreferencePlan, evaluateJobPreferences, interpretJobPreferences, isValidJobPreferencePlanSubmission, normalizeJobPreferencePlan, reapplyStoredJobPreferences, resolveSearchRoles, screenJobRolesByTitle } from '../jobPreferences.js';
 import { buildJobAnalysisSnapshot, normalizeSourceGatheredCount, officialPostingConsumerJobs, restoreOfficialPostingConsumerIdentity } from './scoring.js';
 import { callLLMRaw, callLLMText } from '../llm.js';
-import { careerDataFromCareerSnapshot, careerSnapshotId, careerSnapshotInputFingerprint, readCareerSnapshot, stableCareerJsonDigest, writeCareerSnapshotAtomically } from '../careerSnapshot.js';
+import { careerDataFromCareerSnapshot, careerSnapshotId, careerSnapshotInputFingerprint, readCareerSnapshot, readPinnedCareerSnapshot, stableCareerJsonDigest, writeCareerSnapshotAtomically } from '../careerSnapshot.js';
+import { careerTextDifference } from '../../../src/utils/careerTextDifference.js';
 import { claimJobAnalysisOperationAuthority, clearJobAnalysisOperationAuthority, currentJobAnalysisOperationAuthority, jobAnalysisOperationAuthorityReceipt, jobRunResumeOperationAuthority, revokeJobAnalysisOperationAuthority, withCurrentJobAnalysisOperationAuthority } from '../jobAnalysisOperationAuthorityStore.js';
 import { claimJobBoardRunExecution, releaseJobBoardRunExecution } from '../jobBoardRunLease.js';
 import { clearAllSessionStatusCache, getActiveLoginFlowInfo, invalidatePlatformSessionStatus } from '../accounts.js';
@@ -31,6 +32,39 @@ import { withSharedProfileLock } from '../sharedProfileLock.js';
 import { wrapUntrustedText } from '../promptSafety.js';
 
 const { app, shell } = electronPkg;
+
+
+const CAREER_SNAPSHOT_ID_FOR_COMPARISON = /^[a-f0-9]{64}$/;
+
+function careerSnapshotSourceText(snapshot) {
+  return (Array.isArray(snapshot?.sources) ? snapshot.sources : [])
+    .map(source => (typeof source?.text === 'string' ? source.text : ''))
+    .join('\n');
+}
+
+async function readCareerSnapshotText(snapshotId) {
+  try {
+    const snapshot = await readPinnedCareerSnapshot(careerSnapshotRoot(), snapshotId, { readOnly: true });
+    return snapshot ? careerSnapshotSourceText(snapshot) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function compareCareerSnapshotTexts(currentSnapshotId, previousSnapshotIds) {
+  const differences = {};
+  if (typeof currentSnapshotId !== 'string' || !CAREER_SNAPSHOT_ID_FOR_COMPARISON.test(currentSnapshotId)) return differences;
+  const previous = [...new Set(Array.isArray(previousSnapshotIds) ? previousSnapshotIds : [])]
+    .filter(id => typeof id === 'string' && CAREER_SNAPSHOT_ID_FOR_COMPARISON.test(id) && id !== currentSnapshotId)
+    .slice(0, 20);
+  if (previous.length === 0) return differences;
+  const currentText = await readCareerSnapshotText(currentSnapshotId);
+  for (const id of previous) {
+    const previousText = currentText == null ? null : await readCareerSnapshotText(id);
+    differences[id] = previousText == null ? null : careerTextDifference(previousText, currentText);
+  }
+  return differences;
+}
 
 export function registerCoreHandlers(ctx) {
   const { handleSafe, ipcMain, compileCareerSnapshot } = ctx;
@@ -287,6 +321,14 @@ export function registerCoreHandlers(ctx) {
     } finally {
       await stagedInput.cleanup();
     }
+  });
+
+  // Read-only: how much the current career data differs from earlier versions
+  // a platform was searched with, as a share of the career files' text. A
+  // snapshot that cannot be read answers null, so its cooldown stays.
+  handleSafe('compare-career-snapshots', async (_event, { currentSnapshotId, previousSnapshotIds } = {}) => {
+    const differences = await compareCareerSnapshotTexts(currentSnapshotId, previousSnapshotIds);
+    return { differences };
   });
 
   // Read-only: tells the saved-checkpoint banner what Continue will really do

@@ -3942,7 +3942,12 @@ export function buildJobCompletionAssessment(
   const boardLine = (totalBoards === 0
     ? '- Job Board consumers: none recorded.'
     : staleBoards.length > 0
-      ? `- Job Board consumers: ⚠️ ${staleBoards.length}/${totalBoards} stale — ${staleBoards.map(board => `\`${boardLabel(board)}\` has ${board.resultCount ?? '?'} cached result(s) hidden pending board action${board.staleReason ? ` (${board.staleReason})` : ''}`).join('; ')}${deliberatelyClearedBoards.length ? ` · deliberately cleared: ${deliberatelyClearedBoards.map(board => `\`${boardLabel(board)}\` (prior ${board.clearProvenance.priorResultCount ?? '?'}; result cards no longer present)`).join('; ')}` : ''}${totalBoards > boards.length ? ` · ${totalBoards - boards.length} additional board(s) omitted from this bounded summary` : ''}.`
+      ? `- Job Board consumers: ⚠️ ${staleBoards.length}/${totalBoards} stale — ${staleBoards.map(board => (board.hubState === 'done'
+        ? `\`${boardLabel(board)}\` has ${board.resultCount ?? '?'} cached result(s) hidden pending board action`
+        // The Board hides results as stale only while done: on any other state
+        // the flag hides nothing, the Board just has to search again.
+        : `\`${boardLabel(board)}\` is \`${board.hubState}\` with a stale flag (no results hidden; it needs a new Board search)`)
+        + (board.staleReason ? ` (${board.staleReason})` : '')).join('; ')}${deliberatelyClearedBoards.length ? ` · deliberately cleared: ${deliberatelyClearedBoards.map(board => `\`${boardLabel(board)}\` (prior ${board.clearProvenance.priorResultCount ?? '?'}; result cards no longer present)`).join('; ')}` : ''}${totalBoards > boards.length ? ` · ${totalBoards - boards.length} additional board(s) omitted from this bounded summary` : ''}.`
       : relevantBoards.length === 0
         ? `- Job Board consumers: ${totalBoards} recorded · none correlate to this source run.`
         : `- Job Board consumers: ${relevantBoards.length}/${totalBoards} correlate to this source run · no stale board state${deliberatelyClearedBoards.length ? ` · deliberately cleared: ${deliberatelyClearedBoards.map(board => `\`${boardLabel(board)}\` (prior ${board.clearProvenance.priorResultCount ?? '?'}; result cards no longer present)`).join('; ')}` : ''}${relevantBoards.some(board => board.locationPostingsCollapsed > 0) ? ` · location consolidation: ${relevantBoards.filter(board => board.locationPostingsCollapsed > 0).map(board => `${board.mergeUnique} merged − ${board.locationPostingsCollapsed} collapsed${board.researchRemoved ? ` − ${board.researchRemoved} removed by research` : ''} = ${board.resultCount} cards`).join('; ')}` : ''}${relevantBoards.some(board => board.researchRemoved > 0 && !(board.locationPostingsCollapsed > 0)) ? ` · Board research: ${relevantBoards.filter(board => board.researchRemoved > 0 && !(board.locationPostingsCollapsed > 0)).map(board => `${board.mergeUnique} merged − ${board.researchRemoved} removed by research = ${board.resultCount} cards`).join('; ')}` : ''}${renderedCardFacts.length ? ` · rendered cards: ${renderedCardFacts.join('; ')}` : ''}.`) + boardStateBoundedSuffix;
@@ -4431,6 +4436,13 @@ function boardResumeDiagnosticIds(resumeFacts) {
     ...resumeFacts.awaiting,
     ...resumeFacts.completed.flatMap(pair => [pair.sourceHubId, pair.runId]),
   ];
+}
+
+// Matches the Board's own rule: only a `done` Board hides its results as stale.
+function boardStaleDiagnostic(data) {
+  const raw = boardDiagnosticValue(data, 'stale');
+  if (raw === true && boardDiagnosticValue(data, 'hubState') !== 'done') return 'no (inert flag on a Board that is not done)';
+  return boardDiagnosticBoolean(raw);
 }
 
 function boardDiagnosticBoolean(value) {
@@ -4927,7 +4939,7 @@ export function buildJobBoardDiagnostics(nodes, edges, nodeComponentStates = [])
     } = row;
     const countQualification = bounded ? ' · counts may be partial (input bounded)' : '';
     const ownershipQualification = ambiguousOwnership ? ' · ⚠️ duplicate Board id in this canvas level; child/connectivity ownership ambiguous' : '';
-    lines.push(`- Board \`${boardDiagnosticIdList([boardDiagnosticValue(board, 'id')], labelContext).replace(/`/g, '')}\`: scope=${scope} · state=\`${receiptIdentifier(boardDiagnosticValue(data, 'hubState'), 'not retained')}\` · results=${resultCount ?? 'not retained'} · groups=${groups} · cards=${cards} · hidden-children=${hiddenChildren} · stale=${boardDiagnosticBoolean(boardDiagnosticValue(data, 'stale'))} · hidden=${boardDiagnosticBoolean(boardDiagnosticValue(data, 'hidden') ?? boardDiagnosticValue(data, 'isHidden'))}${countQualification}${ownershipQualification}.`);
+    lines.push(`- Board \`${boardDiagnosticIdList([boardDiagnosticValue(board, 'id')], labelContext).replace(/`/g, '')}\`: scope=${scope} · state=\`${receiptIdentifier(boardDiagnosticValue(data, 'hubState'), 'not retained')}\` · results=${resultCount ?? 'not retained'} · groups=${groups} · cards=${cards} · hidden-children=${hiddenChildren} · stale=${boardStaleDiagnostic(data)} · hidden=${boardDiagnosticBoolean(boardDiagnosticValue(data, 'hidden') ?? boardDiagnosticValue(data, 'isHidden'))}${countQualification}${ownershipQualification}.`);
     lines.push(`  - Sources: selected=${boardDiagnosticIdList(selected, labelContext)} · connected=${boardDiagnosticIdList(connectedIds, labelContext)} · combined=${boardDiagnosticIdList(combined, labelContext)} · combine-source-runs=${combineSourceRuns.length}${combineSourceRuns.length ? ` (${boardDiagnosticIdList(combineSourceRuns.map(pair => pair.sourceHubId), labelContext)})` : ''} · combine-signature=${typeof boardDiagnosticValue(data, 'combineSignature') === 'string' ? 'present' : 'absent'} · combine-input=${typeof boardDiagnosticValue(resume, 'combineInputSignature') === 'string' ? 'present' : 'absent'}.`);
     const selectedIds = new Set(selected);
     const savedScores = connectedNodes.slice(0, MAX_BOARD_DIAGNOSTIC_IDS).map(entry => boardDiagnosticSafely(

@@ -480,7 +480,7 @@ export default [
         ['alpha', 'beta'],
         nowDate,
       );
-      assert(JSON.stringify(hubOnly) === JSON.stringify({ due: ['alpha', 'beta'], fresh: [] }),
+      assert(JSON.stringify(hubOnly) === JSON.stringify({ due: ['alpha', 'beta'], fresh: [], careerChanged: [] }),
         'a fresh hub lastCompletedRunAt alone never makes a platform fresh');
 
       assert(JSON.stringify(partitionSourcesByRescrapeAge(data, ids, nowMs)) === JSON.stringify(partition),
@@ -493,10 +493,10 @@ export default [
         ['freshPlatform'],
         freshCompletedAt + JOB_SOURCE_RESCRAPE_INTERVAL_MS,
       );
-      assert(JSON.stringify(atEligibility) === JSON.stringify({ due: ['freshPlatform'], fresh: [] }),
+      assert(JSON.stringify(atEligibility) === JSON.stringify({ due: ['freshPlatform'], fresh: [], careerChanged: [] }),
         'the platform is due again at its next eligible time');
-      assert(JSON.stringify(partitionSourcesByRescrapeAge(null, ['alpha'], nowDate)) === JSON.stringify({ due: ['alpha'], fresh: [] })
-        && JSON.stringify(partitionSourcesByRescrapeAge({}, [], nowDate)) === JSON.stringify({ due: [], fresh: [] }),
+      assert(JSON.stringify(partitionSourcesByRescrapeAge(null, ['alpha'], nowDate)) === JSON.stringify({ due: ['alpha'], fresh: [], careerChanged: [] })
+        && JSON.stringify(partitionSourcesByRescrapeAge({}, [], nowDate)) === JSON.stringify({ due: [], fresh: [], careerChanged: [] }),
       'missing data or an empty selection partitions without throwing');
       return { freshCounted: partition.fresh.length, dueCounted: partition.due.length };
     },

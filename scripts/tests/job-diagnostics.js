@@ -4176,6 +4176,20 @@ export default [
           && staleBoardAssessment.includes('16 cached result(s) hidden pending board action')
           && staleBoardAssessment.includes('(1 updated)'),
         'focused JOBS reports retain compact stale-board semantics after their heavy node payload is filtered out');
+        const inertStaleResult = generateMarkdown({
+          description: 'An empty Board keeps a stale flag from before it was emptied.', filterCode: 'JOBS',
+          filterStats: {
+            hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId, 'inert-stale-board'],
+            omittedSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+            jobBoardStates: [{ id: 'inert-stale-board', hubState: 'empty', resultCount: 0, stale: true }],
+            jobBoardStateCount: 1,
+          },
+          nodes: [], edges: [], drawings: [], frontEndState: { currentFile: canvas },
+          nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        assert(!inertStaleResult.includes('hidden pending board action')
+          && inertStaleResult.includes('is `empty` with a stale flag (no results hidden; it needs a new Board search)'),
+          'a stale flag on a Board that is not done hides nothing (the Board shows stale only when done), so the report must not claim hidden results');
         const issueReporterSource = fs.readFileSync(path.resolve('src/hooks/useIssueReporter.js'), 'utf8');
         assert(issueReporterSource.includes('jobBoardStates: allJobBoardStates.slice(0, 25)')
           && issueReporterSource.includes('jobBoardStateCount: allJobBoardStates.length')

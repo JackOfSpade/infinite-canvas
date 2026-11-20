@@ -145,6 +145,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   discardBoardJobRun: (args) => ipcRenderer.invoke('discard-board-job-run', args),
   parseCareerData: (args) => ipcRenderer.invoke('parse-career-data', args),
   inspectCareerCompileResume: (args) => ipcRenderer.invoke('inspect-career-compile-resume', args),
+  compareCareerSnapshots: (args) => ipcRenderer.invoke('compare-career-snapshots', args),
   // New Local AI application jobs use an app-owned copy/paste handoff. Legacy
   // filesystem coding-agent jobs remain supported for existing job folders.
   queueLocalApplication: (args) => ipcRenderer.invoke('queue-local-application', args),

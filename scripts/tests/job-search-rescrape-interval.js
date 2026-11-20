@@ -42,16 +42,18 @@ export default [
         '          laneTurnData,',
         '          runActiveEnabledSourceIds,',
         '          new Date(),',
+        '          { careerDifferences },',
         '        );',
-      ].join('\n')), 'the gate partitions the runnable platform ids as of now');
+      ].join('\n')), 'the gate partitions the runnable platform ids as of now, with any measured career-data change');
       assert(start > search.indexOf('runActiveEnabledSourceIds = getRunnableJobSourceIds('),
         'the gate runs after the runnable platform ids are computed');
       assert(start < search.indexOf('const resolvedSourceWindows = recoveredPreSearchContext'),
         'the gate runs before the per-platform windows are resolved');
       assert(start < search.indexOf('resolveJobSearchSourceWindows(', start),
         'no window is resolved from the platform list the gate will narrow');
-      assert(!gate.includes('window.electronAPI') && !gate.includes('updateGlobal('),
-        'the gate never contacts a provider and never mutates node data');
+      const ipcCalls = [...gate.matchAll(/window\.electronAPI\??\.(\w+)/g)].map(match => match[1]);
+      assert(ipcCalls.every(name => name === 'compareCareerSnapshots') && !gate.includes('updateGlobal('),
+        'the gate never contacts a provider (its one IPC is the read-only career-data comparison) and never mutates node data');
       return { gatedFreshOnly: true };
     },
   },

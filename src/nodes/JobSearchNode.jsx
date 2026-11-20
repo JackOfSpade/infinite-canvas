@@ -125,8 +125,7 @@ import {
   sourceOwedKeysForRun,
   sourceReadContextKey,
   sourceReadKeysForRun,
-  sourcesWithoutDateProgress,
-} from '../utils/jobSearchSourceCoverage';
+  sourcesWithoutDateProgress, coolingCareerSnapshotIds, sourceCoverageCareerStampPatch, savedCareerDifferences, careerCooldownComparisonPatch } from '../utils/jobSearchSourceCoverage';
 import { backgroundJobResumeRequest } from '../utils/workspaceStartupRecovery';
 import {
   canvasCareerImportCandidates,
@@ -4213,11 +4212,42 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // exactly the platforms that failed or were blocked. Recovery replays a
       // frozen window and must never consult (or narrow) today's coverage.
       if (!recoveredPreSearchContext) {
+        // Platforms searched with other career data skip the cooldown when
+        // today's career files are more than half different from those.
+        const comparedCareerSnapshotIds = coolingCareerSnapshotIds(laneTurnData, runActiveEnabledSourceIds, new Date(), { unsavedOnly: true });
+        let careerDifferences = null;
+        if (comparedCareerSnapshotIds.length > 0 && window.electronAPI?.compareCareerSnapshots) {
+          try {
+            const comparison = await window.electronAPI.compareCareerSnapshots({
+              currentSnapshotId: laneTurnData.careerSnapshotId,
+              previousSnapshotIds: comparedCareerSnapshotIds,
+            });
+            // Only for the career data the comparison was made against.
+            if (getNode(currentId)?.data?.careerSnapshotId === laneTurnData.careerSnapshotId) {
+              careerDifferences = comparison?.differences || null;
+            }
+          } catch (error) {
+            EventLogger.log(`[JobSearch][${currentId}] Career data comparison failed; the 24-hour cooldown applies: ${error?.message || error}`);
+          }
+        }
         const rescrapePartition = partitionSourcesByRescrapeAge(
           laneTurnData,
           runActiveEnabledSourceIds,
           new Date(),
+          { careerDifferences },
         );
+        if (rescrapePartition.careerChanged.length > 0) {
+          EventLogger.log(
+            `[JobSearch][${currentId}] Career data changed since the last search, so the 24-hour cooldown is lifted for: `
+            + rescrapePartition.careerChanged
+              .map(entry => `${JOB_SOURCE_BY_ID[entry.sourceId]?.name || entry.sourceId} (${Math.round(entry.difference * 100)}% different)`)
+              .join(', '),
+          );
+        }
+        const keptCareerDifferences = Object.values({ ...savedCareerDifferences(laneTurnData), ...(careerDifferences || {}) }).filter(Number.isFinite);
+        const careerChangeNote = keptCareerDifferences.length > 0
+          ? ` Your career data is ${Math.round(Math.max(...keptCareerDifferences) * 100)}% different from the last search; more than 50% would allow an earlier search.`
+          : '';
         if (rescrapePartition.fresh.length > 0) {
           const freshSourceIds = rescrapePartition.fresh.map(entry => entry.sourceId);
           const describeFresh = () => rescrapePartition.fresh
@@ -4246,12 +4276,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             // 24-hour rule has no exceptions; the run stops without scraping.
             EventLogger.log(
               `[JobSearch][${currentId}] Skipped recently scraped platforms: ${describeFresh()}`
-              + ' — no saved result to hand on, nothing scraped',
+              + ' — no saved result to hand on, nothing scraped'
+              + (keptCareerDifferences.length > 0
+                ? ` (career data ${keptCareerDifferences.map(value => `${Math.round(value * 100)}%`).join('/')} different; over 50% lifts the cooldown)`
+                : ''),
             );
             return searchRunOutcome('not-ready', {
               reason: 'platforms-recently-scraped',
               error: 'Every selected job platform finished a scrape in the last 24 hours. '
-                + `The next one can run after ${new Date(earliestNextEligibleAt).toLocaleString()}.`,
+                + `The next one can run after ${new Date(earliestNextEligibleAt).toLocaleString()}.${careerChangeNote}`,
             });
           } else {
             runEnabledSourceIds = runEnabledSourceIds.filter(
@@ -11855,6 +11888,30 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // were already shown with a fresh scrape. Every mode keeps search settings
   // and scan-date history, so the only way to reset the scan window is a
   // brand-new Job Search module.
+  // Save how much the approved career data differs from the earlier versions
+  // still-cooling platforms were searched with. More than 50% lifts their
+  // 24-hour cooldown, and the Board reads this before it decides to search.
+  const careerComparisonInFlightRef = useRef('');
+  useEffect(() => {
+    const currentSnapshotId = data.careerSnapshotId;
+    if (!currentSnapshotId || data.locked || !window.electronAPI?.compareCareerSnapshots) return;
+    const pending = coolingCareerSnapshotIds(data, null, Date.now(), { unsavedOnly: true });
+    if (pending.length === 0) return;
+    const requestKey = `${currentSnapshotId}:${pending.join(',')}`;
+    if (careerComparisonInFlightRef.current === requestKey) return;
+    careerComparisonInFlightRef.current = requestKey;
+    window.electronAPI.compareCareerSnapshots({ currentSnapshotId, previousSnapshotIds: pending })
+      .then((comparison) => {
+        updateGlobal(id, (node) => careerCooldownComparisonPatch(node?.data, currentSnapshotId, comparison?.differences));
+        if (careerComparisonInFlightRef.current === requestKey) careerComparisonInFlightRef.current = '';
+      })
+      .catch((error) => {
+        // The key stays set, so a failing comparison is not retried on every
+        // render; the cooldown simply applies.
+        EventLogger.log(`[JobSearch][${id}] Career data comparison failed; the 24-hour cooldown applies: ${error?.message || error}`);
+      });
+  }, [data, id, updateGlobal]);
+
   const handleClearCareerFiles = useCallback(async (e, requestedMode = 'all') => {
     e?.stopPropagation();
     // A lock may have landed after this callback's render closure was created.
@@ -12039,6 +12096,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // from the old career data, so the brief reopens with it. The kept
         // jobs, their run token, and scan history are untouched.
         ...buildJobHubCareerOnlyClearPatch({ jobAnalysisClearedAt, jobAnalysisClearedRunId }),
+        // Bookmarks keep the career data they were searched with, so new
+        // files can be compared with it (over 50% different lifts the cooldown).
+        ...sourceCoverageCareerStampPatch(liveData),
         ...jobSearchDateDiagnosticPatch(liveData, { event: 'clear', reason: 'clear-career', runId }),
         manualAiResume: null,
         _boardRollbackSourceProgressFence: null,
@@ -12075,6 +12135,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       pendingJobs: null, scrapeWarnings: [], dragHover: null,
       collectionScopeCaveats: [],
       ...buildJobHubCareerClearPatch({ jobAnalysisClearedAt, jobAnalysisClearedRunId }),
+      // See the career-only clear above: bookmarks keep their career data.
+      ...sourceCoverageCareerStampPatch(liveData),
       savedJobsRescore: null,
       savedJobsCareerClearedAt: null,
       manualAiResume: null,

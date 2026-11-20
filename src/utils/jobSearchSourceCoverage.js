@@ -21,6 +21,7 @@ import { normalizeJobCollectionLimits } from './jobCollectionLimits.js';
 import { getRunnableJobSourceIds, normalizeEnabledJobSourceIds } from './jobPlatformSelection.js';
 import { getSearchLocation, locationToLegacyText } from './jobSearchLocations.js';
 import { normalizeJobSearchInitialLookbackDays } from './jobSearchDateWindow.js';
+import { careerChangeLiftsCooldown } from './careerTextDifference.js';
 
 const PROTO_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
@@ -61,6 +62,12 @@ export function serializeJobSearchWindow(window, anchorSource) {
   };
 }
 
+const CAREER_SNAPSHOT_ID_PATTERN = /^[a-f0-9]{64}$/;
+
+function coverageCareerSnapshotId(value) {
+  return typeof value === 'string' && CAREER_SNAPSHOT_ID_PATTERN.test(value) ? value : null;
+}
+
 /** Normalize the durable per-platform bookmark map at the trust boundary. */
 export function normalizeSourceCoverage(raw) {
   const normalized = {};
@@ -72,10 +79,15 @@ export function normalizeSourceCoverage(raw) {
     const coverageStartedAt = normalizeCompletionTimestamp(entry.coverageStartedAt);
     if (coverageStartedAt == null) continue;
     const completedAt = normalizeCompletionTimestamp(entry.completedAt) ?? coverageStartedAt;
+    const careerSnapshotId = coverageCareerSnapshotId(entry.careerSnapshotId);
     normalized[sourceId] = {
       coverageStartedAt,
       completedAt,
       runId: typeof entry.runId === 'string' && entry.runId.trim() ? entry.runId : null,
+      // The approved career data this platform was last searched with. The
+      // cooldown is lifted when today's career data differs from it by more
+      // than half (see careerTextDifference).
+      ...(careerSnapshotId ? { careerSnapshotId } : {}),
     };
   }
   return normalized;
@@ -103,20 +115,35 @@ function rescrapeNowMs(now) {
  * it must never make a platform fresh. A future `completedAt` (clock skew) is
  * due as well, otherwise a skewed timestamp would block that platform forever.
  */
-export function partitionSourcesByRescrapeAge(data, sourceIds, now = Date.now()) {
+export function partitionSourcesByRescrapeAge(data, sourceIds, now = Date.now(), { careerDifferences = null } = {}) {
   const nowMs = rescrapeNowMs(now);
   const sourceCoverage = normalizeSourceCoverage(data?.sourceCoverage);
+  const currentCareerSnapshotId = coverageCareerSnapshotId(data?.careerSnapshotId);
+  // The card's saved comparison, plus any the caller has just measured.
+  const differences = { ...savedCareerDifferences(data), ...(isPlainRecord(careerDifferences) ? careerDifferences : {}) };
   const due = [];
   const fresh = [];
+  const careerChanged = [];
   for (const sourceId of uniqueSourceIds(sourceIds)) {
-    const completedAt = hasOwn(sourceCoverage, sourceId)
-      ? sourceCoverage[sourceId].completedAt
-      : null;
+    const entry = hasOwn(sourceCoverage, sourceId) ? sourceCoverage[sourceId] : null;
+    const completedAt = entry ? entry.completedAt : null;
     if (
       completedAt != null
       && completedAt <= nowMs
       && nowMs - completedAt < JOB_SOURCE_RESCRAPE_INTERVAL_MS
     ) {
+      // Career data more than half different from what this platform was
+      // searched with means different searches: the cooldown does not apply.
+      const searchedWith = entry.careerSnapshotId || null;
+      const difference = searchedWith && currentCareerSnapshotId && searchedWith !== currentCareerSnapshotId
+        && hasOwn(differences, searchedWith)
+        ? differences[searchedWith]
+        : null;
+      if (careerChangeLiftsCooldown(difference)) {
+        careerChanged.push({ sourceId, difference });
+        due.push(sourceId);
+        continue;
+      }
       fresh.push({
         sourceId,
         completedAt,
@@ -126,7 +153,78 @@ export function partitionSourcesByRescrapeAge(data, sourceIds, now = Date.now())
     }
     due.push(sourceId);
   }
-  return { due, fresh };
+  return { due, fresh, careerChanged };
+}
+
+/**
+ * The career snapshots, other than the card's current one, that cooling
+ * platforms were last searched with. The run asks the main process how much
+ * each differs from the current career data before it applies the cooldown.
+ */
+export function coolingCareerSnapshotIds(data, sourceIds, now = Date.now(), { unsavedOnly = false } = {}) {
+  const current = coverageCareerSnapshotId(data?.careerSnapshotId);
+  if (!current) return [];
+  const sourceCoverage = normalizeSourceCoverage(data?.sourceCoverage);
+  const ids = uniqueSourceIds(sourceIds ?? Object.keys(sourceCoverage));
+  // Cooling by date alone, whatever any comparison says.
+  const { fresh } = partitionSourcesByRescrapeAge({ ...data, careerCooldownComparison: null }, ids, now);
+  const saved = savedCareerDifferences(data);
+  const found = new Set();
+  for (const { sourceId } of fresh) {
+    const searchedWith = sourceCoverage[sourceId]?.careerSnapshotId;
+    if (!searchedWith || searchedWith === current) continue;
+    if (unsavedOnly && hasOwn(saved, searchedWith)) continue;
+    found.add(searchedWith);
+  }
+  return [...found];
+}
+
+/**
+ * The card's saved career comparison: how much its current career data
+ * differs from each earlier version a platform was searched with. Only valid
+ * for the career data it was measured against, so the Board's admission, its
+ * wake-up timer and the run all read the same answer.
+ */
+export function savedCareerDifferences(data) {
+  const saved = data?.careerCooldownComparison;
+  const current = coverageCareerSnapshotId(data?.careerSnapshotId);
+  if (!current || !isPlainRecord(saved) || saved.careerSnapshotId !== current || !isPlainRecord(saved.differences)) return {};
+  const out = {};
+  for (const id of Object.keys(saved.differences)) {
+    const value = saved.differences[id];
+    if (coverageCareerSnapshotId(id) && (value === null || (Number.isFinite(value) && value >= 0 && value <= 1))) out[id] = value;
+  }
+  return out;
+}
+
+/** The patch that saves newly measured differences for the current career data. */
+export function careerCooldownComparisonPatch(data, careerSnapshotId, differences) {
+  const current = coverageCareerSnapshotId(data?.careerSnapshotId);
+  if (!current || current !== careerSnapshotId || !isPlainRecord(differences)) return null;
+  return {
+    careerCooldownComparison: {
+      careerSnapshotId: current,
+      differences: { ...savedCareerDifferences(data), ...differences },
+    },
+  };
+}
+
+/**
+ * Before Clear removes the card's career data, write it onto bookmarks that do
+ * not name the career data they were searched with yet (saved before bookmarks
+ * recorded it), so the next career files can be compared with it.
+ */
+export function sourceCoverageCareerStampPatch(data) {
+  const careerSnapshotId = coverageCareerSnapshotId(data?.careerSnapshotId);
+  if (!careerSnapshotId) return {};
+  const coverage = normalizeSourceCoverage(data?.sourceCoverage);
+  let changed = false;
+  for (const sourceId of Object.keys(coverage)) {
+    if (coverage[sourceId].careerSnapshotId) continue;
+    coverage[sourceId] = { ...coverage[sourceId], careerSnapshotId };
+    changed = true;
+  }
+  return changed ? { sourceCoverage: coverage } : {};
 }
 
 /**
@@ -568,6 +666,7 @@ export function buildSourceCoverageCommitPatch(
     readKeysBySource,
     skippedSourceIds,
     participatingSourceIds,
+    careerSnapshotId = null,
   },
   nodeId,
 ) {
@@ -592,6 +691,10 @@ export function buildSourceCoverageCommitPatch(
   }
 
   const advanceRunId = typeof runId === 'string' && runId.length > 0 ? runId : null;
+  // The career data this run searched with: the card's, unless the caller
+  // names the run's own.
+  const runCareerSnapshotId = coverageCareerSnapshotId(careerSnapshotId)
+    || coverageCareerSnapshotId(data?.careerSnapshotId);
   const completedIds = uniqueSourceIds(completedSourceIds);
   for (const sourceId of completedIds) {
     const existing = hasOwn(next, sourceId) ? next[sourceId] : null;
@@ -605,6 +708,7 @@ export function buildSourceCoverageCommitPatch(
       coverageStartedAt: Math.max(existing?.coverageStartedAt ?? -Infinity, coveredFrom),
       completedAt: Math.max(existing?.completedAt ?? -Infinity, completed),
       runId: advanceRunId,
+      ...(runCareerSnapshotId ? { careerSnapshotId: runCareerSnapshotId } : {}),
     };
   }
 

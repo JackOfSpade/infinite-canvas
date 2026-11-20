@@ -58,6 +58,8 @@ import official_posting_r3_service from './tests/official-posting-r3-service.js'
 import official_posting_r3_recovery from './tests/official-posting-r3-recovery.js';
 import official_posting_r4_bundle from './tests/official-posting-r4-bundle.js';
 import official_posting_r4_ui from './tests/official-posting-r4-ui.js';
+import toast_stack from './tests/toast-stack.js';
+import career_change_cooldown from './tests/career-change-cooldown.js';
 import official_posting_r4_skills from './tests/official-posting-r4-skills.js';
 import official_posting_r4_generation from './tests/official-posting-r4-generation.js';
 import official_posting_r2_guard from './tests/official-posting-r2-guard.js';
@@ -337,6 +339,8 @@ const testGroups = [
   ['official-posting-r3-recovery.js', official_posting_r3_recovery],
   ['official-posting-r4-bundle.js', official_posting_r4_bundle],
   ['official-posting-r4-ui.js', official_posting_r4_ui],
+  ['toast-stack.js', toast_stack],
+  ['career-change-cooldown.js', career_change_cooldown],
   ['official-posting-r4-skills.js', official_posting_r4_skills],
   ['official-posting-r4-generation.js', official_posting_r4_generation],
   ['official-posting-r2-guard.js', official_posting_r2_guard],
