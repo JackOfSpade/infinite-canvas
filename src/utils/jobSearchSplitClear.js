@@ -1,18 +1,16 @@
-// Pure helpers for splitting a Job Search hub's "Clear career data" into two
-// independent clears: "Clear Scrape" (drop results, keep career identity) and
-// "Clear Career Data" (drop identity, keep saved jobs for a Board re-score).
+// Pure helpers for a Job Search hub's clears and Board re-scans: "Clear Career
+// Data" (drop identity, keep saved jobs for a Board re-score) and the re-scan
+// capability a Board mints before it scrapes a finished Search again.
 // This module must not import jobBoardSourceAdmission (which imports it).
 
 import {
   buildJobHubCareerClearPatch,
   hubHasAcceptedInitialDrop,
 } from './hubDropEligibility.js';
-import { normalizeJobAnalysisClearRunId } from './jobAnalysisRecovery.js';
 import { hasLegacyPageScoring, JOB_SCORING_CONTRACT } from './jobScoringContract.js';
 import {
   approveCareerImportCompilation,
   beginCareerImportCompilation,
-  careerResumeInputPaths,
   currentApprovedCareerImportSnapshot,
 } from './jobCareerCompilationReceipt.js';
 import {
@@ -128,91 +126,31 @@ export function buildJobHubCareerOnlyClearPatch({
   };
 }
 
-// Clear Scrape: reset every scrape result but keep career identity and
-// settings, and re-mint Board scan permission against the SAME approved
-// snapshot so the next Board run can start a fresh scan without a re-import.
-export function buildJobHubScrapeClearPatch(data, {
+// Board re-scan permission for a finished Search. A Board may scrape a card
+// again only through a fresh, one-shot career-import capability. This mints one
+// against the SAME approved snapshot (no recompile) and touches nothing else:
+// the saved jobs stay on the card until the new run replaces them, so a
+// cancelled or failed re-scan leaves the earlier result exactly as it was.
+// Null when the card has no approved snapshot to bind the capability to.
+export function buildJobHubRescanCapabilityPatch(data, {
   nodeId,
-  jobAnalysisClearedAt = null,
-  jobAnalysisClearedRunId = null,
-  materializedSearchHistory = {},
   createCapability = createJobCareerImportCapability,
   now = Date.now(),
 } = {}) {
-  const patch = {
-    hubState: 'empty',
-    scoredJobs: null,
-    finalSourceCounts: {},
-    resultCount: 0,
-    totalScoredCount: 0,
-    scrapedCount: 0,
-    gatheredCount: 0,
-    scoreThreshold: 0,
-    jobRunId: null,
-    jobCount: null,
-    scoreRangeMin: null,
-    scoreRangeMax: null,
-    aiSkipped: false,
-    collectionOnly: false,
-    testMode: false,
-    resultDisposition: null,
-    searchWindow: null,
-    pendingJobs: null,
-    scrapeWarnings: [],
-    collectionScopeCaveats: [],
-    preferenceMatchedCount: null,
-    preferenceFilteredCount: null,
-    preferenceEvaluation: null,
-    preferenceCandidatePool: null,
-    preferenceCareerSnapshotId: null,
-    scoringCareerSnapshotId: null,
-    savedJobsRescore: null,
-    savedJobsCareerClearedAt: null,
-    errorMessage: null,
-    rerunOutcome: null,
-    rerunNotice: null,
-    reanalysisNotice: null,
-    testModeNote: null,
-    queuedModuleRun: null,
-    analysisOperation: null,
-    retryOperation: null,
-    retryOperationFor: null,
-    pendingCollectionCompletion: null,
-    // Only the transient per-platform staging is cleared. Durable
-    // `sourceCoverage` is module history, like `materializedSearchHistory`
-    // below, and must survive Clear Scrape.
-    pendingSourceCoverage: null,
-    partialCollectionRunId: null,
-    terminalFinalizationRecovery: null,
-    manualAiResume: null,
-    dragHover: null,
-    jobAnalysisClearedAt,
-    jobAnalysisClearedRunId: normalizeJobAnalysisClearRunId(jobAnalysisClearedRunId),
-    // Retained scan-date history; spread last so it is never dropped.
-    ...materializedSearchHistory,
-  };
-
-  // Keep a legacy single file path under the modern key so an empty hub with a
-  // stray `filePath` can never look like an autostart input.
-  if (typeof data?.filePath === 'string' && data.filePath) {
-    patch.filePath = null;
-    patch.careerFilePaths = careerResumeInputPaths(data);
-  }
-
   const snapshotId = trimmedString(data?.careerSnapshotId);
-  if (snapshotId && SNAPSHOT_ID_PATTERN.test(snapshotId) && typeof nodeId === 'string' && nodeId) {
-    const capability = createCapability(nodeId);
-    const attemptId = `rescan-${now}`;
-    const begun = beginCareerImportCompilation({ generation: capability, attemptId });
-    patch.careerImportGeneration = capability;
-    patch.careerImportFreshCapability = capability;
-    patch.careerImportConsumption = null;
-    patch.careerImportCompilation = approveCareerImportCompilation(begun, {
+  if (!snapshotId || !SNAPSHOT_ID_PATTERN.test(snapshotId) || typeof nodeId !== 'string' || !nodeId) return null;
+  const capability = createCapability(nodeId);
+  const attemptId = `rescan-${now}`;
+  const begun = beginCareerImportCompilation({ generation: capability, attemptId });
+  return {
+    careerImportGeneration: capability,
+    careerImportFreshCapability: capability,
+    careerImportConsumption: null,
+    careerImportCompilation: approveCareerImportCompilation(begun, {
       generation: capability,
       attemptId,
       careerSnapshotId: snapshotId,
       profileFingerprint: data.resumeFingerprint,
-    });
-  }
-  return patch;
+    }),
+  };
 }

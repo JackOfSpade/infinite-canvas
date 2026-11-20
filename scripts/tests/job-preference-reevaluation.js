@@ -529,7 +529,7 @@ export default [
       assert.match(done, /<CopyBriefButton brief=\{jobPreferences\} \/>/);
       const search = fs.readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
       assert.match(search, /<CopyBriefButton brief=\{jobPreferences\} \/>/);
-      assert.match(search, /onReanalyze=\{boardRecoveryOwnsActions/);
+      assert.doesNotMatch(search, /onReanalyze=/);
       const board = fs.readFileSync(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
       assert.match(board, /if \(union\.length > 0 \|\| protectedBoardCards\.length > 0\)/);
       const panel = fs.readFileSync(new URL('../../src/nodes/jobboard/JobBoardPreferenceOverridePanel.jsx', import.meta.url), 'utf8');

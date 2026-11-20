@@ -1,7 +1,7 @@
 import { CopyBriefButton } from './CopyBriefButton';
 import React, { useId, useState } from 'react';
 import { LiveCareerCompilationProgress } from '../../components/CareerCompilationProgress';
-import { RefreshCw, LayoutGrid } from 'lucide-react';
+import { LayoutGrid } from 'lucide-react';
 import { useToast } from '../../components/ToastProvider';
 import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
 import { JobCollectionLimitsControl } from '../../components/JobCollectionLimitsControl';
@@ -126,33 +126,21 @@ export function JobSearchDoneState({
   testMode = false,
   resumeSummary,
   locked = false,
-  platformsVerifying = false,
-  verifyDone = 0,
-  verifyTotal = 0,
   // A connected Job Board owns its coordinated scan/combine transaction. This
-  // card remains the source editor, but a search — including a re-scan — runs
-  // only from that Board.
+  // card remains the source editor; every search, re-score and re-scan of
+  // these results runs only from that Board, so the card offers none.
   managedByJobBoard = false,
   // A disconnected Board can retain a durable recovery plan while it finishes
   // cancellation or rollback. It owns launch actions, but is deliberately not
   // presented as a live connection.
   boardRecoveryPending = false,
-  // Action props. The re-scan handler is derived below from `managedByJobBoard`,
-  // so an unconnected card never offers a standalone re-scan.
-  onRerun: onRerunAction = null,
-  // Reassesses the saved listings only; it does not scrape or run the
-  // duplicate/seen-job search path again.
-  onReanalyze = null,
   // Optional: "Clear Career Data" (two-step) drops the career files but keeps
   // the saved jobs, search settings and scan history, so new files can be
   // dropped and the saved jobs re-scored. Hidden while careerCleared, except
   // after a failed compile, when it is the way to choose different files.
   onClearCareerFiles = null,
-  // Number of saved jobs still listed. While > 0 the listed results are
-  // finished first: re-scan is hidden and "Clear Scrape" (two-step) removes the
-  // jobs, keeping career data and scan history.
+  // Number of saved jobs still listed; the career-replacement prompt names it.
   savedJobCount = 0,
-  onClearScrape = null,
   // Career data was cleared but the saved jobs are kept, pending new files.
   careerCleared = false,
   careerCompiling = false,
@@ -219,10 +207,12 @@ export function JobSearchDoneState({
   collectionScopeCaveats = [],
   // A completed run with no eligible results replaces the old result set.
   rerunOutcome = null,
+  // Earlier jobs a Board re-scan kept because that Board still shows them;
+  // the rest of `resultCount` is what the latest scan added.
+  carriedJobCount = 0,
   reanalysisNotice = null,
   resultDisposition = null,
   lastCompletedRunAt = null,
-  nextSearchWindowDescription = 'from the last completed scan date',
   // Per-platform bookmarks can lag the hub's newest completion. The hub
   // formats this line ("Glassdoor, Indeed from Nov 1") because only it can see
   // the enabled platforms and their per-platform coverage; the done state just
@@ -237,10 +227,6 @@ export function JobSearchDoneState({
   // This repeats hasResolvedRoleLock from JobSearchNode.jsx, which imports this
   // file, so importing it here would be circular.
   const settingsFrozen = !!(resolvedRolesMeta && typeof resolvedRolesMeta === 'object');
-  // Searches run only from a Job Board. Without one connected there is no
-  // standalone re-scan to offer, so the handler is withheld entirely and every
-  // `onRerun` gate below stays false.
-  const onRerun = managedByJobBoard ? onRerunAction : null;
   const [setupOpen, setSetupOpen] = useState(() => !settingsFrozen);
   const lastCompletedRunAtText = formatCompletionTimestamp(lastCompletedRunAt);
   // `testMode` is retained only for old persisted hubs. New runs record the
@@ -275,7 +261,10 @@ export function JobSearchDoneState({
     ? preferenceEvaluation.audits.filter((audit) => audit?.status === 'filtered')
     : [];
   const jobsLabel = (value, singular, plural = `${singular}s`) => `${value} ${value === 1 ? singular : plural}`;
-  const resultLabel = preferencesFilteredRun
+  const keptCount = skippedAi ? 0 : Math.min(count, validCount(carriedJobCount) ?? 0);
+  const resultLabel = keptCount > 0
+    ? `${jobsLabel(count - keptCount, 'new job', 'new jobs')} · ${keptCount} kept from earlier`
+    : preferencesFilteredRun
     ? `${jobsLabel(count, 'job')} matched your preferences`
     : noNewResults
       ? jobsLabel(count, 'new job', 'new jobs')
@@ -287,9 +276,7 @@ export function JobSearchDoneState({
   const normalizedTitleOperatorWarnings = Array.isArray(titleOperatorWarnings)
     ? titleOperatorWarnings.filter((warning) => typeof warning === 'string' && warning.trim())
     : [];
-  const reanalysisNoticeText = !locked && typeof onReanalyze === 'function'
-    ? 'Saved-job re-evaluation didn\'t finish. Existing results are unchanged. Try again.'
-    : boardRecoveryPending
+  const reanalysisNoticeText = boardRecoveryPending
       ? 'Saved-job re-evaluation didn\'t finish. Existing results are unchanged. Job Board recovery is settling; re-evaluation is unavailable until it finishes or is cancelled on the Board.'
       : managedByJobBoard
         ? 'Saved-job re-evaluation didn\'t finish. Existing results are unchanged. Re-evaluation is unavailable while this search is connected to a Job Board.'
@@ -369,7 +356,7 @@ export function JobSearchDoneState({
       )}
 
       {/* Career data was cleared but the saved jobs are kept: prompt for new
-          files here instead of offering re-scan / re-analyze. */}
+          files here. */}
       {careerCleared && (!locked || careerCompiling) && (
         <div className="mt-2 w-full rounded-md border border-indigo-400/20 bg-indigo-500/5 px-2 py-1.5 text-[9px] leading-snug text-indigo-100/75">
           <p className="font-medium text-indigo-200/85">{careerCompiling || careerCompileFailed || careerCompileUnstarted ? 'Career compilation' : 'Career data cleared'}</p>
@@ -397,45 +384,6 @@ export function JobSearchDoneState({
             </button>
           )}
           {!careerCompiling && !careerCompileFailed && !careerCompileUnstarted && careerImportControls}
-        </div>
-      )}
-
-      {!locked && (
-        <div className="flex flex-col mt-2 w-full gap-1">
-          {onRerun && savedJobCount === 0 && !careerCleared && (
-            <button
-              type="button"
-              onClick={onRerun}
-              onPointerDown={(e) => e.stopPropagation()}
-              disabled={platformsVerifying}
-              className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-full bg-blue-500/15 text-blue-400/80 hover:bg-blue-500/25 text-[10px] transition-colors border border-blue-500/15 disabled:cursor-wait disabled:opacity-50"
-              title={platformsVerifying
-                ? 'Waiting for the selected job platform connection check'
-                : 'Re-scan for new jobs'}
-            >
-              <RefreshCw size={9} className={platformsVerifying ? 'animate-spin' : ''} />
-              {platformsVerifying
-                ? `Checking connections${verifyTotal > 0 ? ` (${verifyDone}/${verifyTotal})` : ''}…`
-                : 'Re-scan for New Jobs'}
-            </button>
-          )}
-          {onRerun && savedJobCount === 0 && !careerCleared && !platformsVerifying && (
-            <p className="px-2 text-center text-[9px] leading-snug text-white/25">
-              Next re-scan: {nextSearchWindowDescription} through now (inclusive).
-            </p>
-          )}
-          {onReanalyze && !careerCleared && (
-            <button
-              type="button"
-              onClick={onReanalyze}
-              onPointerDown={(e) => e.stopPropagation()}
-              className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-full bg-violet-500/15 text-violet-300/90 hover:bg-violet-500/25 text-[10px] transition-colors border border-violet-500/20"
-              title="Re-check saved jobs against this search’s brief and score only newly passing jobs; does not search or scrape again"
-            >
-              <RefreshCw size={9} />
-              Re-evaluate Saved Jobs
-            </button>
-          )}
         </div>
       )}
 
@@ -493,21 +441,11 @@ export function JobSearchDoneState({
 
       {/* This needs to remain easy to find after a completed search: it is the
           path back to replacing the career identity without rebuilding the
-          module. It is visually distinct from a re-scan because it clears the
-          current career data, while retaining saved jobs and scan history. Clear
-          Scrape is the independent counterpart that removes the listed jobs. */}
-      {!locked && ((onClearScrape && savedJobCount > 0) || (onClearCareerFiles && (!careerCleared || careerCompileFailed))) && (
+          module. It clears the current career data while retaining saved jobs
+          and scan history. There is no results-only clear: the next Job Board
+          search replaces results that were already shown. */}
+      {!locked && onClearCareerFiles && (!careerCleared || careerCompileFailed) && (
         <div className="flex gap-1 mt-2 w-full">
-          {onClearScrape && savedJobCount > 0 && (
-            <TwoStepConfirmButton
-              label="Clear Scrape"
-              confirmLabel={`Click again to clear ${savedJobCount} job${savedJobCount === 1 ? '' : 's'}`}
-              onConfirm={onClearScrape}
-              title="Remove these scraped jobs; career data and scan history are kept"
-              className="flex-1 flex items-center justify-center px-2 py-1.5 rounded-full bg-white/5 text-white/60 hover:bg-white/10 hover:text-white/80 text-[10px] font-medium transition-colors border border-white/15"
-              armedClassName="flex-1 flex items-center justify-center px-2 py-1.5 rounded-full bg-red-500/20 text-red-100 hover:bg-red-500/30 text-[10px] font-medium transition-colors border border-red-400/50"
-            />
-          )}
           {onClearCareerFiles && (!careerCleared || careerCompileFailed) && (
             <TwoStepConfirmButton
               label="Clear Career Data"
@@ -553,7 +491,7 @@ export function JobSearchDoneState({
               {managedByJobBoard
                 ? 'This brief set up the scan. To change preferences on these jobs, use Preferences for these jobs on the Job Board.'
                 : settingsFrozen
-                ? 'You can revise this brief, then re-evaluate saved jobs to regenerate roles and assessments without scraping again. Other search settings stay fixed for re-scan consistency.'
+                ? 'You can revise this brief, then connect a Job Board to re-evaluate the saved jobs without scraping again. Other search settings stay fixed so every search is comparable.'
                 : 'Describe roles, priorities, and deal-breakers. Use “must”, “only”, and “no” for strict requirements.'}
             </span>
             {/* A role list is refreshed when saved jobs are re-evaluated. An

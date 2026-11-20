@@ -3648,7 +3648,7 @@ export default [
     // still caught even though the surrounding file also legitimately
     // contains that exact substring elsewhere (on the settings it SHOULD
     // gate).
-    name: 'SETTINGS FREEZE ACTIONS STAY LIVE: Re-run / Re-evaluate / Clear career data are never disabled by settingsFrozen, in either render state',
+    name: 'SETTINGS FREEZE ACTIONS STAY LIVE: Clear career data is never disabled by settingsFrozen, in either render state',
     run: async () => {
       const [search, done] = await Promise.all([
         fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8'),
@@ -3669,12 +3669,10 @@ export default [
 
       // JobSearchDoneState.jsx (the re-run screen — the one that matters
       // most, since this is where a user would actually try to re-run).
-      const doneReanalyzeButton = button(done, 'onClick={onReanalyze}');
-      assert(!doneReanalyzeButton.includes('disabled'),
-      'JobSearchDoneState.jsx Re-evaluate Saved Jobs button must carry no disabled prop at all (settingsFrozen or otherwise)');
-      const doneRerunButton = button(done, 'onClick={onRerun}');
-      assert(doneRerunButton.includes('disabled={platformsVerifying}') && !doneRerunButton.includes('settingsFrozen'),
-      'JobSearchDoneState.jsx Re-run Search button must disable only on platformsVerifying, never on settingsFrozen');
+      assert(!done.includes('onClick={onReanalyze}') && !done.includes('onClick={onRerun}')
+        && !done.includes('onReanalyze') && !done.includes('onRerun') && !done.includes('onClearScrape')
+        && !done.includes('platformsVerifying') && !done.includes('Re-scan for New Jobs'),
+      'JobSearchDoneState.jsx has no Re-scan / Re-evaluate / Clear Scrape controls or props any more (searches start from the Job Board)');
       // The clears are two-step confirm buttons: bound the self-closing element.
       const twoStep = (source, anchor) => {
         const anchorIdx = source.indexOf(anchor);
@@ -3694,11 +3692,8 @@ export default [
       // relevant assertion is on the enclosing conditional, not the button
       // element itself; the button() helper above still proves no `disabled`
       // prop of any kind was added to the element.
-      const searchRerunButton = button(search, 'handleRerun(); }}');
-      assert(!searchRerunButton.includes('disabled'),
-      'JobSearchNode.jsx Re-run Search button must carry no disabled prop at all (settingsFrozen or otherwise) — it is gated purely by conditional rendering');
-      assert(search.includes('{hasRunnableCareerInput && !controlsLocked && !boardRecoveryOwnsActions && !resumeOffer?.incomplete && (\n                    managedByJobBoard ? (\n                      <button'),
-      'JobSearchNode.jsx Re-run Search button must be gated on !controlsLocked and the absence of an incomplete checkpoint (not settingsFrozen) via conditional rendering, not a disabled prop');
+      assert(!search.includes('handleClearScrape') && !search.includes('canClearScrape') && !search.includes('Re-scan for New Jobs</'),
+      'JobSearchNode.jsx has no Clear Scrape handler and no empty-state Re-scan / Run Search button');
       const searchClearButton = twoStep(search, 'onConfirm={handleClearCareerFiles}');
       assert(!searchClearButton.includes('disabled'),
       'JobSearchNode.jsx Clear career data button must carry no disabled prop at all (settingsFrozen or otherwise) — it is gated purely by conditional rendering');
@@ -5473,10 +5468,10 @@ export default [
 
       const contracts = [
         ['scored settlement', 'const completion = completeRun && jobRunId', 'updateGlobal(id, {'],
-        ['post-search zero', "? await completeJobRun(jobRunId, 'completed', 'zero', cfp, 0, moduleFingerprint([]), cancelled, admittedCareerSnapshotId,", 'updateGlobal(currentId, (node) =>'],
-        ['preference-filtered zero', "? await completeJobRun(searchResult.runId, 'completed', 'preference-filtered', canvasFilePath, 0, moduleFingerprint([]), cancelled, pinnedCareerSnapshotId,", 'updateGlobal(currentId, (node) =>'],
+        ['post-search zero', "? await completeJobRun(jobRunId, 'completed', 'zero', cfp, 0, moduleFingerprint(carriedTerminalRows(getNode(id)?.data, { jobRunId: jobRunId, careerSnapshotId: admittedCareerSnapshotId })), cancelled, admittedCareerSnapshotId,", 'updateGlobal(currentId, (node) =>'],
+        ['preference-filtered zero', "? await completeJobRun(searchResult.runId, 'completed', 'preference-filtered', canvasFilePath, 0, moduleFingerprint(carriedTerminalRows(getNode(id)?.data, { jobRunId: searchResult.runId, careerSnapshotId: pinnedCareerSnapshotId })), cancelled, pinnedCareerSnapshotId,", 'updateGlobal(currentId, (node) =>'],
         ['collection-only', "? await completeJobRun(searchResult.runId, 'completed', 'collection-only', canvasFilePath, 0, moduleFingerprint([]), cancelled, pinnedCareerSnapshotId,", 'updateGlobal(currentId, (node) =>'],
-        ['paused zero', "? await completeJobRun(activeJobRunId, 'completed', 'zero', canvasFilePath, 0, moduleFingerprint([]), cancelled, admittedPausedCareerSnapshotId,", 'updateGlobal(id, (node) =>'],
+        ['paused zero', "? await completeJobRun(activeJobRunId, 'completed', 'zero', canvasFilePath, 0, moduleFingerprint(carriedTerminalRows(getNode(id)?.data, { jobRunId: activeJobRunId, careerSnapshotId: admittedPausedCareerSnapshotId })), cancelled, admittedPausedCareerSnapshotId,", 'updateGlobal(id, (node) =>'],
       ];
       for (const [label, awaitMarker, doneMarker] of contracts) {
         const begin = source.indexOf(awaitMarker);

@@ -248,6 +248,13 @@ function planIncompleteSourceIds(plan) {
     .map(entry => entry?.sourceId).filter(Boolean));
 }
 
+// Searches the Board skipped because nothing new could be scraped yet. They
+// are settled for this plan and never a child to bootstrap.
+function planCooldownSourceIds(plan) {
+  return new Set((Array.isArray(plan?.cooldownSearches) ? plan.cooldownSearches : [])
+    .map(entry => entry?.sourceId).filter(Boolean));
+}
+
 function safeBackgroundBoardChildOwner(nodeId, nodes, edges, canvasFilePath) {
   let owner = findJobSearchBoardActiveRecoveryOwner(nodeId, nodes, edges);
   if (!owner) {
@@ -340,8 +347,9 @@ function hiddenBoardChildBootstrapEntry(board, nodes, edges, jobRunOffers, canva
   ) return null;
   const completed = new Set(Object.keys(plan.completedSourceRuns || {}));
   const incomplete = planIncompleteSourceIds(plan);
+  const skipped = planCooldownSourceIds(plan);
   const childId = (Array.isArray(plan.selectedSearchModuleIds) ? plan.selectedSearchModuleIds : [])
-    .find(sourceId => !completed.has(sourceId) && !incomplete.has(sourceId));
+    .find(sourceId => !completed.has(sourceId) && !incomplete.has(sourceId) && !skipped.has(sourceId));
   if (!childId || jobRunOffers.get(childId)?.found !== false) return null;
   const child = nodes.find(node => node?.id === childId && node.type === 'jobhub');
   const connected = edges.some(edge => (

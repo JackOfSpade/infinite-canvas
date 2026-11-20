@@ -16,6 +16,7 @@ import { resolveSalaryCareerSnapshotId } from '../../src/utils/jobBoardCareerOve
 
 import {
   boardHistoryAuthorityAvailable,
+  jobSearchShownRunPatch,
   combineSourceRunEntry,
   describeReceiptMismatch,
   jobSearchOutcomeReceiptMatches,
@@ -128,7 +129,7 @@ async function startCombineCommitFixture({ unmatchedProtected = false } = {}) {
     selectedRunsMatchExpected: () => true,
     combineInputsMatchExpected: (modules, expected) => modules.length === expected.length
       && expected.every(entry => jobSearchOutcomeReceiptMatches(modules.find(item => item.id === entry.sourceId), entry)),
-    combineCommitMismatchReason, describeReceiptMismatch, boardHistoryAuthorityAvailable, isProtectedJobCard,
+    combineCommitMismatchReason, describeReceiptMismatch, boardHistoryAuthorityAvailable, isProtectedJobCard, jobSearchShownRunPatch,
     normalizeJobBoardRecoveryTimestamp, buildJobTreeNodes, replaceBoardDisplayChildren, carryBoardDeadSourceUrls, finalSourceCountsOf,
     keepCompletedSnapshotDuringActiveSearch: () => true, hideBoardChildren() {},
     autoResumedManualAiRunRef: { current: 'board-manual-run' }, committedCombineRef: { current: null },

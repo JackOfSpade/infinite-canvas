@@ -18,17 +18,72 @@ import {
   pendingSavedJobsRescore,
   savedJobCount,
 } from './jobSearchSplitClear.js';
+import { jobSearchRescrapeAvailability } from './jobSearchSourceCoverage.js';
+import { normalizedJobCareerSnapshotId } from './jobCareerSnapshotBinding.js';
+
+/**
+ * Which Board first displayed a Search run's jobs. Written on the Search card
+ * by the Board's Combine when it creates result cards, so it survives that
+ * Board's deletion. A run's jobs are shown on at most this one Board: another
+ * Board leaves them out, and once they have been shown the next Board search
+ * may replace them with a fresh scrape. Only the marker for the card's CURRENT
+ * run counts; a later run makes it obsolete on its own.
+ */
+export function jobSearchShownRun(data) {
+  const marker = data?.boardShownRun;
+  const runId = typeof data?.jobRunId === 'string' && data.jobRunId ? data.jobRunId : null;
+  if (!runId || !marker || typeof marker !== 'object' || marker.runId !== runId) return null;
+  return typeof marker.boardId === 'string' && marker.boardId ? marker : null;
+}
+
+/** True when another Board (live or deleted) already displayed this run. */
+export function isJobSearchRunShownOnOtherBoard(source, boardId) {
+  const shown = jobSearchShownRun(source?.data);
+  return !!shown && typeof boardId === 'string' && !!boardId && shown.boardId !== boardId;
+}
+
+/**
+ * The card patch a Board writes when its Combine displays this run's jobs.
+ * Null when there is nothing to record or the run is already claimed (by this
+ * or another Board): the first Board to show a run keeps it.
+ */
+export function jobSearchShownRunPatch(data, { boardId, runId, now = Date.now() } = {}) {
+  if (typeof boardId !== 'string' || !boardId || typeof runId !== 'string' || !runId) return null;
+  if (data?.jobRunId !== runId || jobSearchShownRun(data)) return null;
+  return { boardShownRun: { runId, boardId, shownAt: now } };
+}
+
+// A Board may scrape a finished card again only by minting a fresh capability
+// bound to its approved snapshot, and only when no durable recovery owns it.
+function canMintRescan(data) {
+  return !!normalizedJobCareerSnapshotId(data?.careerSnapshotId)
+    && !data?.manualAiResume?.runId
+    && !data?.terminalFinalizationRecovery;
+}
+
+function rescrapeCooldownReason(nextEligibleAt, shown) {
+  const when = Number.isFinite(nextEligibleAt) ? new Date(nextEligibleAt).toLocaleString() : null;
+  const lead = shown
+    ? 'Its last results were already shown on a Job Board, and every selected platform was searched in the last 24 hours.'
+    : 'Every selected platform was searched in the last 24 hours.';
+  return when ? `${lead} The next search can run after ${when}.` : lead;
+}
 
 /**
  * Classify a Job Search generation at the Board boundary.
  *
- * A terminal Search is immutable input for a Board: it may be combined, but
- * must never be sent back through a fresh scrape.  Fresh work is deliberately
- * narrower: it is only an accepted newly-imported input waiting in `empty`
- * with an unconsumed, persisted import capability.
+ * A terminal Search whose jobs no Board has shown yet is immutable input: it
+ * is combined, never scraped again, so nothing unseen is replaced. Once a
+ * Board has shown it (or it holds nothing to lose) and a platform is past its
+ * 24-hour cooldown, it is `rescrape-terminal`: the Board mints a one-shot
+ * capability and the new run replaces the saved jobs. Fresh work otherwise is
+ * an accepted newly-imported input waiting in `empty` with an unconsumed,
+ * persisted import capability.
+ * `boardId` names the Board asking; without it a run shown elsewhere reads as
+ * reusable (the Search card's own last-line guard has no Board context).
  * Recovery and paused states are left to the Board's exact-plan machinery.
  */
-export function classifyJobBoardSourceAdmission(source) {
+export function classifyJobBoardSourceAdmission(source, { now = Date.now(), boardId = null } = {}) {
   const data = source?.data || {};
   if (source?.type !== 'jobhub') return { kind: 'invalid' };
 
@@ -83,14 +138,51 @@ export function classifyJobBoardSourceAdmission(source) {
       };
     }
     const outcome = terminalJobSearchOutcome(source);
-    if (outcome && isMergeableTerminalJobSearchOutcome(source, outcome)) {
+    const mergeable = !!outcome && isMergeableTerminalJobSearchOutcome(source, outcome);
+    const rescannable = canMintRescan(data);
+    const availability = rescannable ? jobSearchRescrapeAvailability(data, now) : null;
+    // No platform left to pick is not a cooldown: let the Board's own setup
+    // checks name it ("Select at least one job platform").
+    const platformDue = !!availability
+      && (availability.due.length > 0 || availability.sourceIds.length === 0);
+    const shown = jobSearchShownRun(data);
+    if (mergeable) {
+      // Replacing saved jobs nobody has seen would lose them for good: the next
+      // scan starts where this one ended. Re-scrape only once they were shown
+      // on a Board, or when there is nothing saved to lose.
+      const nothingToLose = savedJobCount(data) === 0;
+      if ((shown || nothingToLose) && platformDue) {
+        return { kind: 'rescrape-terminal', outcome, dueSourceIds: availability.due };
+      }
+      // Shown on another Board (often one since deleted) and nothing new can
+      // be scraped yet: this Board leaves the run out instead of showing the
+      // same jobs a second time.
+      if (shown && boardId && shown.boardId !== boardId) {
+        return {
+          kind: 'rescrape-cooldown',
+          outcome,
+          nextEligibleAt: availability?.nextEligibleAt ?? null,
+          reason: rescrapeCooldownReason(availability?.nextEligibleAt, true),
+        };
+      }
       return { kind: 'reuse-terminal', outcome };
+    }
+    // Test Mode, collection-only or incomplete results cannot be combined;
+    // nothing in them was shown, so the Board may search the card again.
+    if (rescannable && platformDue) {
+      return { kind: 'rescrape-terminal', outcome: outcome || null, dueSourceIds: availability.due };
+    }
+    if (rescannable) {
+      return {
+        kind: 'rescrape-cooldown',
+        outcome: outcome || null,
+        nextEligibleAt: availability.nextEligibleAt,
+        reason: rescrapeCooldownReason(availability.nextEligibleAt, false),
+      };
     }
     return {
       kind: 'terminal-requires-fresh-input',
-      reason: outcome
-        ? 'This completed Job Search is not mergeable. Re-scan it on the Job Search card, then return to the Board.'
-        : 'This completed Job Search cannot be refreshed from the Board. Re-scan it on the Job Search card, then return to the Board.',
+      reason: 'This completed Job Search has no approved career data to search with again. Clear its career data and import the files again, then return to the Board.',
     };
   }
 
@@ -253,14 +345,18 @@ export function describeReceiptMismatch(actual, expected) {
  * at click admission so terminal rows are never sent to a Search executor and
  * a paused generation is distinguishable from a fresh imported input.
  */
-export function partitionJobBoardSourceAdmissions(sources) {
+export function partitionJobBoardSourceAdmissions(sources, options = {}) {
   return (Array.isArray(sources) ? sources : []).reduce((partition, source) => {
-    const admission = classifyJobBoardSourceAdmission(source);
+    const admission = classifyJobBoardSourceAdmission(source, options);
     const entry = { sourceId: source?.id || null, source, admission };
     if (!entry.sourceId) {
       partition.invalid.push(entry);
     } else if (admission.kind === 'reuse-terminal') {
       partition.reusable.push(entry);
+    } else if (admission.kind === 'rescrape-terminal') {
+      partition.rescrape.push(entry);
+    } else if (admission.kind === 'rescrape-cooldown') {
+      partition.cooldown.push(entry);
     } else if (admission.kind === 'fresh-imported-input') {
       partition.fresh.push(entry);
     } else if (admission.kind === 'rescore-saved-jobs') {
@@ -281,6 +377,6 @@ export function partitionJobBoardSourceAdmissions(sources) {
     }
     return partition;
   }, {
-    reusable: [], fresh: [], rescore: [], continuations: [], blocked: [], other: [], invalid: [],
+    reusable: [], fresh: [], rescrape: [], cooldown: [], rescore: [], continuations: [], blocked: [], other: [], invalid: [],
   });
 }

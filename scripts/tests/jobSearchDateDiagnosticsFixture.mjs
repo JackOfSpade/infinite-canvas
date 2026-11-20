@@ -8,7 +8,6 @@ import { normalizeCompletionTimestamp } from '../../src/utils/completionTimestam
 import {
   canClaimJobRunCollectionCompletion, careerSnapshotBindingMatches, normalizedJobCareerSnapshotId,
 } from '../../src/utils/jobCareerSnapshotBinding.js';
-import { buildJobHubScrapeClearPatch } from '../../src/utils/jobSearchSplitClear.js';
 import { redactNodeForIssueReport } from '../../src/utils/issueReportRedaction.js';
 import { cloneNode } from '../../src/utils/nodeFactory.js';
 import { sanitizeNodesForSave } from '../../src/utils/serializationUtils.js';
@@ -119,7 +118,7 @@ export default [
     },
   },
   {
-    name: 'Job date diagnostics: partial finishes and Clear Scrape retain dates and diagnostic evidence across JSON reload',
+    name: 'Job date diagnostics: partial finishes and a saved legacy Clear Scrape entry retain dates and diagnostic evidence across JSON reload',
     async run() {
       for (const input of [{ collectionDisposition: 'user-finished-partial' }, { hasUnfinishedSources: true }]) {
         const h = renderer();
@@ -128,7 +127,9 @@ export default [
         assert.equal(h.node.data.lastCompletedRunAt, OLD);
         assert.equal(h.node.data.jobSearchDateDiagnostics.at(-1).reason, 'partial-collection');
         const before = h.node.data;
-        h.node.data = { ...before, ...buildJobHubScrapeClearPatch(before, { nodeId: h.node.id }),
+        // Clear Scrape is gone, but canvases saved by it keep the reason
+        // 'clear-scrape' and its emptied results; both must still reload.
+        h.node.data = { ...before, hubState: 'empty', scoredJobs: null, jobRunId: null, partialCollectionRunId: null,
           ...jobSearchDateDiagnosticPatch(before, { event: 'clear', reason: 'clear-scrape', runId: 'date-run' }) };
         const [reloaded] = JSON.parse(JSON.stringify(sanitizeNodesForSave([h.node])));
         assert.equal(reloaded.data.lastCompletedRunAt, OLD);

@@ -3010,6 +3010,20 @@ export function buildJobCompletionAssessment(
     : currentSavedSnapshotFact(canvasFilePath, hubIds, receipt
       ? { ownerId: receiptState?.selectedOwnerId || receipt.nodeId, runId: receipt.runId }
       : null);
+  // Several old receipts with nothing to choose between them is not always a
+  // doubt about a run. When this process recorded no Job Search stage and no
+  // current hub still holds a saved result set, there is no run to reconcile:
+  // the receipts only describe earlier runs whose output is gone. Saying
+  // INDETERMINATE there reads as "something may have failed" when the
+  // observation is "nothing ran and nothing is saved". An unreadable saved
+  // file is not an absent one, so it keeps the fail-closed wording.
+  let noRunToReconcile = false;
+  if (receiptState?.ambiguous && !telemetryAmbiguity && canvasFilePath) {
+    try {
+      const savedRecords = ownedSnapshotRecords(canvasFilePath, hubIds, 'current');
+      noRunToReconcile = savedRecords.length > 0 && savedRecords.every(record => record.state === 'absent');
+    } catch { /* keep the fail-closed INDETERMINATE wording */ }
+  }
   const searchKept = nonnegativeCount(telemetry?.search?.kept);
   const recovered = telemetry ? recoveryMergeNet(telemetry) : null;
   const expected = searchKept == null ? null : searchKept + recovered;
@@ -3294,6 +3308,8 @@ export function buildJobCompletionAssessment(
       mergeUnique: boardNonnegativeCount(boardDiagnosticValue(board, 'mergeUnique')),
       locationPostingsCollapsed: boardNonnegativeCount(boardDiagnosticValue(board, 'locationPostingsCollapsed') ?? 0),
       researchRemoved: boardNonnegativeCount(boardDiagnosticValue(board, 'researchRemoved') ?? 0) ?? 0,
+      // Earlier rows a Board re-scan kept: in the Board's union, not in the run.
+      carriedJobs: boardNonnegativeCount(boardDiagnosticValue(board, 'carriedJobs') ?? 0) ?? 0,
       renderedCardCount: boardNonnegativeCount(boardDiagnosticValue(board, 'renderedCardCount')),
       stale: boardDiagnosticValue(board, 'stale') === true,
       staleReason: boardStaleReasonFact(boardDiagnosticValue(board, 'staleReason')),
@@ -3615,7 +3631,7 @@ export function buildJobCompletionAssessment(
     !board.stale && board.resultCount === taxonomyInput
     && (board.combinedSourceHubIds.length > 1
       || (board.combinedSourceHubIds.length === 1
-        && (board.locationPostingsCollapsed > 0 || board.researchRemoved > 0)
+        && (board.locationPostingsCollapsed > 0 || board.researchRemoved > 0 || board.carriedJobs > 0)
         && board.mergeUnique - board.locationPostingsCollapsed - board.researchRemoved === board.resultCount))
   )) || null;
 
@@ -3755,8 +3771,8 @@ export function buildJobCompletionAssessment(
     // its pre-consolidation count must equal this run's score-ready result.
     // Multi-source boards validate their renderer-side merge receipt above.
     if (board.combinedSourceHubIds.length === 1 && boardExpectedCount != null
-      && board.resultCount + (collapsed ?? 0) + board.researchRemoved !== boardExpectedCount) {
-      gaps.push(`Job Board \`${boardLabel(board)}\` results ${board.resultCount}${collapsed ? ` + ${collapsed} location postings collapsed` : ''}${board.researchRemoved ? ` + ${board.researchRemoved} removed after research` : ''} ≠ current run ${boardExpectedCount}`);
+      && board.resultCount + (collapsed ?? 0) + board.researchRemoved !== boardExpectedCount + board.carriedJobs) {
+      gaps.push(`Job Board \`${boardLabel(board)}\` results ${board.resultCount}${collapsed ? ` + ${collapsed} location postings collapsed` : ''}${board.researchRemoved ? ` + ${board.researchRemoved} removed after research` : ''} ≠ current run ${boardExpectedCount}${board.carriedJobs ? ` + ${board.carriedJobs} kept from earlier` : ''}`);
     }
   }
 
@@ -3839,6 +3855,8 @@ export function buildJobCompletionAssessment(
       : `✅ **VERIFIED COMPLETE** — every reconciled stage agrees.${coverageQualifier}${historyQualifier}${boardClearQualifier}`
     : durableOutputOnly
       ? `✅ **DURABLE OUTPUT COMPLETE** — a cleanup-cleared terminal receipt and the same-run, same-canvas, current-hub saved score-ready snapshot agree.${snapshot?.metadataOnly ? ' The saved snapshot was verified from ownership/count metadata only; its job payload was not inspected.' : ''}${receiptScoring ? ' The receipt also retains matching final scoring counters.' : ''}${durableCollectionShortfallQualifier}${acceptedLimitationQualifier}${regionUnverifiedQualifier}${countrySkippedQualifier}${boardConsumptionQualifier}${boardClearQualifier} Live search/scoring telemetry ${foreignLiveRun ? 'for this run was replaced in-process when a later run started on another hub' : telemetryAmbiguity ? `is not attributable — ${telemetryAmbiguity}` : 'was not retained after restart'}; taxonomy and Job Board consumption are assessed separately below, and this does not verify gather coverage.`
+    : noRunToReconcile && gaps.length === 1 && !pipelinePhase && searchKept == null && scored == null && !taxonomy
+      ? `ℹ️ **NO RUN TO RECONCILE** — no Job Search stage was recorded in this app process, and no current Job Search card holds a saved result set (cleared, replaced, or never kept). The ${receiptState.count || 2} retained terminal receipts describe earlier runs; each is listed in Job Recovery Diagnostics. A Board search that ended without scraping is recorded in Event History, not here.`
     : `⚠️ **INDETERMINATE** — ${gaps.length ? redactReportOpaqueIds(gaps.join('; ')) : 'one or more completion facts were not retained'}.`;
 
   const searchLine = searchKept == null
@@ -4027,7 +4045,7 @@ const JOB_BOARD_DIAGNOSTIC_ACTIVE_SEARCH_STATES = new Set([
 ]);
 const JOB_BOARD_DIAGNOSTIC_ADMISSION_KINDS = new Set([
   'rescore-saved-jobs', 'career-import-paused', 'career-cleared-awaiting-files',
-  'invalid', 'reuse-terminal', 'terminal-requires-fresh-input',
+  'invalid', 'reuse-terminal', 'rescrape-terminal', 'rescrape-cooldown', 'terminal-requires-fresh-input',
   'fresh-imported-input', 'fresh-import-requires-clear', 'continue-existing',
   'continuation-requires-run-token', 'career-import-compiling',
   'career-import-failed', 'career-import-requires-approval',
@@ -4039,7 +4057,7 @@ function diagnosticSourceData(source) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
-function sourceAdmissionKind(source) {
+function sourceAdmissionKind(source, boardId = null) {
   const sourceData = diagnosticSourceData(source);
   // Renderer report redaction replaces `scoredJobs` with a count. Terminal
   // admission needs only its zero/nonzero distinction, so restore one inert
@@ -4059,7 +4077,7 @@ function sourceAdmissionKind(source) {
       id: boardDiagnosticValue(source, 'id'),
       type: boardDiagnosticValue(source, 'type'),
       data: dataForAdmission,
-    }),
+    }, { boardId: typeof boardId === 'string' && boardId ? boardId : null }),
     { kind: 'not-retained' },
   );
   return JOB_BOARD_DIAGNOSTIC_ADMISSION_KINDS.has(admission?.kind)
@@ -4090,8 +4108,11 @@ function sourceSelectorAdmissionDiagnostic(source, admissionKind) {
   if (admissionKind === 'reuse-terminal') {
     return { ready: true, status: 'Reusable completed search', reason: 'admission:reuse-terminal' };
   }
+  if (admissionKind === 'rescrape-cooldown') {
+    return { ready: true, status: 'Searched recently (skipped)', reason: 'admission:rescrape-cooldown' };
+  }
   if (admissionKind === 'terminal-requires-fresh-input' || admissionKind === 'fresh-import-requires-clear') {
-    return { ready: false, status: 'Clear + import required', reason: `admission:${admissionKind}` };
+    return { ready: false, status: 'Re-import career data', reason: `admission:${admissionKind}` };
   }
   if (admissionKind === 'continue-existing') {
     return { ready: true, status: 'Continue paused search', reason: 'admission:continue-existing' };
@@ -4233,11 +4254,18 @@ function recoveryClaimMap(rows) {
   return claimsByScope;
 }
 
-function connectedSourceDiagnosticSummary(source, selected, claimsByScope, scope, labelContext) {
+function connectedSourceDiagnosticSummary(source, selected, claimsByScope, scope, labelContext, boardId = null) {
   const sourceId = opaqueHubIdForCorrelation(boardDiagnosticValue(source, 'id'));
   if (!sourceId) return null;
   const data = diagnosticSourceData(source);
-  const admissionKind = sourceAdmissionKind(source);
+  const admissionKind = sourceAdmissionKind(source, boardId);
+  // Which Board first showed the current run (no ids: this Board, another
+  // Board — possibly deleted — or none).
+  const shownMarker = boardDiagnosticValue(data, 'boardShownRun');
+  const shownRunId = boardDiagnosticValue(shownMarker, 'runId');
+  const shownState = !shownRunId || shownRunId !== boardDiagnosticValue(data, 'jobRunId')
+    ? 'no'
+    : boardDiagnosticValue(shownMarker, 'boardId') === boardId ? 'this-board' : 'other-board';
   const selector = sourceSelectorAdmissionDiagnostic(source, admissionKind);
   const consumption = sourceConsumptionFacts(source);
   const claimSummary = (claimsByScope.get(scope)?.get(sourceId) || [])
@@ -4251,7 +4279,15 @@ function connectedSourceDiagnosticSummary(source, selected, claimsByScope, scope
       ? 'blocked (Board recovery owns source)'
       : boardDiagnosticValue(data, 'locked') === true
         ? 'blocked (Search busy/locked)'
-        : 'available on Job Search card';
+        : admissionKind === 'rescrape-terminal'
+          ? 'due (the next Board search scrapes it again)'
+          : admissionKind === 'rescrape-cooldown'
+            ? 'cooling down (skipped by the next Board search)'
+            : admissionKind === 'reuse-terminal'
+              ? (shownState === 'no'
+                ? 'not yet (its jobs have not been shown on a Board; they are combined first)'
+                : 'cooling down (this Board reuses its shown jobs)')
+              : `not from this admission (${admissionKind})`;
   const rawSearchWindow = boardDiagnosticValue(data, 'searchWindow');
   const safeNextWindowData = {
     hubState,
@@ -4272,7 +4308,7 @@ function connectedSourceDiagnosticSummary(source, selected, claimsByScope, scope
   };
   const { window: nextWindow, anchor: nextAnchor, initialLookbackDays } = resolveNextJobSearchRunWindow(safeNextWindowData, sourceId);
   const nextWindowSummary = `${localCalendarDateLabel(nextWindow.startTimestamp)}→now/${nextAnchor.source}${nextAnchor.timestamp == null ? `/initial-${initialLookbackDays}d` : ''}${nextWindow.capped ? `/${nextWindow.capReason || 'cap'}` : ''}`;
-  return `${boardDiagnosticIdList([sourceId], labelContext)} · selected=${selected.has(sourceId) ? 'yes' : 'no'} · hub-state=${receiptIdentifier(hubState, 'not retained')} · admission=${admissionKind} · selector-ready=${selector.ready === true ? 'yes' : selector.ready === false ? 'no' : 'not reproducible'} · selector-status=${selector.status} · selector-reason=${selector.reason} · re-scan=${rescanReadiness} · next-window=${nextWindowSummary} · fresh-capability=${consumption.freshCapability ? 'present' : 'absent'} · consumption-origin=${consumption.consumptionOrigin} · admission-version=${consumption.admissionVersion} · recovery-claim=${claimSummary || 'none'}`;
+  return `${boardDiagnosticIdList([sourceId], labelContext)} · selected=${selected.has(sourceId) ? 'yes' : 'no'} · hub-state=${receiptIdentifier(hubState, 'not retained')} · admission=${admissionKind} · shown=${shownState} · selector-ready=${selector.ready === true ? 'yes' : selector.ready === false ? 'no' : 'not reproducible'} · selector-status=${selector.status} · selector-reason=${selector.reason} · re-scan=${rescanReadiness} · next-window=${nextWindowSummary} · fresh-capability=${consumption.freshCapability ? 'present' : 'absent'} · consumption-origin=${consumption.consumptionOrigin} · admission-version=${consumption.admissionVersion} · recovery-claim=${claimSummary || 'none'}`;
 }
 
 function savedSourceScoringSummary(source) {
@@ -4903,7 +4939,7 @@ export function buildJobBoardDiagnostics(nodes, edges, nodeComponentStates = [])
       .filter(entry => connectedIds.includes(opaqueHubIdForCorrelation(entry.id)))
       .slice(0, MAX_BOARD_DIAGNOSTIC_IDS)
       .map(entry => boardDiagnosticSafely(
-        () => connectedSourceDiagnosticSummary(entry.node, selectedIds, claimsBySourceId, scope, labelContext),
+        () => connectedSourceDiagnosticSummary(entry.node, selectedIds, claimsBySourceId, scope, labelContext, boardDiagnosticValue(board, 'id')),
         null,
       ))
       .filter(Boolean);

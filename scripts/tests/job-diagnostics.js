@@ -1174,6 +1174,42 @@ export default [
     },
   },
   {
+    name: 'job diagnostics says there is no run to reconcile when old receipts remain but nothing is saved',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-receipt-no-run-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const hubA = 'receipt-no-run-hub-a';
+      const hubB = 'receipt-no-run-hub-b';
+      const writeReceipt = (hubId, runId, count) => fs.writeFileSync(
+        lastRunReceiptPathForCanvas(canvas, hubId),
+        JSON.stringify({
+          runId, nodeId: hubId, terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: count }, cleanup: { attempted: true, cleared: true },
+        }),
+      );
+      try {
+        // Both hubs finished a run earlier and had their scrape cleared: the
+        // receipts stay, the saved result sets are gone, nothing ran since.
+        writeReceipt(hubA, 'no-run-a', 32);
+        writeReceipt(hubB, 'no-run-b', 426);
+        const cleared = buildJobCompletionAssessment(canvas, new Set([hubA, hubB]), [], 0, new Set([hubA, hubB]));
+        assert(cleared.includes('**NO RUN TO RECONCILE**')
+          && cleared.includes('The 2 retained terminal receipts describe earlier runs')
+          && !cleared.includes('**INDETERMINATE**')
+          && cleared.includes('Terminal receipt: ⚠️ ambiguous across 2 current Job Search hubs'),
+        `cleared hubs with old receipts must not read as an uncertain run, got: ${cleared}`);
+        // One hub still holding a saved result set is a real ambiguity again.
+        const analysis = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'), hubA);
+        fs.writeFileSync(analysis.jsonPath, JSON.stringify({ runId: 'no-run-a', sourceHubId: hubA, canvasFilePath: canvas, jobs: [{}, {}] }));
+        const saved = buildJobCompletionAssessment(canvas, new Set([hubA, hubB]), [], 0, new Set([hubA, hubB]));
+        assert(saved.includes('**INDETERMINATE**') && !saved.includes('NO RUN TO RECONCILE'),
+          'a saved result set on any hub keeps the fail-closed verdict');
+        return { noRun: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'job diagnostics never joins ambiguous terminal receipts to another hub snapshot',
     run: () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-receipt-snapshot-join-'));
@@ -5646,7 +5682,7 @@ export default [
         && report.includes('enabledSourceIds: indeed,linkedin')
         && report.includes('lastCompletedRunAt: 2026-09-07T14:30:00.000Z')
         && report.includes('lastSearchCoverageStartedAt: 2026-09-06T23:30:00.000Z')
-        && report.includes('re-scan: available on Job Search card')
+        && report.includes('re-scan: not yet (its jobs have not been shown on a Board)')
         && report.includes('next window: 2026-09-06 through now (inclusive); anchor: last-coverage-start')
         && report.includes('run window: 2026-09-07 inclusive; provider horizon: 400d')
         && !report.includes('hubState: done, scraped: 3, results: 3'),
@@ -9071,7 +9107,7 @@ export default [
       const resumePath = searchRenderer.slice(resumeStart, resumeEnd);
       assert(resumePath.includes('const requestedJobRunId = jobRunIdRef.current || requestedData.jobRunId || null')
         && resumePath.includes('activeJobRunId = continuationRunId;')
-        && resumePath.includes("completeJobRun(activeJobRunId, 'completed', 'zero', canvasFilePath, 0, moduleFingerprint([]), cancelled, admittedPausedCareerSnapshotId, () => !cancelled(), null, pausedAuthority)")
+        && resumePath.includes("completeJobRun(activeJobRunId, 'completed', 'zero', canvasFilePath, 0, moduleFingerprint(carriedTerminalRows(getNode(id)?.data, { jobRunId: activeJobRunId, careerSnapshotId: admittedPausedCareerSnapshotId })), cancelled, admittedPausedCareerSnapshotId, () => !cancelled(), null, pausedAuthority)")
         && resumePath.includes('jobRunId: activeJobRunId'),
       'same-tick source resolution scopes both empty completion and resumed scoring to the live run ref');
 
@@ -10346,13 +10382,13 @@ export default [
       // A score-only retry belongs on the completed hub. It must not be an
       // unlocked-looking control while a module is locked, and it must remain
       // distinct from Re-run Search (which intentionally starts a scrape).
-      assert(doneState.includes('onReanalyze')
-        && doneState.includes('Re-evaluate Saved Jobs')
-        && /!locked\s*&&/.test(doneState),
-      'done hubs expose Re-evaluate Saved Jobs only when the module is unlocked');
-      assert(search.includes('onReanalyze={boardRecoveryOwnsActions || data.terminalFinalizationRecovery ? null : handleReanalyze}')
+      assert(!doneState.includes('onReanalyze')
+        && !doneState.includes('Re-evaluate Saved Jobs')
+        && !search.includes('onReanalyze='),
+      'the done Job Search card no longer exposes a Re-evaluate Saved Jobs control; the Board rescore-saved-jobs path re-scores instead');
+      assert(search.includes('handleReanalyzeRef.current?.({ savedJobsRescore: true')
         && handler.includes('getNode(id)?.data?.terminalFinalizationRecovery'),
-        'the completed standalone search hub wires re-analysis only when no Board-owned or terminal-finalization recovery is active');
+        'the re-analysis handler stays available to the Board and refuses while terminal-finalization recovery is active');
       assert(search.includes("val.slice(0, 4000)")
         && (search.match(/maxLength=\{4000\}/g) || []).length >= 1
         && (doneState.match(/maxLength=\{4000\}/g) || []).length >= 1
@@ -17133,7 +17169,8 @@ export default [
       assert(defaultReport.includes('selected=yes')
         && defaultReport.includes('admission=reuse-terminal')
         && defaultReport.includes('selector-ready=yes')
-        && defaultReport.includes('re-scan=available on Job Search card')
+        && defaultReport.includes('shown=no')
+        && defaultReport.includes('re-scan=not yet (its jobs have not been shown on a Board; they are combined first)')
         && defaultReport.includes('/initial-lookback/initial-21d/no-completion'),
       `a missing selection allow-list defaults to every connected source and preserves a redacted positive terminal, got:\n${defaultReport}`);
 

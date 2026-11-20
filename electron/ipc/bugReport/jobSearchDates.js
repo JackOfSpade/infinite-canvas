@@ -18,7 +18,7 @@ function timestamp(value) {
 // documents, listing rows, input text, or raw identifiers in the report.
 export function buildJobSearchDateHistory(nodes) {
   const lines = ['\n## Job Search Date History (JOBDATES)',
-    '> Latest eight date decisions per module, newest first. Saved module metadata survives Clear Scrape and workspace save/reopen; this live snapshot does not prove a disk save. Terminal collection evidence is reported separately in Job Recovery Diagnostics. Missing older evidence cannot be reconstructed. Dates and fixed reason codes only; run and hub IDs are one-way digests.'];
+    '> Latest eight date decisions per module, newest first. Saved module metadata survives clears and workspace save/reopen; this live snapshot does not prove a disk save. Terminal collection evidence is reported separately in Job Recovery Diagnostics. Missing older evidence cannot be reconstructed. Dates and fixed reason codes only; run and hub IDs are one-way digests.'];
   const pending = [nodes];
   const visited = new WeakSet();
   const seenHubs = new Set();

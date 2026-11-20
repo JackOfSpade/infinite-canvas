@@ -75,7 +75,7 @@ export function ScrapeWarningsPanel({
       ))}
       {resultMode && (
         <p className="text-[9px] leading-snug text-amber-100/65">
-          Recorded during this completed search. Re-scan to try the affected source again.
+          Recorded during this completed search. Search again from the Job Board to try the affected source again.
         </p>
       )}
       <button

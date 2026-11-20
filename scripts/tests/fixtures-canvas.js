@@ -5736,20 +5736,24 @@ export default [
       const processingStateStart = source.indexOf('{/* Processing state */}', emptyStateStart);
       const emptyState = source.slice(emptyStateStart, processingStateStart);
       assert(emptyState.includes('Career files retained')
-        && emptyState.includes('Re-scan for New Jobs')
         && emptyState.includes('hasRunnableCareerInput && !controlsLocked')
-        && emptyState.includes('handleRerun();'),
-      'an idle, unlocked empty hub with a retained profile or retained file paths exposes the rerun path');
+        && emptyState.includes('Connect a Job Board to search.')
+        && !/>\s*Re-scan for New Jobs\s*</.test(emptyState)
+        && !emptyState.includes('Run Search')
+        && !emptyState.includes('handleRerun();'),
+      'an idle, unlocked empty hub with retained input has no scan button of its own: it only points at the Job Board, which starts every search');
+      assert(source.includes('platformsVerifyingRef.current') && source.includes('handleRerun'),
+        'handleRerun still exists (the Board calls it) and keeps its platformsVerifying guard');
       assert(emptyState.includes('inputDropsBlocked && hasCareerIdentity')
-        && emptyState.includes('Re-scan with these files, or clear them to search with different ones')
+        && emptyState.includes('Ready — search from the connected Job Board, or clear these files to use different ones')
         && emptyState.includes('Clear career files')
         && emptyState.includes('onConfirm={handleClearCareerFiles}'),
       'a hub holding career files must offer the clear action, and a hub holding none must not claim files are retained');
       // Both empty-state branches hide their actions while controlsLocked, so both
       // must say so instead of naming buttons that aren't rendered or inviting a
       // drop that handleDrop silently refuses.
-      assert(emptyState.includes('Unlock this module to re-scan or change its files'),
-        'a locked retained-files hub still tells the user to re-run or clear, but both buttons are hidden behind !controlsLocked — the instruction points at nothing');
+      assert(emptyState.includes('Unlock this module to search or change its files'),
+        'a locked retained-files hub tells the user to unlock before searching or clearing, since the clear button is hidden behind !controlsLocked');
       assert(emptyState.includes('Module locked')
         && emptyState.includes('Unlock it to drop career files'),
       'a locked virgin hub falls through to the drop copy and invites a drop that handleDrop refuses without a word');
@@ -5929,10 +5933,11 @@ export default [
         && rerun.includes('Re-scan deferred — selected platform connection verification is still pending')
         && rerun.includes("title: 'Checking Connections'"),
       'a done-state re-scan must not read the auth cache while its selected platform is still in the startup verification queue');
-      assert(source.includes('platformsVerifying={platformsVerifying}')
-        && doneState.includes('disabled={platformsVerifying}')
-        && doneState.includes('Checking connections'),
-      'the done-state Re-scan button must expose and disable for the same verification guard enforced by the handler');
+      assert(!source.includes('platformsVerifying={platformsVerifying}')
+        && !doneState.includes('platformsVerifying')
+        && !doneState.includes('onRerun')
+        && !doneState.includes('Checking connections'),
+      'the done-state has no Re-scan button or verification props any more; handleRerun keeps its own platformsVerifying guard for Board-started scans');
 
       assert(!source.includes('const cancelBatchScoring = useCallback')
         && !source.includes('Economy scoring')

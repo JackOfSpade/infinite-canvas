@@ -130,6 +130,30 @@ export function partitionSourcesByRescrapeAge(data, sourceIds, now = Date.now())
 }
 
 /**
+ * The platforms a fresh run of this card would scrape right now, narrowed
+ * exactly as the run itself narrows them (switched-on, runnable, able to serve
+ * the search country), split by the 24-hour rescrape cooldown. The Board reads
+ * this before it decides to scrape a finished card again, so it never offers a
+ * scan that the run would turn into a cooldown no-op. `nextEligibleAt` is the
+ * earliest moment a cooling platform becomes due (null when none is cooling).
+ */
+export function jobSearchRescrapeAvailability(data, now = Date.now()) {
+  const runnable = getRunnableJobSourceIds(
+    normalizeEnabledJobSourceIds(data?.enabledSourceIds),
+    ACTIVE_JOB_SOURCES,
+    normalizeJobCollectionLimits(data?.collectionLimits),
+  );
+  const sourceIds = coverageSourceIdsForLocation(runnable, locationToLegacyText(getSearchLocation(data || {})));
+  const { due, fresh } = partitionSourcesByRescrapeAge(data, sourceIds, now);
+  return {
+    sourceIds,
+    due,
+    fresh,
+    nextEligibleAt: fresh.length > 0 ? Math.min(...fresh.map(entry => entry.nextEligibleAt)) : null,
+  };
+}
+
+/**
  * The platforms whose bookmarks decide how far back a scan reaches.
  *
  * A platform that cannot serve the search's country (Dice and USAJobs on a

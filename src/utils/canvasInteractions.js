@@ -790,8 +790,9 @@ export function discardDeletedJobAnalysisSnapshots(nodes, canvasFilePath, onFail
   const discards = collectDeletedJobAnalysisDiscards(nodes, canvasFilePath, clearedAt);
   for (const discard of discards) {
     // These entries contain Search hubs only, including nested hubs removed
-    // with a canvas. Deleting a Board or its result hierarchy leaves history
-    // provisional and the saved source listings available for recombination.
+    // with a canvas. Deleting a Board leaves history provisional; the Search's
+    // `boardShownRun` record keeps any other Board from showing a run that the
+    // deleted Board already displayed, and the next Board search replaces it.
     try {
       const finalized = window.electronAPI?.finalizeDisplayedJobHistory?.({ canvasFilePath, nodeId: discard.nodeId });
       if (finalized) Promise.resolve(finalized).then(result => {

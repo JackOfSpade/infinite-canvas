@@ -70,32 +70,26 @@ export default [
     },
   },
   {
-    name: 'JobSearchDoneState renders Clear Scrape and Clear Career Data via TwoStepConfirmButton',
+    name: 'JobSearchDoneState renders Clear Career Data via TwoStepConfirmButton and has no Clear Scrape',
     run: async () => {
       const src = done();
       assert(src.includes("import { TwoStepConfirmButton } from './TwoStepConfirmButton';"), 'must import TwoStepConfirmButton');
-      assert(/<TwoStepConfirmButton\s+label="Clear Scrape"/.test(src), 'Clear Scrape must use TwoStepConfirmButton');
+      assert(!src.includes('Clear Scrape') && !src.includes('onClearScrape'), 'Clear Scrape button and prop are gone');
       assert(/<TwoStepConfirmButton\s+label="Clear Career Data"/.test(src), 'Clear Career Data must use TwoStepConfirmButton');
       assert(src.includes('confirmLabel="Click again to clear career data"'), 'career confirm label');
-      assert(src.includes("`Click again to clear ${savedJobCount} job${savedJobCount === 1 ? '' : 's'}`"), 'scrape confirm label');
-      assert(src.includes('onConfirm={onClearScrape}'), 'Clear Scrape wired to onClearScrape');
       assert(src.includes('onConfirm={onClearCareerFiles}'), 'Clear Career Data wired to onClearCareerFiles');
       assert(!src.includes('>\n          Clear career data\n'), 'old plain Clear career data button must be gone');
-      assert(src.includes('onClearScrape && savedJobCount > 0'), 'Clear Scrape gated on savedJobCount > 0');
       assert(src.includes('onClearCareerFiles && (!careerCleared || careerCompileFailed)'), 'Clear Career Data hidden while career is cleared, except to replace files after a failed compile');
       assert(/<div className="flex gap-1 mt-2 w-full">/.test(src), 'buttons share one flex gap-1 row');
     },
   },
   {
-    name: 'JobSearchDoneState gates Re-scan and its hint on savedJobCount === 0 && !careerCleared',
+    name: 'JobSearchDoneState offers no Re-scan, Re-evaluate, or next-scan hint',
     run: async () => {
       const src = done();
-      assert(src.includes('{onRerun && savedJobCount === 0 && !careerCleared && (\n'), 'Re-scan button gate');
-      assert(src.includes('{onRerun && savedJobCount === 0 && !careerCleared && !platformsVerifying && ('), 'Next re-scan hint gate');
-      // The un-gated forms must not survive anywhere.
-      assert(!src.includes('{onRerun && ('), 'no ungated Re-scan render');
-      assert(!src.includes('{onRerun && !platformsVerifying && ('), 'no ungated hint render');
-      assert(src.includes('{onReanalyze && !careerCleared && ('), 'Re-analyze hidden when careerCleared');
+      for (const gone of ['onRerun', 'onReanalyze', 'platformsVerifying', 'verifyDone', 'verifyTotal', 'nextSearchWindowDescription', 'Re-scan for New Jobs', 'Re-evaluate Saved Jobs']) {
+        assert(!src.includes(gone), `removed control survives: ${gone}`);
+      }
     },
   },
   {
@@ -104,7 +98,6 @@ export default [
       const src = done();
       for (const fragment of [
         'savedJobCount = 0,',
-        'onClearScrape = null,',
         'careerCleared = false,',
         'careerCompiling = false,',
         'careerCompileFailed = false,',

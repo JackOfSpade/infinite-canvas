@@ -638,6 +638,18 @@ export function remapCopiedJobModuleReferences(originalNodes, clonedNodes, oldId
       });
       if (changed) remappedData = { ...remappedData, [field]: jobs };
     }
+    // Which Board first showed this run: when that Board was copied with the
+    // Search, the copy's own Board showed it. A Board left behind keeps the
+    // original id, so the copied run is still not shown a second time.
+    const shownBoardId = clone.data?.boardShownRun?.boardId;
+    const copiedShownBoardId = typeof shownBoardId === 'string' ? oldIdToNewId.get(shownBoardId) : null;
+    if (
+      copiedShownBoardId
+      && originalsById.get(shownBoardId)?.type === 'jobboard'
+      && rawClonesById.get(copiedShownBoardId)?.type === 'jobboard'
+    ) {
+      remappedData = { ...remappedData, boardShownRun: { ...clone.data.boardShownRun, boardId: copiedShownBoardId } };
+    }
     return remappedData === clone.data ? clone : { ...clone, data: remappedData };
   });
   const clonesById = new Map(
@@ -956,7 +968,7 @@ export function jobBoardSelectionPresentation(selectedModules) {
         ? 'Combine saved results'
         : 'Search selected & combine';
   const title = freshCount > 0
-    ? 'Selected fresh sources will start and selected paused sources will continue. Completed selected sources are reused without another scan; the Board then combines every connected completed result.'
+    ? 'Selected sources will search for new jobs and selected paused sources will continue. A completed source whose jobs this Board has not shown yet is reused without another scan; the Board then combines every connected completed result.'
     : rescoreCount > 0
       ? 'Re-score the selected saved jobs against their approved career data without scraping, then combine every connected completed result.'
       : hasContinuation
@@ -966,7 +978,7 @@ export function jobBoardSelectionPresentation(selectedModules) {
         : 'Start or continue the selected Job Search state. If a source needs manual attention, resolve it there; this Board resumes and combines every connected completed result automatically.';
   const unreadyMessage = hasTokenlessPaused
     ? 'A selected paused Job Search has no recoverable run token. Resolve it from Job Search, or clear career data, re-import, then start fresh.'
-    : 'Finish setting up the selected sources before running this board. Completed searches are reused here; to refresh one, choose Re-scan for New Jobs on its Job Search card, then return to the Board.';
+    : 'Finish setting up the selected sources before running this board. A completed search whose jobs were already shown is searched again for new jobs once a platform is past its 24-hour cooldown.';
   return { freshCount, reusableCount, rescoreCount, hasContinuation, hasTokenlessPaused, runLabel, title, unreadyMessage };
 }
 

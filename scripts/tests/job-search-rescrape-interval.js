@@ -141,6 +141,21 @@ export default [
         assert(body.includes('continue;') && !body.slice(0, body.indexOf('continue;')).includes('incompleteSearches.push'),
           'a cooldown skip is never recorded as an incomplete Search');
       }
+      // With every selected Search skipped and nothing saved on any connected
+      // Search, an empty Combine is discarded as "inputs changed" and marks the
+      // Board stale without a word. The scan must stop and say why instead.
+      for (const at of [fanoutSkip, serialSkip]) {
+        assert(board.slice(at, at + 700).includes('cooldownSkips.push({ label, error: result.error || null });'),
+          'each cooldown skip keeps the Search label and its next-eligible message');
+      }
+      const emptyStop = board.indexOf('if (combineInputs.length === 0 && cooldownSkips.length > 0) {');
+      const scanCombine = board.indexOf('const combineOutcome = await handleCombine({');
+      assert(emptyStop > serialSkip && scanCombine > emptyStop,
+        'a scan with only cooldown skips and no saved result stops before Combine');
+      const stopBody = board.slice(emptyStop, emptyStop + 1200);
+      assert(stopBody.includes('addToast({') && stopBody.includes('clearExactBoardScanResume(updateGlobal, id, boardRunId);')
+        && stopBody.includes('return;') && !stopBody.slice(0, stopBody.indexOf('return;')).includes('stale: true'),
+      'the stop tells the user, retires the scan plan and never marks the Board stale');
       return { boardSkipsCooldown: true };
     },
   },

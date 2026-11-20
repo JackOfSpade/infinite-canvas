@@ -2,7 +2,7 @@ import { assert, jobSearchNextAnchor, resolveJobSearchDateWindow } from '../test
 import { readJobsSources } from './jobsSourceFixture.mjs';
 import { buildJobSearchDateHistory } from '../../electron/ipc/bugReport/jobSearchDates.js';
 import { completionTimestampIso } from '../../src/utils/completionTimestamp.js';
-import { buildJobHubScrapeClearPatch } from '../../src/utils/jobSearchSplitClear.js';
+import { buildJobHubRescanCapabilityPatch } from '../../src/utils/jobSearchSplitClear.js';
 import { buildJobTasks, collectionEvidenceForSnapshot, listingReadProgress } from '../../electron/ipc/jobs.js';
 import { createSeenListingMatcher, dedupAgainstHistory } from '../../electron/ipc/jobsHistory.js';
 import { sanitizeJobRunCollectionDiagnostics } from '../../electron/ipc/jobRunStaging.js';
@@ -389,14 +389,21 @@ export default [
     },
   },
   {
-    name: 'Clear Scrape drops the transient per-platform staging and never the durable bookmarks',
+    name: 'A Board re-scan capability touches only the import capability, never the bookmarks or saved jobs',
     run: () => {
-      const patch = buildJobHubScrapeClearPatch({}, { nodeId: 'hub-clear-source-coverage' });
-      assert(patch.pendingSourceCoverage === null,
-        'the clear patch nulls the transient pendingSourceCoverage staging');
-      assert(!Object.prototype.hasOwnProperty.call(patch, 'sourceCoverage'),
-        'the clear patch never writes sourceCoverage, so durable platform bookmarks survive');
-      return { stagedCleared: true, durableKept: true };
+      const patch = buildJobHubRescanCapabilityPatch(
+        { careerSnapshotId: 'a'.repeat(64), resumeFingerprint: 'b'.repeat(64) },
+        { nodeId: 'hub-rescan-source-coverage', createCapability: () => 'career-import:hub-rescan-source-coverage:x', now: 1 },
+      );
+      assert(patch && Object.keys(patch).sort().join(',')
+        === 'careerImportCompilation,careerImportConsumption,careerImportFreshCapability,careerImportGeneration',
+      'the re-scan patch writes only the capability fields');
+      assert(!Object.prototype.hasOwnProperty.call(patch, 'sourceCoverage')
+        && !Object.prototype.hasOwnProperty.call(patch, 'scoredJobs'),
+      'durable platform bookmarks and the saved jobs survive until the new run replaces them');
+      assert(buildJobHubRescanCapabilityPatch({}, { nodeId: 'hub-rescan-source-coverage' }) === null,
+        'no approved snapshot means no re-scan capability');
+      return { capabilityOnly: true, durableKept: true };
     },
   },
   {

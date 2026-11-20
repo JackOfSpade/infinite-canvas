@@ -78,7 +78,10 @@ import { hubHasAcceptedInitialDrop } from '../utils/hubDropEligibility';
 import { getSearchLocation, hasRequiredLocations, locationValidationMessage } from '../utils/jobSearchLocations';
 import { exactInterruptedRecoveryAdmission } from '../utils/jobBoardRecoveryAdmission';
 import { cancelJobBoardChildrenSequentially, promoteJobBoardPausedSourceResolution, runJobBoardChildFanout } from '../utils/jobBoardChildFanout';
-import { boardHistoryAuthorityAvailable, classifyJobBoardSourceAdmission, combineSourceRunEntry, completedJobSearchOutcomeMatches, describeReceiptMismatch, jobSearchOutcomeReceiptMatches, partitionJobBoardSourceAdmissions } from '../utils/jobBoardSourceAdmission';
+import { boardHistoryAuthorityAvailable, classifyJobBoardSourceAdmission, combineSourceRunEntry, completedJobSearchOutcomeMatches, describeReceiptMismatch, isJobSearchRunShownOnOtherBoard, jobSearchOutcomeReceiptMatches, jobSearchShownRunPatch, partitionJobBoardSourceAdmissions } from '../utils/jobBoardSourceAdmission';
+import { jobSearchRescrapeAvailability } from '../utils/jobSearchSourceCoverage';
+import { buildJobHubRescanCapabilityPatch } from '../utils/jobSearchSplitClear';
+import { jobSearchCarriedResultsMarker } from '../utils/jobSearchCarriedResults';
 import { getRunnableJobSourceIds, normalizeEnabledJobSourceIds } from '../utils/jobPlatformSelection';
 import {
   getSavedAnalysisAvailability,
@@ -248,6 +251,7 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
   orchestratorNodeId = null,
   boardRunId = null,
   recoveryOwner = null,
+  now = Date.now(),
 } = {}) {
   const sourceData = node?.data || {};
   const hubState = sourceData.hubState || 'empty';
@@ -311,12 +315,13 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
   if (sourceData.manualAiResume?.runId && isSavedScrapeManualAiResume(sourceData.manualAiResume)) {
     return { ready: true, readinessReason: '', statusLabel: 'Resume pending search' };
   }
-  // A terminal generation is immutable Board input.  Its saved hiring-fit
-  // rows (including a truthful zero) are safe to combine, but sending it into
-  // the normal runner would parse/scrape the same career input again.  Keep
-  // this before platform/location setup: reuse must not be disabled merely
-  // because a completed Search's current controls were later edited.
-  const sourceAdmission = classifyJobBoardSourceAdmission(node);
+  // A terminal generation whose jobs no Board has shown yet is immutable
+  // Board input: combine it, never scrape it again.  Keep this before
+  // platform/location setup: reuse must not be disabled merely because a
+  // completed Search's current controls were later edited.  A shown (or empty)
+  // generation with a platform past its cooldown is re-scraped instead and so
+  // falls through to the same setup checks a fresh search gets.
+  const sourceAdmission = classifyJobBoardSourceAdmission(node, { now, boardId: orchestratorNodeId });
   if (sourceAdmission.kind === 'rescore-saved-jobs') {
     const count = Number.isFinite(sourceAdmission.savedJobCount) ? sourceAdmission.savedJobCount : 0;
     return {
@@ -347,12 +352,26 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
       statusLabel: count > 0 ? `${count} saved job${count === 1 ? '' : 's'} · reuse` : 'Saved empty result · reuse',
     };
   }
+  if (sourceAdmission.kind === 'rescrape-cooldown') {
+    // Nothing new can be scraped yet. It is skipped (never blocks the other
+    // selected searches) and, when another Board already showed these jobs,
+    // left out of this Board's results.
+    const when = Number.isFinite(sourceAdmission.nextEligibleAt)
+      ? new Date(sourceAdmission.nextEligibleAt).toLocaleString()
+      : null;
+    return {
+      ready: true,
+      boardAction: 'cooldown',
+      readinessReason: sourceAdmission.reason,
+      statusLabel: when ? `Searched recently · next ${when}` : 'Searched recently',
+    };
+  }
   if (sourceAdmission.kind === 'terminal-requires-fresh-input') {
     return {
       ready: false,
       boardAction: 'terminal-blocked',
       readinessReason: sourceAdmission.reason,
-      statusLabel: 'Clear + import required',
+      statusLabel: 'Re-import career data',
     };
   }
   if (sourceAdmission.kind === 'fresh-import-requires-clear') {
@@ -376,7 +395,7 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
       ready: false,
       boardAction: 'fresh-import-blocked',
       readinessReason: sourceAdmission.reason,
-      statusLabel: 'Clear + import required',
+      statusLabel: 'Re-import career data',
     };
   }
   if (sourceAdmission.kind === 'career-import-paused') {
@@ -444,6 +463,22 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
       ready: false,
       readinessReason: locationValidationMessage(searchLocation),
       statusLabel: 'Needs location',
+    };
+  }
+  if (sourceAdmission.kind === 'rescrape-terminal') {
+    const count = Array.isArray(sourceData.scoredJobs) ? sourceData.scoredJobs.length : 0;
+    // Same rule as jobSearchCarriedResultsMarker: the Board that still shows
+    // these jobs keeps them and adds the new ones; any other Board replaces.
+    const addsToShown = jobSearchCarriedResultsMarker(sourceData, { orchestratorNodeId }) !== null;
+    return {
+      ready: true,
+      boardAction: 'scan',
+      readinessReason: addsToShown
+        ? 'The platforms past their 24-hour cooldown will be searched for new jobs, which are added to the ones this Board already shows.'
+        : count > 0
+          ? 'Its jobs were already shown on another Job Board. The platforms past their 24-hour cooldown will be searched for new jobs, which replace the saved ones, then combined.'
+          : 'The platforms past their 24-hour cooldown will be searched for new jobs, then combined.',
+      statusLabel: 'Ready to search for new jobs',
     };
   }
   return {
@@ -554,7 +589,7 @@ function canInspectInterruptedRecovery(readiness, sourceData) {
   // probe: only an exact manifest can continue it; a missing manifest remains
   // fail-closed rather than becoming another fresh search.
   const recoveryProbeBlocked = readiness?.statusLabel === 'Needs platform'
-    || readiness?.statusLabel === 'Clear + import required';
+    || readiness?.boardAction === 'fresh-import-blocked';
   return recoveryProbeBlocked
     && sourceData?.hubState !== 'sources-ready'
     && !!sourceData?.resumeProfile
@@ -625,9 +660,9 @@ function nonMergeableSearchMessage(sourceData) {
     sourceData?.resultDisposition === 'collection-only'
     || isExplicitlyUnscoredModule(sourceData)
   ) {
-    return 'It completed without hiring-fit scoring, so its results cannot be combined. Turn off Test Mode if enabled, then choose Re-scan for New Jobs on its Job Search card before using the Board.';
+    return 'It completed without hiring-fit scoring, so its results cannot be combined. Turn off Test Mode if enabled, then search it again from this Board.';
   }
-  return 'It completed without mergeable hiring-fit results. Choose Re-scan for New Jobs on its Job Search card before using the Board.';
+  return 'It completed without mergeable hiring-fit results. Search it again from this Board.';
 }
 
 // Capture the mergeable terminal inputs from the live canvas. A Combine can
@@ -670,6 +705,7 @@ function liveCombineInputs(boardId, nodes, edges) {
       const count = snapshotScopedJobs.length;
       const authoritativeEmpty = !isExplicitlyUnscoredModule(data)
         && (data.resultDisposition === 'empty-complete' || data.resultDisposition === 'preference-filtered');
+      const shownElsewhere = isJobSearchRunShownOnOtherBoard(node, boardId);
       return {
         id: node.id,
         runId: terminal?.runId || null,
@@ -690,13 +726,21 @@ function liveCombineInputs(boardId, nodes, edges) {
         hubState: data.hubState || 'empty',
         include: !!terminal && isMergeableTerminalJobSearchOutcome(node, terminal)
           && (count > 0 || authoritativeEmpty)
-          && !isSavedJobsCareerReplacementPending(node),
+          && !isSavedJobsCareerReplacementPending(node)
+          // Another Board (often one since deleted) already showed this run:
+          // its jobs are never shown a second time.
+          && !shownElsewhere,
+        // A finished run left out only because another Board showed it is
+        // settled for this Board, not unfinished.
+        settledElsewhere: shownElsewhere && !!terminal && isMergeableTerminalJobSearchOutcome(node, terminal)
+          && (count > 0 || authoritativeEmpty),
       };
     });
   const completed = all.filter(module => module.include);
+  const settled = all.filter(module => module.include || module.settledElsewhere);
   // Board preferences can pass a saved job the Search's own rules filtered out.
   const overrideActive = !!activeJobBoardPreferenceOverride((Array.isArray(nodes) ? nodes : []).find(node => node?.id === boardId)?.data);
-  return { all, completed, ready: completed.filter(module => module.count > 0 || (overrideActive && module.preferenceCandidatePool.length > 0)) };
+  return { all, completed, settled, ready: completed.filter(module => module.count > 0 || (overrideActive && module.preferenceCandidatePool.length > 0)) };
 }
 
 function boardInputSignature(completedModules, connectedModules) {
@@ -985,6 +1029,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     .filter(node => node.type === 'jobcard' && node.data?.hubId === id && jobCardClosedAtMostOfficialSource(node.data))
     .map(node => `${node.id}\t${node.data?.source || ''}`).join('\n'), [id]));
   const closedCardCount = closedCardIds ? closedCardIds.split('\n').length : 0;
+  // The clock the cooldown-dependent readiness is evaluated at; advanced by a
+  // timer when a connected Search's next platform becomes due.
+  const [rescrapeClock, setRescrapeClock] = useState(() => Date.now());
   const connectedSig = useStore(
     useCallback((s) => {
       const ids = new Set();
@@ -1074,7 +1121,12 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             // The admission enum collapses the legacy no-work proof into one
             // non-sensitive reactive value. Do not serialize profile, query,
             // warning, or count payloads merely to refresh the selector.
-            admissionKind: classifyJobBoardSourceAdmission(n).kind,
+            admissionKind: classifyJobBoardSourceAdmission(n, { boardId: id }).kind,
+            // Which Board first showed this run decides whether this Board
+            // re-scrapes, reuses or leaves it out; it changes on its own when
+            // another Board's Combine records it.
+            shownRunId: n.data?.boardShownRun?.runId || '',
+            shownBoardId: n.data?.boardShownRun?.boardId || '',
             // Exact interrupted recovery also needs the current profile
             // identity, but this signature contains only a fingerprint/boolean
             // and normalized location fields—never career content.
@@ -1278,7 +1330,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         const readiness = moduleSearchReadiness(
           n,
           verifyingPlatforms,
-          { orchestratorNodeId: id, recoveryOwner },
+          { orchestratorNodeId: id, recoveryOwner, now: rescrapeClock },
         );
         const probe = interruptedRecoveryProbes[n.id];
         const recoveryProbeEligible = !!canvasFilePath
@@ -1302,6 +1354,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           testMode: !!n.data?.testMode,
           isScored: !isExplicitlyUnscoredModule(n.data),
           resultDisposition: n.data?.resultDisposition || null,
+          // Shown first on another Board: this Board leaves it out, exactly as
+          // liveCombineInputs does, so the live signature matches Combine's.
+          shownElsewhere: isJobSearchRunShownOnOtherBoard(n, id),
           ...readiness,
           ...(recoveryProbeEligible ? {
             ready: true,
@@ -1313,7 +1368,26 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       });
     // connectedSig is the real reactive trigger; getEdges/getNodes are stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [boardRecoverySig, canvasFilePath, connectedSig, deletionLifecycleRevision, id, interruptedRecoveryProbes, savedAnalysisAvailabilityVersion, verifyingPlatforms]);
+  }, [boardRecoverySig, canvasFilePath, connectedSig, deletionLifecycleRevision, id, interruptedRecoveryProbes, rescrapeClock, savedAnalysisAvailabilityVersion, verifyingPlatforms]);
+
+  // A finished Search becomes searchable again when its first platform leaves
+  // the 24-hour cooldown. Nothing on the canvas changes at that moment, so wake
+  // the readiness above once, at the earliest such time.
+  useEffect(() => {
+    const nodes = getNodes();
+    const connected = new Set(getConnectedJobSearchIds(id, nodes, getEdges()));
+    const nowMs = Date.now();
+    const next = nodes
+      .filter(node => connected.has(node.id) && node.type === 'jobhub' && node.data?.hubState === 'done')
+      .map(node => jobSearchRescrapeAvailability(node.data, nowMs).nextEligibleAt)
+      .filter(at => Number.isFinite(at) && at > nowMs)
+      .reduce((earliest, at) => Math.min(earliest, at), Infinity);
+    if (!Number.isFinite(next)) return undefined;
+    const timer = setTimeout(() => setRescrapeClock(Date.now()), Math.min(next - nowMs + 1000, 24 * 60 * 60 * 1000));
+    return () => clearTimeout(timer);
+    // connectedSig is the real reactive trigger; getEdges/getNodes are stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectedSig, id, rescrapeClock]);
 
   const connectedModuleIds = useMemo(() => connectedModules.map((module) => module.id), [connectedModules]);
   // Execution preference is deliberately independent from selection: old
@@ -1462,14 +1536,21 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // contribute jobs to the actual merge.
   const preferenceOverrideActive = !!activeJobBoardPreferenceOverride(data);
   const completedModules = useMemo(
-    () => mergeableModules.filter((m) => m.hubState === 'done' && (m.hasPositiveResults || m.isAuthoritativeEmpty)),
+    () => mergeableModules.filter((m) => m.hubState === 'done' && (m.hasPositiveResults || m.isAuthoritativeEmpty) && !m.shownElsewhere),
+    [mergeableModules],
+  );
+  // Finished Searches this Board leaves out because another Board showed them
+  // are settled here, so they never hold the Board in an unfinished state.
+  const settledElsewhereCount = useMemo(
+    () => mergeableModules.filter((m) => m.hubState === 'done' && (m.hasPositiveResults || m.isAuthoritativeEmpty) && m.shownElsewhere).length,
     [mergeableModules],
   );
   const readyModules = useMemo(
     () => completedModules.filter((m) => m.count > 0 || (preferenceOverrideActive && (getNode(m.id)?.data?.preferenceCandidatePool?.length || 0) > 0)),
     [completedModules, getNode, preferenceOverrideActive],
   );
-  const allConnectedModulesDone = connectedModules.length > 0 && completedModules.length === connectedModules.length;
+  const allConnectedModulesDone = connectedModules.length > 0
+    && completedModules.length + settledElsewhereCount === connectedModules.length;
   // Signature of every terminal module (id + data fingerprint). Compared against
   // the signature captured at the last Combine to tell whether the cached board
   // is still valid, including a terminal zero-result re-run.
@@ -1494,8 +1575,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     hubState,
     stale: stale || salaryNeedsRefresh,
     connectedCount: connectedModules.length,
-    completedCount: completedModules.length,
-    pendingSourceWork: connectedModules.some(module => module.boardAction && module.boardAction !== 'reuse'),
+    completedCount: completedModules.length + settledElsewhereCount,
+    pendingSourceWork: connectedModules.some(module => (
+      module.boardAction && module.boardAction !== 'reuse' && module.boardAction !== 'cooldown'
+    )),
     combineSignature: data.combineSignature,
     liveSignature,
   });
@@ -1750,7 +1833,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     }
     const liveInputs = liveCombineInputs(id, getNodes(), getEdges());
     const liveAllConnectedDone = liveInputs.all.length > 0
-      && liveInputs.completed.length === liveInputs.all.length;
+      && liveInputs.settled.length === liveInputs.all.length;
     const liveInputSignature = boardInputSignature(liveInputs.completed, liveInputs.all);
     const liveStale = liveBoardData.hubState === 'done' && (
       isLegacyUnbucketedJobBoard(liveBoardData, getNodes(), id)
@@ -3156,12 +3239,21 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         }
         autoResumedManualAiRunRef.current = null;
         await completeManualAiRun(manualAiRunId);
-        EventLogger.log(`[JobBoard] recovered combine superseded at admission id=${id}`);
+        EventLogger.log(
+          `[JobBoard] recovered combine superseded at admission id=${id} reason=${
+            expectedSourceMismatch
+              ? 'selected-runs'
+              : (expectedCombineSourceRuns ? !exactCombineRunsMatch : recoveryAttempt)
+                ? 'exact-source-runs'
+                : missingRecoveryProof ? 'missing-recovery-proof' : 'input-signature'
+          } inputs=${completedAtCombine.length}`
+          + ` expected=${Array.isArray(expectedCombineSourceRuns) ? expectedCombineSourceRuns.length : 'none'}`,
+        );
         return { status: 'superseded' };
       }
       if (readyAtCombine.length === 0) {
         const liveConnectedCount = getConnectedJobSearchIds(id, getNodes(), getEdges()).length;
-        const allLiveConnectedDone = liveConnectedCount > 0 && completedAtCombine.length === liveConnectedCount;
+        const allLiveConnectedDone = liveConnectedCount > 0 && inputsAtCombine.settled.length === liveConnectedCount;
         const emptySignature = sigAtCombine;
         const liveBoardData = getNode(id)?.data || {};
         const replacingPriorBoard = liveBoardData.hubState === 'done'
@@ -3697,6 +3789,14 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             locationVariantPostingsCollapsed: locationStats.postingsCollapsed,
             locationVariantProtectedRetained: locationStats.protectedRetained,
             researchRemoved: boardResearch.removed || 0,
+            // Earlier rows a Board re-scan kept on its Searches (they are in
+            // the union but not in the latest run's own count).
+            carriedJobs: completedAtCombine.reduce((sum, module) => {
+              const sourceData = getNode(module.id)?.data;
+              return sum + (sourceData?.jobRunId === module.runId && Number.isSafeInteger(sourceData?.carriedJobCount)
+                ? Math.max(0, sourceData.carriedJobCount)
+                : 0);
+            }, 0),
           },
           // Baseline for staleness detection (connection/data drift vs. this combine).
           combineSignature: sigAtCombine,
@@ -3745,6 +3845,25 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           });
         } catch (error) {
           EventLogger.error('[JobBoard] Displayed-results history append failed:', error);
+        }
+      }
+      // Record on each Search which Board first showed its run. That record is
+      // what later lets a Board search replace these jobs with new ones, and
+      // keeps any other Board (including one made after this Board is
+      // deleted) from showing them a second time.
+      // Only a Search with at least one row in the displayed set counts:
+      // research, dedup or Board preferences can remove every row of one, and
+      // rows shown through a Board preference override count too.
+      if (newNodes.length > 0) {
+        const shownAt = Date.now();
+        const displayedOriginIds = new Set(union.map(job => job?.originHubId).filter(Boolean));
+        for (const module of completedAtCombine) {
+          if (!module.runId || !displayedOriginIds.has(module.id)) continue;
+          updateGlobal(module.id, node => jobSearchShownRunPatch(node?.data, {
+            boardId: id,
+            runId: module.runId,
+            now: shownAt,
+          }));
         }
       }
       markBoardPreferencesCombined();
@@ -4147,6 +4266,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     // An unfinished manifest freezes its original provider set. Probe it only
     // when today's all-disabled platform selection is the sole admission
     // blocker; every other readiness boundary stays authoritative.
+    // One clock for this click: readiness and the admission partition below
+    // must agree on which finished Searches are past their cooldown.
+    const admissionNow = Date.now();
     const admissionReadiness = !resumePlan
       ? await Promise.all(transactionSelectedIds.map(async (sourceId) => {
         const source = sourceNodesById.get(sourceId);
@@ -4157,6 +4279,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         const readiness = moduleSearchReadiness(source, verifyingPlatformsRef.current, {
           orchestratorNodeId: id,
           recoveryOwner,
+          now: admissionNow,
         });
         const interruptedRecoveryRunId = canInspectInterruptedRecovery(readiness, source?.data)
           ? await inspectExactResumableJobRun(canvasFilePath, sourceId, source?.data, {
@@ -4229,7 +4352,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       .filter(Boolean);
     const admissionPartition = resumePlan
       ? null
-      : partitionJobBoardSourceAdmissions(selectedSourceNodes);
+      : partitionJobBoardSourceAdmissions(selectedSourceNodes, { now: admissionNow, boardId: id });
     const completedOutcomes = new Map(Object.entries(resumePlan?.completedSourceRuns || {}));
     const incompleteSearches = Array.isArray(resumePlan?.incompleteSearches)
       ? resumePlan.incompleteSearches.filter(entry => {
@@ -4293,9 +4416,38 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         }
       }
     }
+    // A finished Search that cannot be scraped yet contributes nothing new:
+    // skip it (it never blocks the other selected searches). A Search whose
+    // shown jobs may be replaced gets a one-shot re-scan capability minted
+    // against its approved snapshot. Its saved jobs stay until the new run
+    // replaces them, so a cancel or failure restores them unchanged.
+    // The plan keeps them, so a resumed scan skips the same Searches.
+    const cooldownSearches = resumePlan
+      ? (Array.isArray(resumePlan.cooldownSearches) ? resumePlan.cooldownSearches : [])
+        .filter(entry => typeof entry?.sourceId === 'string' && transactionSelectedIds.includes(entry.sourceId))
+        .map(entry => ({
+          sourceId: entry.sourceId,
+          label: typeof entry.label === 'string' ? entry.label : moduleLabel(sourceNodesById.get(entry.sourceId)?.data),
+          error: typeof entry.error === 'string' ? entry.error : null,
+        }))
+      : admissionPartition.cooldown.map(({ sourceId, source, admission }) => ({
+        sourceId,
+        label: moduleLabel(source?.data),
+        error: admission.reason || null,
+      }));
+    const cooldownSourceIds = new Set(cooldownSearches.map(entry => entry.sourceId));
+    const rescanCapabilities = {};
+    if (!resumePlan) {
+      for (const { sourceId, source } of admissionPartition.rescrape) {
+        const patch = buildJobHubRescanCapabilityPatch(source?.data, { nodeId: sourceId });
+        if (!patch) continue;
+        updateGlobal(sourceId, patch);
+        rescanCapabilities[sourceId] = patch.careerImportFreshCapability;
+      }
+    }
     const incompleteIds = new Set(incompleteSearches.map(entry => entry?.sourceId).filter(Boolean));
     const selectedIds = transactionSelectedIds.filter(sourceId => (
-      !completedOutcomes.has(sourceId) && !incompleteIds.has(sourceId)
+      !completedOutcomes.has(sourceId) && !incompleteIds.has(sourceId) && !cooldownSourceIds.has(sourceId)
     ));
     // A pre-existing blocked-source generation must be serialised through the
     // Board's exact paused-source receipt.  It is not fresh work, even when a
@@ -4306,12 +4458,13 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     // This one-shot value is the only authority for a provider-starting fresh
     // child. It survives the parent plan for exact crash recovery, while the
     // Search consumes it atomically at its own lane turn.
-    const freshImportCapabilities = resumePlan?.freshImportCapabilities || Object.fromEntries(
-      (admissionPartition?.fresh || []).map(({ sourceId, admission }) => [
+    const freshImportCapabilities = resumePlan?.freshImportCapabilities || Object.fromEntries([
+      ...(admissionPartition?.fresh || []).map(({ sourceId, admission }) => [
         sourceId,
         admission.freshImportCapability,
-      ]).filter(([, capability]) => typeof capability === 'string' && !!capability),
-    );
+      ]),
+      ...Object.entries(rescanCapabilities),
+    ].filter(([, capability]) => typeof capability === 'string' && !!capability));
 
     // A recovered plan can already have classified every selected Search as
     // incomplete while its parent render still carries the durable receipt.
@@ -4332,7 +4485,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         description: pausedOnly
           ? `${labels} paused. Resolve or skip their blocked sources, then run the board again.`
           : nonMergeableOnly
-            ? `${labels} completed without hiring-fit scoring. Turn off Test Mode if enabled, then choose Re-scan for New Jobs on each Job Search card before using the Board.`
+            ? `${labels} completed without hiring-fit scoring. Turn off Test Mode if enabled, then search them again from this Board.`
             : `${labels} did not finish. Review those modules, then run the board again.`,
         type: (pausedOnly || nonMergeableOnly) ? 'info' : 'error',
       });
@@ -4385,6 +4538,14 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const totalSelected = transactionSelectedIds.length;
     let completed = completedOutcomes.size;
     let processed = completed + incompleteSearches.length;
+    // Searches skipped because every platform is inside its 24-hour rescrape
+    // cooldown and nothing is saved to hand on. Kept so the Board can say why
+    // a scan ended with nothing to combine instead of ending silently.
+    const cooldownSkips = cooldownSearches.map(({ label, error }) => ({ label, error }));
+    processed += cooldownSkips.length;
+    cooldownSearches.forEach(({ sourceId }) => {
+      EventLogger.log(`[JobBoard] skipped Search in rescrape cooldown id=${id} run=${boardRunId} source=${sourceId}`);
+    });
     const freshSelectedCount = selectedIds.length;
     const reusedSelectedCount = completedOutcomes.size;
     setScanProgress({
@@ -4442,8 +4603,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     // workspace startup can create that exact child's manifest without mounting
     // the nested canvas or inventing a fresh search window. Unsafe/native/AI-
     // planning children simply have no entry and stay mounted/human-gated.
+    // A re-scraped finished Search stays a mounted, human-visible run: the
+    // unattended startup bootstrap applies no per-platform cooldown and would
+    // never spend its re-scan capability.
     const backgroundChildRequests = resumePlan?.backgroundChildRequests || Object.fromEntries(
-      transactionSelectedIds.map((sourceId) => [
+      transactionSelectedIds.filter(sourceId => !rescanCapabilities[sourceId] && !cooldownSourceIds.has(sourceId)).map((sourceId) => [
         sourceId,
         prepareBackgroundBoardChildRequest({
           node: sourceNodesById.get(sourceId),
@@ -4465,6 +4629,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       backgroundChildRequests,
       completedSourceRuns: Object.fromEntries(completedOutcomes),
       incompleteSearches,
+      cooldownSearches,
       // This exact source/run handoff is the only case where a Board-owned
       // Search may continue from its source-card Solve/Skip UI. Keep the
       // active source and its rollback receipt too, so Cancel remains able to
@@ -4878,6 +5043,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           // no saved result to hand on: it contributes nothing, so skip it.
           if (!error && result?.status === 'not-ready' && result?.reason === 'platforms-recently-scraped') {
             processed += 1;
+            cooldownSkips.push({ label, error: result.error || null });
             EventLogger.log(`[JobBoard] skipped Search in rescrape cooldown id=${id} run=${boardRunId} source=${sourceId}`);
             continue;
           }
@@ -5676,6 +5842,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
               recoverableFailure: null,
             });
             setScanProgress({ completed: processed, total: totalSelected, currentLabel: label });
+            cooldownSkips.push({ label, error: result.error || null });
             EventLogger.log(`[JobBoard] skipped Search in rescrape cooldown id=${id} run=${boardRunId} source=${sourceId}`);
             continue;
           }
@@ -5852,7 +6019,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           description: pausedOnly
             ? `${labels} paused. Resolve or skip their blocked sources, then run the board again.`
             : nonMergeableOnly
-              ? `${labels} completed without hiring-fit scoring. Turn off Test Mode if enabled, then choose Re-scan for New Jobs on each Job Search card before using the Board.`
+              ? `${labels} completed without hiring-fit scoring. Turn off Test Mode if enabled, then search them again from this Board.`
               : incompleteSearches.map(entry => `${entry.label}: ${entry.error || 'Search did not finish.'}`).join(' ').slice(0, 1200),
           type: (pausedOnly || nonMergeableOnly) ? 'info' : 'error',
         });
@@ -5883,13 +6050,31 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         clearExactBoardScanResume(updateGlobal, id, boardRunId);
         return;
       }
+      const combineInputState = liveCombineInputs(id, getNodes(), getEdges());
+      const combineInputs = combineInputState.completed;
+      if (combineInputs.length === 0 && cooldownSkips.length > 0) {
+        // Nothing was scraped and no connected Search holds a result. An empty
+        // Combine would be discarded as "inputs changed" and mark the Board
+        // stale for a reason that is not true, so stop here and say why.
+        EventLogger.log(
+          `[JobBoard] scan ended with nothing to combine id=${id} run=${boardRunId}`
+          + ` reason=rescrape-cooldown skipped=${cooldownSkips.length}`,
+        );
+        addToast({
+          title: 'Nothing to search yet',
+          description: `${cooldownSkips
+            .map(entry => `${entry.label}: ${entry.error || 'Every selected job platform finished a scrape in the last 24 hours.'}`)
+            .join(' ')} No connected search has saved results to combine.`.slice(0, 1200),
+          type: 'info',
+        });
+        clearExactBoardScanResume(updateGlobal, id, boardRunId);
+        return;
+      }
       setScanProgress({
         completed: totalSelected,
         total: totalSelected,
         label: 'Selected searches complete — combining all connected results…',
       });
-      const combineInputState = liveCombineInputs(id, getNodes(), getEdges());
-      const combineInputs = combineInputState.completed;
       const combineInputSignature = boardInputSignature(
         combineInputs,
         combineInputState.all,

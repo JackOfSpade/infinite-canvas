@@ -195,8 +195,8 @@ export default [
       'the persisted title-operator note remains a static historical note without a duplicate action prompt');
       assert(scrapePanel.includes('!resultMode && w.suggestion')
         && scrapePanel.includes('suggestion: ${w.suggestion}')
-        && scrapePanel.includes('Recorded during this completed search. Re-scan to try the affected source again.'),
-      'completed-result warning cards hide stale per-source instructions, retain them in Copy all diagnostics, and give a truthful re-scan path');
+        && scrapePanel.includes('Recorded during this completed search. Search again from the Job Board to try the affected source again.'),
+      'completed-result warning cards hide stale per-source instructions, retain them in Copy all diagnostics, and give a truthful search-again path');
       return { staticNotices: true, copiedDiagnostics: true };
     },
   },

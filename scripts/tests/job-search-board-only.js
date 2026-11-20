@@ -72,23 +72,21 @@ export default [
     },
   },
   {
-    name: 'the Re-scan control is offered only on a connected card and a hint replaces it otherwise',
+    name: 'the card offers no scan control and shows only a connect hint when a Job Board is missing',
     run() {
       const search = readSource('../../src/nodes/JobSearchNode.jsx');
-      assert(search.includes('!resumeOffer?.incomplete && (\n                    managedByJobBoard ? ('),
-        'the Re-scan / Run Search button renders only when managedByJobBoard');
       assert(search.includes('>Connect a Job Board to search.</p>'),
-        'an unconnected card shows the connect hint in place of the search button');
+        'an unconnected card shows the connect hint in place of any search button');
+      assert(!search.includes('>Run Search<') && !search.includes('>Re-scan for New Jobs<'),
+        'no Re-scan / Run Search button survives on the card');
       assert(!search.includes('{hasRunnableCareerInput && !controlsLocked && !boardRecoveryOwnsActions && !resumeOffer?.incomplete && (\n                    <button'),
         'no ungated Re-scan button survives');
       assert(search.includes("{careerCompilationFailed ? 'Retry Career Compilation' : 'Compile Career Files'}"),
         'the compile controls stay available without a Job Board');
       const done = readSource('../../src/nodes/jobsearch/JobSearchDoneState.jsx');
-      assert(done.includes('onRerun: onRerunAction = null,'),
-        'the done state receives the re-scan handler as an unexposed action prop');
-      assert(done.includes('const onRerun = managedByJobBoard ? onRerunAction : null;'),
-        'the done-state Re-scan handler is withheld unless a Job Board is connected');
-      return { rerunGated: true, doneRerunGated: true };
+      assert(!done.includes('onRerun') && !done.includes('onReanalyze') && !done.includes('Re-scan for New Jobs'),
+        'the done state takes no scan handlers and renders no scan button');
+      return { rerunRemoved: true, doneRerunRemoved: true };
     },
   },
   {
@@ -111,9 +109,8 @@ export default [
       ), 'a card drops the USAJobs background refresh');
       assert(!usaRefresh.includes('acquireModuleRun') && !usaRefresh.includes('searchJobsSingleSource'),
         'the USAJobs background refresh never acquires a run lane or contacts the provider');
-      assert(search.includes("? 'Career data and the last scan date were kept — search from the connected Job Board to continue from that date.'")
-        && search.includes(": 'Career data was kept — search from the connected Job Board when you are ready.'"),
-        'Clear Scrape copy points the user at the connected Job Board');
+      assert(!search.includes('handleClearScrape') && !search.includes('canClearScrape'),
+        'Clear Scrape is gone from the card');
       assert(!search.includes('Re-scan for New Jobs continues from that date'),
         'the standalone re-scan promise is gone');
       return { autoStartRetired: true, usaJobsDropped: true };

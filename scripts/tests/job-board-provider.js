@@ -1241,9 +1241,9 @@ export default [
         && terminalWithoutMergeableResults.kind === 'terminal-requires-fresh-input'
         && partialAdmission.kind === 'terminal-requires-fresh-input'
         && malformedModernReceipts.every(admission => admission.kind === 'terminal-requires-fresh-input')
-        && terminalWithoutMergeableResults.reason.includes('Re-scan it on the Job Search card')
-        && partialAdmission.reason.includes('Re-scan it on the Job Search card'),
-      'terminal Job Searches must be reusable rather than fresh-scanned; non-mergeable terminals direct users to the card re-scan; only a cleared and re-imported empty hub is Board fresh-scan eligible; a paused source requires its exact run token to continue');
+        && terminalWithoutMergeableResults.reason.includes('Clear its career data and import the files again')
+        && partialAdmission.reason.includes('Clear its career data and import the files again'),
+      'terminal Job Searches must be reusable rather than fresh-scanned; non-mergeable terminals without an approved snapshot direct users to clear and re-import career data; only a cleared and re-imported empty hub is Board fresh-scan eligible; a paused source requires its exact run token to continue');
       assert(legacyAdmission.kind === 'reuse-terminal'
         && preservedAdmission.kind === 'reuse-terminal'
         && partition.reusable.map(entry => entry.sourceId).join(',') === 'terminal-search,legacy-positive-search'
@@ -1297,11 +1297,12 @@ export default [
         && board.includes("title: 'Choose Job Search sources'")
         && board.includes('Waiting to start or continue selected sources')
         && board.includes('Waiting to combine saved results')
-        && board.includes('choose Re-scan for New Jobs on its Job Search card before using the Board')
+        && board.includes('Search it again from this Board.')
+        && !board.includes('Re-scan for New Jobs on its Job Search card')
         && selection.includes('Job Search sources')
         && selection.includes('Prioritize this search earlier for recovery and result reconciliation'),
       'Board admission/UI must reuse completed inputs, classify sources-ready before fresh platform checks, fence the executor before generic rerun, and describe parallel-fanout ordering honestly');
-      assert(board.includes('partitionJobBoardSourceAdmissions(selectedSourceNodes)')
+      assert(board.includes('partitionJobBoardSourceAdmissions(selectedSourceNodes, { now: admissionNow, boardId: id })')
         && board.includes('initialContinuationSourceIds.has(sourceId)')
         && board.includes('...(initialPausedDescriptor ? { awaitingSourceResolution: initialPausedDescriptor } : {})')
         && board.includes('Waiting for ${label} to finish its existing paused search…')
@@ -1612,7 +1613,9 @@ export default [
         && connectedSig.includes('n.data.careerImportConsumption.origin || null')
         && connectedSig.includes('n.data.careerImportConsumption.boardRunId || null')
         && connectedSig.includes('n.data.careerImportConsumption.admissionVersion ?? null')
-        && connectedSig.includes('admissionKind: classifyJobBoardSourceAdmission(n).kind')
+        && connectedSig.includes('admissionKind: classifyJobBoardSourceAdmission(n, { boardId: id }).kind')
+        && connectedSig.includes("shownRunId: n.data?.boardShownRun?.runId || ''")
+        && connectedSig.includes("shownBoardId: n.data?.boardShownRun?.boardId || ''")
         && connectedSig.includes("hasTerminalFinalizationRecovery: n.data?.terminalFinalizationRecovery?.kind === 'terminal-finalization'")
         && connectedSig.includes('recoveryProbeSignature: interruptedRecoveryProbeSignature(n.data)')
         && connectedSig.includes('hasCancellationPendingManualAiCleanup: hasCancellationPendingManualAiCleanup(n.data)')
@@ -4102,7 +4105,7 @@ export default [
     },
   },
   {
-    name: 'Connected Job Search modules allow explicit card re-scans while active Board recovery still owns its transaction',
+    name: 'Connected Job Search modules have no card scan controls and the Board owns every search and its recovery transaction',
     run() {
       const nodes = [
         { id: 'search-a', type: 'jobhub' },
@@ -4152,8 +4155,10 @@ export default [
         && search.includes('findJobSearchBoardPausedContinuationOwner(\n        id,\n        jobRunId,\n        store.nodeLookup,\n        store.edges,')
         && search.includes('dedupeKey: `job-search-run-from-board:${id}`,')
         && search.includes('onRetry={careerCompilationRetryOwnsBanner || boardRecoveryOwnsActions ? null : handleRetryFailed}')
-        && search.includes('onRerun={activeBoardRecoveryOwnerKey || data.terminalFinalizationRecovery || resumeOffer?.incomplete ? null : handleRerun}')
-        && search.includes('onReanalyze={boardRecoveryOwnsActions || data.terminalFinalizationRecovery ? null : handleReanalyze}')
+        && !search.includes('onRerun=')
+        && !search.includes('onReanalyze=')
+        && !search.includes('onClearScrape=')
+        && !search.includes('handleClearScrape')
         && search.includes('{hasRunnableCareerInput && !controlsLocked && !boardRecoveryOwnsActions && !resumeOffer?.incomplete && (')
         && search.includes('|| manualAiRecoveryBoardOwnerKey\n    ) return;')
         && search.includes('onClearCareerFiles={activeBoardRecoveryOwnerKey ? null : handleClearCareerFiles}')
@@ -4169,14 +4174,19 @@ export default [
         && retry.indexOf("if (deferDirectSearchToBoard('Error retry')) return;")
           > retry.indexOf('if (manualRetirement?.runId && manualRetirement.retirementPending)')
         && done.includes('Connected to Job Board · Results are ready to combine there.')
-        && done.includes('Re-scan for New Jobs')
+        && !done.includes('Re-scan for New Jobs')
+        && !done.includes('Re-evaluate Saved Jobs')
+        && !done.includes('Clear Scrape')
+        && !done.includes('onRerun')
+        && !done.includes('onReanalyze')
+        && !done.includes('onClearScrape')
         && done.includes('boardRecoveryPending = false')
         && done.includes('Job Board recovery is in progress. Finish or cancel it on the Board to re-enable search actions.')
         && !done.includes('Use the connected <span className="font-medium">Job Board Module</span>')
         && (done.match(/Connected to Job Board ·/g) || []).length === 1
         && (done.match(/Job Board recovery is in progress\./g) || []).length === 1,
-      'an idle Board connection must leave the explicit Job Search re-scan available, while automatic starts, recovery actions, and a durable active Board transaction remain owned by the Board');
-      return { edgeDirections: 2, connectedExplicitRescan: true, automaticStartsDeferred: true, disconnectRecovery: true, disconnectActionsHidden: true };
+      'the Job Search card has no scan, re-evaluate or Clear Scrape controls, so an idle Board connection leaves every search to the Board, while automatic starts, recovery actions, and a durable active Board transaction remain owned by the Board');
+      return { edgeDirections: 2, cardHasNoScanControls: true, automaticStartsDeferred: true, disconnectRecovery: true, disconnectActionsHidden: true };
     },
   },
   {
@@ -4280,23 +4290,23 @@ export default [
     },
   },
   {
-    name: 'Saved-job re-evaluation failure copy only offers retry when the action is available',
+    name: 'Saved-job re-evaluation failure copy never offers retry and describes the route that can make it available',
     run() {
       const done = readFileSync(new URL('../../src/nodes/jobsearch/JobSearchDoneState.jsx', import.meta.url), 'utf8');
-      const noticeStart = done.indexOf("const reanalysisNoticeText = !locked && typeof onReanalyze === 'function'");
+      const noticeStart = done.indexOf('const reanalysisNoticeText = boardRecoveryPending');
       const noticeEnd = done.indexOf('\n\n  return (', noticeStart);
       const notice = done.slice(noticeStart, noticeEnd);
       assert(noticeStart >= 0 && noticeEnd > noticeStart
-        && notice.includes(String.raw`const reanalysisNoticeText = !locked && typeof onReanalyze === 'function'
-    ? 'Saved-job re-evaluation didn\'t finish. Existing results are unchanged. Try again.'`)
-        && notice.includes(String.raw`: boardRecoveryPending
+        && !notice.includes('Try again')
+        && !done.includes('onReanalyze')
+        && notice.includes(String.raw`const reanalysisNoticeText = boardRecoveryPending
       ? 'Saved-job re-evaluation didn\'t finish. Existing results are unchanged. Job Board recovery is settling; re-evaluation is unavailable until it finishes or is cancelled on the Board.'`)
         && notice.includes(String.raw`: managedByJobBoard
         ? 'Saved-job re-evaluation didn\'t finish. Existing results are unchanged. Re-evaluation is unavailable while this search is connected to a Job Board.'`)
         && notice.includes(String.raw`'Saved-job re-evaluation didn\'t finish. Existing results are unchanged. Re-evaluation is temporarily unavailable while Job Search is busy or finishing recovery.'`)
         && done.includes('{reanalysisNoticeText}'),
-      'a re-evaluation failure offers Try again only with an actual re-evaluate action; Board-owned and standalone recovery states instead describe the route that can make it available');
-      return { retryGatedByAction: true, boardAlternatives: 3 };
+      'a re-evaluation failure never offers Try again because the done state has no re-evaluate action; Board-owned and standalone recovery states instead describe the route that can make it available');
+      return { noRetryOffered: true, boardAlternatives: 3 };
     },
   },
   {

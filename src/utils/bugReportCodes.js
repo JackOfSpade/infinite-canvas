@@ -433,7 +433,7 @@ export const CODE_DEFINITIONS = {
 
   JOBDATES: {
     label: 'Job Search Date History',
-    description: 'Saved Job Search date decisions and durable terminal collection evidence — full versus partial collection, why the last-scraped and coverage dates were committed or retained, and dates kept by Clear Scrape. Includes nested modules and survives workspace save/reopen. Older missing evidence is labelled unknown. Metadata only, with hashed hub/run IDs. Included automatically in FULL.',
+    description: 'Saved Job Search date decisions and durable terminal collection evidence — full versus partial collection, why the last-scraped and coverage dates were committed or retained, and dates kept through a clear. Includes nested modules and survives workspace save/reopen. Older missing evidence is labelled unknown. Metadata only, with hashed hub/run IDs. Included automatically in FULL.',
     logFilter: line => /\[JobSearch\]|\[Jobs\]|job.?run|scrape|collection|clear|completion/i.test(line),
     excludeSections: ['edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState', 'sessionTraces', 'jobAuditDetail'],
   },

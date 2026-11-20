@@ -43,7 +43,7 @@ import { writeSavedBugReport, buildClipboardPointer } from './bugReport/reportFi
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
 import { canAttemptJobSourceResolve, isJobSourceWarningGating } from '../../src/utils/jobSourceWarningPolicy.js';
 import { findJobSearchBoardActiveRecoveryOwner } from '../../src/utils/jobBoardSearchSelection.js';
-import { resolveNextJobSearchRunWindow } from '../../src/utils/jobSearchSourceCoverage.js';
+import { jobSearchRescrapeAvailability, resolveNextJobSearchRunWindow } from '../../src/utils/jobSearchSourceCoverage.js';
 import { isGoogleJobsInternalUrl, normalizeJobListingExternalUrl } from '../../src/utils/jobListingUrl.js';
 import { buildApplicationOutputReportSnapshot, buildJobBoardDiagnostics, buildJobCompletionAssessment, buildJobLinkSnapshot, buildJobRecoveryOfferSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown, jobSourceHealthAlarmItems } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
@@ -1099,7 +1099,19 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
             ? 'blocked (active Job Board recovery owns this Search)'
             : d.locked || d.queuedModuleRun || cleanupPending
               ? 'blocked (Search is busy or completing saved cleanup)'
-              : 'available on Job Search card';
+              : (() => {
+                // Searches run only from a Job Board; say whether the next one
+                // would scrape this card again (see classifyJobBoardSourceAdmission).
+                const shown = !!d.jobRunId && d.boardShownRun?.runId === d.jobRunId;
+                const savedCount = Array.isArray(d.scoredJobs) ? d.scoredJobs.length : (Number(d.scoredJobsCount) || 0);
+                const availability = jobSearchRescrapeAvailability(d);
+                if (availability.due.length === 0 && availability.sourceIds.length > 0) {
+                  return `cooling down (next platform due ${Number.isFinite(availability.nextEligibleAt) ? new Date(availability.nextEligibleAt).toISOString() : 'unknown'})`;
+                }
+                return shown || savedCount === 0
+                  ? 'due from the Job Board'
+                  : 'not yet (its jobs have not been shown on a Board)';
+              })();
         // The same per-platform resolution the Job Search card previews, so
         // the report names the date the next scan really starts from.
         const { window: nextWindow, anchor: nextAnchor, initialLookbackDays } = resolveNextJobSearchRunWindow(d, n.id);

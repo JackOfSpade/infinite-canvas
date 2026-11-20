@@ -1,15 +1,17 @@
 import { jobBoardSavedPauseOutcome } from '../../src/utils/jobBoardSavedPause.js';
+import { carriedJobsForTerminal, mergeCarriedJobs, withCarriedJobsTerminalPatch } from '../../src/utils/jobSearchCarriedResults.js';
 import { waitForJobRendererCommit } from '../../src/utils/jobRendererCommit.js';
 import { dedupJobsAcrossSources } from '../../src/utils/jobIdentity.js';
 import { hasLegacyPageScoring, JOB_SCORING_CONTRACT } from '../../src/utils/jobScoringContract.js';
 import { hasStoredPreferenceVerdicts, mergeScoredJobs, splitKeptScores } from '../../src/utils/jobSearchPreferenceReevaluation.js';
 import { jobBoardHasSavedAiContinuation } from '../../src/utils/jobBoardSavedAiContinuation.js';
 import assert from 'node:assert';
+import { jobCareerImportBoardAdmission } from '../../src/utils/jobCareerImportCapability.js';
 
 import {
   SAVED_JOBS_RESCORE_VERSION,
   buildJobHubCareerOnlyClearPatch,
-  buildJobHubScrapeClearPatch,
+  buildJobHubRescanCapabilityPatch,
   buildSavedJobsRescoreMarker,
   hubRetainsSavedJobs,
   isCareerClearedWithSavedJobs,
@@ -318,6 +320,7 @@ export default [
               savedJobsRescoreCompletionPatch,
               setScoringProgress() {},
               stampJobsWithCareerSnapshot: (jobs, careerSnapshotId) => jobs.map(job => ({ ...job, careerSnapshotId })),
+              carriedJobsForTerminal, mergeCarriedJobs, withCarriedJobsTerminalPatch,
               normalizeCollectionScopeCaveats: value => value,
               terminalFinalizationError: () => null,
               savedJobsReevaluationKeepsScores, hasStoredPreferenceVerdicts, splitKeptScores, mergeScoredJobs,
@@ -374,7 +377,9 @@ export default [
             assert.strictEqual(outcome.runId, expectedRunId);
             assert.strictEqual(claimedRunId, expectedRunId);
             assert.strictEqual(savedSnapshot.runId, expectedRunId);
-            assert.strictEqual(classifyJobBoardSourceAdmission(hub).kind, 'reuse-terminal');
+            // A filtered re-score leaves zero saved jobs on an approved snapshot with due platforms, so
+            // the Board scrapes it again; any card that still holds jobs (not yet shown) is reused.
+            assert.strictEqual(classifyJobBoardSourceAdmission(hub).kind, filtered ? 'rescrape-terminal' : 'reuse-terminal');
             assert.strictEqual(hub.data.savedJobsRescore, null);
             assert.strictEqual(preferenceCalls, scoringRepair ? 0 : 1);
             if (scoringRepair) {
@@ -537,27 +542,19 @@ export default [
     },
   },
   {
-    name: 'buildJobHubScrapeClearPatch resets exactly the scrape results and mints a rescan capability on the same snapshot',
+    name: 'buildJobHubRescanCapabilityPatch mints only a rescan capability on the same snapshot and leaves results untouched',
     run: async () => {
       const nodeId = 'hub-1';
-      const history = { lastCompletedRunAt: 1234, lastSearchCoverageStartedAt: 1000 };
       const hub = terminalHub(nodeId, {
         careerSnapshotId: SNAPSHOT,
         resumeFingerprint: FINGERPRINT,
         resumeProfile: { name: 'x' },
         careerFilePaths: ['/tmp/b.pdf'],
         targetRole: 'PM',
-        searchBriefPlan: { titles: ['PM'] },
         enabledSourceIds: ['linkedin'],
-        savedJobsRescore: { version: 1 },
+        lastCompletedRunAt: 1234,
       });
-      const patch = buildJobHubScrapeClearPatch(hub.data, {
-        nodeId,
-        jobAnalysisClearedAt: 77,
-        jobAnalysisClearedRunId: 'run-7',
-        materializedSearchHistory: history,
-        now: 555,
-      });
+      const patch = buildJobHubRescanCapabilityPatch(hub.data, { nodeId, now: 555 });
 
       const capability = patch.careerImportGeneration;
       assert.match(capability, /^career-import:hub-1:.+/);
@@ -568,72 +565,47 @@ export default [
       assert.strictEqual(patch.careerImportCompilation.attemptId, 'rescan-555');
       assert.strictEqual(patch.careerImportCompilation.careerSnapshotId, SNAPSHOT);
       assert.strictEqual(patch.careerImportCompilation.profileFingerprint, FINGERPRINT);
-
-      // Exactly the documented keys: results, history and rescan authority; nothing else.
+      // Capability keys only: no result reset, no history, no identity or settings.
       assert.deepStrictEqual(
         Object.keys(patch).sort(),
-        [...RESULT_RESET_KEYS, ...Object.keys(history),
-          'careerImportGeneration', 'careerImportFreshCapability', 'careerImportConsumption', 'careerImportCompilation'].sort(),
+        ['careerImportGeneration', 'careerImportFreshCapability', 'careerImportConsumption', 'careerImportCompilation'].sort(),
       );
-      assert.strictEqual(patch.hubState, 'empty');
-      assert.strictEqual(patch.scoredJobs, null);
-      assert.deepStrictEqual(patch.finalSourceCounts, {});
-      assert.deepStrictEqual(patch.scrapeWarnings, []);
-      assert.deepStrictEqual(patch.collectionScopeCaveats, []);
-      assert.strictEqual(patch.resultCount, 0);
-      assert.strictEqual(patch.jobRunId, null);
-      assert.strictEqual(patch.savedJobsRescore, null);
-      assert.strictEqual(patch.jobAnalysisClearedAt, 77);
-      assert.strictEqual(patch.jobAnalysisClearedRunId, 'run-7');
-      assert.strictEqual(patch.lastCompletedRunAt, 1234);
-      assert.strictEqual(patch.lastSearchCoverageStartedAt, 1000);
 
-      // Identity and settings are untouched.
       const merged = applyPatch(hub.data, patch);
-      for (const key of ['careerSnapshotId', 'resumeProfile', 'inputLocked', 'careerFilePaths', 'targetRole', 'searchBriefPlan', 'enabledSourceIds']) {
-        assert.strictEqual(merged[key], hub.data[key], `${key} must survive Clear Scrape`);
-        assert.strictEqual(Object.hasOwn(patch, key), false, `${key} must not be in the scrape-clear patch`);
+      for (const key of RESULT_RESET_KEYS) {
+        assert.strictEqual(merged[key], hub.data[key], `${key} must survive a re-scan capability`);
       }
+      assert.strictEqual(merged.scoredJobs, JOBS);
+      assert.strictEqual(merged.hubState, 'done');
+      assert.strictEqual(merged.careerSnapshotId, SNAPSHOT);
+      assert.strictEqual(merged.lastCompletedRunAt, 1234);
       assert.strictEqual(hubHasAcceptedInitialDrop({ type: 'jobhub', data: merged }), true);
 
-      // The Board sees a fresh, scannable input again.
-      const admission = classifyJobBoardSourceAdmission({ id: nodeId, type: 'jobhub', data: merged });
-      assert.strictEqual(admission.kind, 'fresh-imported-input');
-      assert.strictEqual(admission.freshImportCapability, capability);
+      // A finished card whose jobs are shown on a Board and whose platforms are due is scanned again with it.
+      const shown = { id: nodeId, type: 'jobhub', data: { ...merged, boardShownRun: { runId: 'terminal-run', boardId: 'board-1', shownAt: 1 } } };
+      const admission = classifyJobBoardSourceAdmission(shown, { now: 10_000_000_000_000, boardId: 'board-1' });
+      assert.strictEqual(admission.kind, 'rescrape-terminal');
+      assert.strictEqual(jobCareerImportBoardAdmission(shown.data, { capability, boardRunId: 'board-run', nodeId }).kind, 'fresh');
     },
   },
   {
-    name: 'buildJobHubScrapeClearPatch migrates a legacy filePath, uses an injected capability and omits rescan keys without a snapshot',
+    name: 'buildJobHubRescanCapabilityPatch uses an injected capability and returns null without a valid snapshot or node id',
     run: async () => {
       const nodeId = 'hub-2';
-      const legacy = terminalHub(nodeId, {
-        careerSnapshotId: SNAPSHOT,
-        filePath: '/tmp/legacy.pdf',
-        careerFilePaths: ['/tmp/modern.pdf'],
-      });
       const injected = capabilityFor(nodeId, '33333333-3333-4333-8333-333333333333');
       const calls = [];
-      const patch = buildJobHubScrapeClearPatch(legacy.data, {
+      const patch = buildJobHubRescanCapabilityPatch(terminalHub(nodeId, { careerSnapshotId: SNAPSHOT }).data, {
         nodeId,
         createCapability: id => { calls.push(id); return injected; },
       });
       assert.deepStrictEqual(calls, [nodeId]);
       assert.strictEqual(patch.careerImportGeneration, injected);
       assert.strictEqual(patch.careerImportFreshCapability, injected);
-      assert.strictEqual(patch.filePath, null);
-      assert.deepStrictEqual(patch.careerFilePaths, ['/tmp/modern.pdf', '/tmp/legacy.pdf']);
       assert.match(patch.careerImportCompilation.attemptId, /^rescan-\d+$/);
-      const merged = applyPatch(legacy.data, patch);
-      assert.strictEqual(merged.filePath, null);
-      assert.strictEqual(classifyJobBoardSourceAdmission({ id: nodeId, type: 'jobhub', data: merged }).kind, 'fresh-imported-input');
+      // The patch never touches career paths.
+      assert.strictEqual(Object.hasOwn(patch, 'filePath'), false);
+      assert.strictEqual(Object.hasOwn(patch, 'careerFilePaths'), false);
 
-      // No legacy filePath => the path keys are not written.
-      const modern = buildJobHubScrapeClearPatch(terminalHub(nodeId, { careerSnapshotId: SNAPSHOT }).data, { nodeId });
-      assert.strictEqual(Object.hasOwn(modern, 'filePath'), false);
-      assert.strictEqual(Object.hasOwn(modern, 'careerFilePaths'), false);
-
-      // Invalid / missing snapshot id, or missing node id: no rescan authority at all.
-      const capabilityKeys = ['careerImportGeneration', 'careerImportFreshCapability', 'careerImportConsumption', 'careerImportCompilation'];
       const noSnapshotCases = [
         ['no snapshot', terminalHub(nodeId).data, nodeId],
         ['short snapshot', terminalHub(nodeId, { careerSnapshotId: 'abc' }).data, nodeId],
@@ -642,14 +614,10 @@ export default [
         ['missing node id', terminalHub(nodeId, { careerSnapshotId: SNAPSHOT }).data, undefined],
       ];
       for (const [label, data, id] of noSnapshotCases) {
-        const noAuthority = buildJobHubScrapeClearPatch(data, {
+        assert.strictEqual(buildJobHubRescanCapabilityPatch(data, {
           nodeId: id,
           createCapability: () => { throw new Error('must not mint'); },
-        });
-        for (const key of capabilityKeys) {
-          assert.strictEqual(Object.hasOwn(noAuthority, key), false, `${label}: ${key} must be omitted`);
-        }
-        assert.strictEqual(noAuthority.hubState, 'empty', label);
+        }), null, label);
       }
     },
   },
@@ -734,7 +702,9 @@ export default [
       assert.deepStrictEqual(ids('continuations'), []);
       assert.deepStrictEqual(ids('other'), []);
       assert.strictEqual(partition.invalid.length, 1);
-      assert.deepStrictEqual(Object.keys(partition).sort(), ['blocked', 'continuations', 'fresh', 'invalid', 'other', 'rescore', 'reusable']);
+      assert.deepStrictEqual(ids('rescrape'), []);
+      assert.deepStrictEqual(ids('cooldown'), []);
+      assert.deepStrictEqual(Object.keys(partition).sort(), ['blocked', 'continuations', 'cooldown', 'fresh', 'invalid', 'other', 'rescore', 'rescrape', 'reusable']);
       assert.deepStrictEqual(Object.keys(partitionJobBoardSourceAdmissions([])).sort(), Object.keys(partition).sort());
     },
   },
@@ -865,7 +835,7 @@ export default [
     },
   },
   {
-    name: 'scrape flow: Clear Scrape keeps career and scan history, so the next scan continues from the last completed scrape, not the lookback',
+    name: 'scrape flow: a Board re-scan keeps career and scan history, so the next scan continues from the last completed scrape, not the lookback',
     run: async () => {
       const nodeId = 'scrape-hub';
       const lastCompletedRunAt = 1_790_500_000_000;
@@ -876,17 +846,18 @@ export default [
         careerFilePaths: ['/career/kept.md'],
         lastCompletedRunAt,
         initialLookbackDays: 3,
+        sourceCoverage: { linkedin: { completedAt: lastCompletedRunAt } },
       });
-      const patch = buildJobHubScrapeClearPatch(start.data, { nodeId, jobAnalysisClearedAt: 20 });
-      const cleared = { ...start, data: applyPatch(start.data, patch) };
-      assert.strictEqual(cleared.data.hubState, 'empty');
-      assert.strictEqual(cleared.data.scoredJobs, null);
-      assert.strictEqual(cleared.data.resumeProfile, start.data.resumeProfile);
-      assert.deepStrictEqual(jobSearchNextAnchor(cleared.data, nodeId), { timestamp: lastCompletedRunAt, source: 'last-completed' });
-      assert.strictEqual(classifyJobBoardSourceAdmission(cleared).kind, 'fresh-imported-input');
-      // Then Clear Career Data on the scrape-cleared hub (both halves cleared)
-      // must still keep the scan date: history is module history.
-      const both = applyPatch(cleared.data, buildJobHubCareerOnlyClearPatch({ jobAnalysisClearedAt: 21 }));
+      const patch = buildJobHubRescanCapabilityPatch(start.data, { nodeId });
+      const rescan = { ...start, data: applyPatch(start.data, patch) };
+      assert.strictEqual(rescan.data.hubState, 'done');
+      assert.strictEqual(rescan.data.scoredJobs, JOBS);
+      assert.strictEqual(rescan.data.resumeProfile, start.data.resumeProfile);
+      assert.strictEqual(rescan.data.sourceCoverage, start.data.sourceCoverage);
+      assert.strictEqual(rescan.data.lastCompletedRunAt, lastCompletedRunAt);
+      assert.deepStrictEqual(jobSearchNextAnchor(rescan.data, nodeId), { timestamp: lastCompletedRunAt, source: 'last-completed' });
+      // Clear Career Data on the card afterwards still keeps the scan date: history is module history.
+      const both = applyPatch(rescan.data, buildJobHubCareerOnlyClearPatch({ jobAnalysisClearedAt: 21 }));
       assert.deepStrictEqual(jobSearchNextAnchor(both, nodeId), { timestamp: lastCompletedRunAt, source: 'last-completed' });
     },
   },
@@ -947,7 +918,9 @@ export default [
     run: async () => {
       const board = readSource('../../src/nodes/JobBoardNode.jsx');
       const combine = sliceBetween(board, 'function liveCombineInputs(boardId, nodes, edges) {', 'function boardInputSignature');
-      assert(combine.includes('&& !isSavedJobsCareerReplacementPending(node),'), 'Combine must skip rows scored under a replaced or cleared career snapshot');
+      assert(combine.includes('&& !isSavedJobsCareerReplacementPending(node)'), 'Combine must skip rows scored under a replaced or cleared career snapshot');
+      assert(combine.includes('const shownElsewhere = isJobSearchRunShownOnOtherBoard(node, boardId);')
+        && combine.includes('          && !shownElsewhere,'), 'Combine must skip a run another Board already shows');
       for (const kind of ['career-cleared-awaiting-files', 'rescore-saved-jobs', 'career-import-compiling', 'career-import-failed', 'career-import-requires-approval']) {
         assert(board.includes(`  '${kind}',\n`), `${kind} must be a replacement-pending admission`);
       }
