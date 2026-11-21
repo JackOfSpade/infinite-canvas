@@ -2391,6 +2391,33 @@ export default [
     },
   },
 {
+    name: 'job recovery diagnostics show LinkedIn query checkpoints: finished queries skip, the rest restart',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-linkedin-resume-diagnostics-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const nodeId = 'linkedin-resume-diagnostics-hub';
+      try {
+        fs.writeFileSync(path.join(dir, 'canvas.jobs-run.json'), JSON.stringify({
+          runId: 'linkedin-resume-diagnostics-run', stage: 'searching', lastUpdated: 1_700_000_000_000,
+          inputs: { nodeId, queries: ['PRIVATE Q1', 'PRIVATE Q2', 'PRIVATE Q3'] },
+          sources: {
+            // Pause after two finished queries: each was checkpointed terminal.
+            linkedin: { status: 'pending', queries: { '#0': { lastPage: 25, terminal: true }, '#1': { lastPage: 4, terminal: true } } },
+          },
+        }), 'utf8');
+        const report = buildJobRecoverySnapshot(canvas, new Set([nodeId]));
+        assert(report.includes('Query resume plan (`linkedin`): durable/exact 2 · missing/restart 1 · skipped terminal 2')
+          && report.includes('q1: durable page 25 → skip (terminal)')
+          && report.includes('q3: no durable page → restart 1')
+          && !report.includes('PRIVATE Q'),
+        `LinkedIn's per-query plan is reported without query text, got:\n${report}`);
+        return { linkedinPlan: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+{
     name: 'job recovery diagnostics enumerate independently scoped hub ledgers and terminal receipts',
     run: () => {
       const dir = fs.mkdtempSync(path.join('/tmp', 'ic-scoped-job-recovery-report-'));
@@ -12280,7 +12307,7 @@ export default [
         missing: 3,
         panelRateLimits: 1,
         panelRequestsIssued: 9,
-        proactivePanelCooldowns: 1,
+        proactivePanelCooldowns: 0,
         panelJsonResponses: 8,
         panelJsonPayloads: 7,
         panelJsonDescriptionFallbacks: 1,
@@ -12301,8 +12328,8 @@ export default [
           && walkLine.includes('blocking-popup-dismiss-failed 1')
           && walkLine.includes('missing-target 3')
           && walkLine.includes('panel-http-429 1 (source throttle; walk stopped)')
-          && walkLine.includes('panel-pace 4.5s + 12s/8')
-          && walkLine.includes('proactive-panel-cooldowns 1')
+          && walkLine.includes('panel-pace 0.6s · max 10/300s')
+          && !walkLine.includes('proactive-panel-cooldowns')
           && walkLine.includes('panel-requests 9')
           && walkLine.includes('same-request-json 7/8 usable')
           && walkLine.includes('json-description-fallback 1')
@@ -13156,14 +13183,17 @@ export default [
         'an external Trakstar page is eligible for one read-only text extraction without clicking its form');
       assert(!shouldNavigateForDescription('ziprecruiter', 'file:///Users/example/job.html'),
         'only ordinary HTTP(S) detail URLs are eligible for external-page enrichment');
+      const glassdoorListContext = { listUrl: 'https://www.glassdoor.ca/Job/canada-architect-jobs.htm' };
       const glassdoorPolicy = descriptionNavigationDecision(
         'glassdoor',
-        'https://fr.glassdoor.ca/job-listing/platform-architect.htm?jl=101',
+        'https://fr.glassdoor.com/job-listing/platform-architect.htm?jl=101',
+        glassdoorListContext,
       );
-      assert(!shouldNavigateForDescription('glassdoor', 'https://www.glassdoor.ca/job-listing/platform-architect.htm?jl=101')
-        && !shouldNavigateForDescription('glassdoor', 'https://example.com/apply')
-        && glassdoorPolicy.reason === 'glassdoor-list-card-panel-only',
-      'Glassdoor description enrichment is structurally list-card-only: no detail or external URL may reach goto(), even if a future config accidentally enables detail navigation');
+      assert(shouldNavigateForDescription('glassdoor', 'https://www.glassdoor.ca/job-listing/platform-architect.htm?jl=101', glassdoorListContext)
+        && !shouldNavigateForDescription('glassdoor', 'https://www.glassdoor.ca/job-listing/platform-architect.htm?jl=101')
+        && !shouldNavigateForDescription('glassdoor', 'https://example.com/apply', glassdoorListContext)
+        && glassdoorPolicy.reason === 'glassdoor-detail-other-host',
+      'Glassdoor description navigation reaches goto() only for a same-country https /job-listing/ page; another country, an external URL or an unknown list host is refused');
       assert(isZipRecruiterClosedDetailRedirect('https://www.ziprecruiter.com/jobseeker/home?closed_job_redirect=1')
         && !isZipRecruiterClosedDetailRedirect('https://www.ziprecruiter.com/jobseeker/home')
         && !isZipRecruiterClosedDetailRedirect('https://www.ziprecruiter.com/c/Acme/Job/Software-Engineer/-in-Toronto,ON?jid=abc')

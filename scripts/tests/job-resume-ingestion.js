@@ -702,7 +702,7 @@ export default [
         && source.includes("blocked ? 'blocked' : 'done'")
         && readJobsSource('collection').includes('if (stageSource) {')
         && readJobsSource('collection').includes("const retryablePartial = warning?.code === 'query-error'")
-        && readJobsSource('collection').includes('await stageSource({ sourceId, jobs, warning, retryablePartial });')
+        && readJobsSource('collection').includes('await stageSource({ sourceId, jobs: unstaged, warning, retryablePartial });')
         && source.includes('r?.retryablePartial === true'),
       'a clean zero-result completion is terminal, while interrupted work, partial query coverage, and failed durable staging remain unfinished for a later exact resume');
       assert(source.includes('if (!signal?.aborted && !pipelineAbort.signal.aborted) pipelineAbort.abort(error);')

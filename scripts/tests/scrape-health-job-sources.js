@@ -13,6 +13,7 @@ import {
 import { extractIndeedJobsFromHtml } from '../../electron/extractors/apiExtractors.js';
 import { assessSourceHealth } from '../../electron/ipc/jobSourceHealth.js';
 import { __fetchHttpSourcesForTests, __queryFanOutForTests } from '../../electron/ipc/jobs.js';
+import { buildLinkedInQueryPlan } from '../../electron/ipc/jobs/collection.js';
 import {
   INDEED_FULL_PAGE_MIN_CHARS,
   LINKEDIN_SHAPE_MIN_BODY_CHARS,
@@ -455,6 +456,109 @@ export default [
       assert.equal(guard.pages, 3);
       assert.equal(guard.newRows, 3);
       assert.equal(result.items.length, 2000, 'the retained rows are unchanged');
+    },
+  },
+  {
+    name: 'LinkedIn checkpoint: a query that finishes is handed to the checkpoint with its own rows; a paused one is not',
+    async run() {
+      const controller = new AbortController();
+      const requested = [];
+      const checkpoints = [];
+      const result = await withFetch((url) => {
+        const params = new URL(url).searchParams;
+        const keywords = params.get('keywords');
+        const start = params.get('start');
+        requested.push(`${keywords}@${start}`);
+        if (keywords === 'a') return respond(start === '0' ? cards(10, 0) : '');
+        controller.abort();
+        return respond(cards(10, 100));
+      }, () => fetchLinkedInJobs(['a', 'b'], controller.signal, 7, 'Toronto', null, {
+        requestPacing: () => ({ delayDue: false }),
+        onQueryFinished: async (entry) => { checkpoints.push(entry); },
+      }));
+      assert.deepEqual(requested, ['a@0', 'a@10', 'b@0']);
+      assert.equal(result.cancelled, true);
+      assert.deepEqual(result.finishedQueries, ['a']);
+      assert.equal(checkpoints.length, 1, 'only the finished query is checkpointed');
+      assert.equal(checkpoints[0].queryIndex, 0);
+      assert.equal(checkpoints[0].query, 'a');
+      assert.equal(checkpoints[0].pages, 2);
+      assert.equal(checkpoints[0].jobs.length, 10);
+    },
+  },
+  {
+    name: 'LinkedIn checkpoint: Pause after one finished query stages that query terminal at its run position and stages nothing else',
+    async run() {
+      const controller = new AbortController();
+      const staged = [];
+      const wholeSource = [];
+      const [result] = await withFetch((url) => {
+        const params = new URL(url).searchParams;
+        if (params.get('keywords') === 'a') return respond(params.get('start') === '0' ? cards(10, 0) : '');
+        controller.abort();
+        return respond(cards(10, 100));
+      }, () => __fetchHttpSourcesForTests(
+        ['a', 'b'], null, controller.signal, 'node-1', 7, 'Toronto', new Set(['linkedin']), () => {},
+        async (entry) => { wholeSource.push(entry); }, null, null, null, null, null,
+        {
+          stageQuery: async (entry) => { staged.push(entry); },
+          linkedInFetchOptions: { requestPacing: () => ({ delayDue: false }) },
+        },
+      ));
+      assert.equal(result.sourceId, 'linkedin');
+      assert.equal(result.cancelled, true);
+      assert.equal(staged.length, 1);
+      assert.equal(staged[0].sourceId, 'linkedin');
+      assert.equal(staged[0].query, 'a');
+      assert.equal(staged[0].queryIndex, 0);
+      assert.equal(staged[0].terminal, true);
+      assert.equal(staged[0].page, 2);
+      assert.equal(staged[0].jobs.length, 10);
+      assert.deepEqual(wholeSource, [], 'a paused source is never staged as a whole');
+    },
+  },
+  {
+    name: 'LinkedIn checkpoint: a resume skips the query this run already finished and the final stage does not append its rows twice',
+    async run() {
+      const requested = [];
+      const staged = [];
+      const wholeSource = [];
+      const plan = [{ startPage: 3, durable: true, terminal: true }, { startPage: 1, durable: false, terminal: false }];
+      const [result] = await withFetch((url) => {
+        const params = new URL(url).searchParams;
+        requested.push(`${params.get('keywords')}@${params.get('start')}`);
+        return respond(params.get('start') === '0' ? cards(10, 100) : '');
+      }, () => __fetchHttpSourcesForTests(
+        ['a', 'b'], null, null, 'node-1', 7, 'Toronto', new Set(['linkedin']), () => {},
+        async (entry) => { wholeSource.push(entry); }, null, null, null, null, null,
+        {
+          queryPlansBySource: { linkedin: plan },
+          stageQuery: async (entry) => { staged.push(entry); },
+          linkedInFetchOptions: { requestPacing: () => ({ delayDue: false }) },
+        },
+      ));
+      assert.deepEqual(requested, ['b@0', 'b@10'], 'the finished query is not fetched again');
+      assert.deepEqual(result.finishedQueries, ['a', 'b'], 'the skipped query still counts as finished for this run');
+      assert.equal(result.jobs.length, 10);
+      assert.equal(staged.length, 1);
+      assert.equal(staged[0].queryIndex, 1, 'the checkpoint lands on the run position, not the resumed subset position');
+      assert.equal(staged[0].query, 'b');
+      assert.equal(wholeSource.length, 1);
+      assert.deepEqual(wholeSource[0].jobs, [], 'rows already checkpointed per query are not appended again');
+    },
+  },
+  {
+    name: 'LinkedIn query plan: carried and resumed walks keep each query at its run position',
+    run() {
+      assert.deepEqual(buildLinkedInQueryPlan(['a', 'b', 'c']), {
+        entries: [{ query: 'a', index: 0 }, { query: 'b', index: 1 }, { query: 'c', index: 2 }], skipped: [],
+      });
+      assert.deepEqual(buildLinkedInQueryPlan(['a', 'b', 'a', 'c'], ['b', 'c']).entries, [{ query: 'b', index: 1 }, { query: 'c', index: 3 }]);
+      assert.deepEqual(buildLinkedInQueryPlan(['a', 'b'], ['z']).entries, [{ query: 'z', index: null }], 'an unrelated list keeps its text with no ledger position');
+      const resumed = buildLinkedInQueryPlan(['a', 'b', 'c'], null, [{ terminal: true }, { terminal: false }, { terminal: true }]);
+      assert.deepEqual(resumed.entries, [{ query: 'b', index: 1 }]);
+      assert.deepEqual(resumed.skipped, ['a', 'c']);
+      assert.equal(buildLinkedInQueryPlan(['a', 'b'], null, [{ terminal: true }]).entries.length, 2, 'a plan that does not line up with the queries is ignored');
     },
   },
 ];

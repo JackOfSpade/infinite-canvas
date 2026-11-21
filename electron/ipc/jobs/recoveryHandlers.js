@@ -1,5 +1,5 @@
 import { ACTIVE_SOURCE_IDS, acceptProviderSearchResults, buildResolvedDescriptionWarning, consumeRecoveryBlockedUrl, filterJobsByDescriptionEvidence, getJobSourceResolveConfig, hasResolvedJobDescription, linkedInBrowserUnavailableWarning, mergeDescriptionRecoverySourceJobs, mergeResolvedDescriptionRecoveryCandidate, nextDescriptionRecoveryGuidance, overlayResolvedRecoveryRows, partitionResolvedDescriptionRecoveryCandidates, reconcileResolvedDescriptionRecovery, recoveryBlockedUrlsForSource, resolveSourceLabel, retiredListingKeys, snapshotDescriptionRecoveryJobs, sourceHealthWarningForRows } from './sourceRules.js';
-import { GOOGLE_APPLY_LINKS_RATE_LIMITED_CODE, buildPhysicalCardWalkPlan, enrichResolvedJobDescriptions, googleApplyLinksRateLimitedWarning, normalizeGoogleApplyOptions, preloadResolvedJobList, selectGoogleApplyUrl } from '../browser/manualScraper.js';
+import { GOOGLE_APPLY_LINKS_RATE_LIMITED_CODE, buildPhysicalCardWalkPlan, enrichResolvedJobDescriptions, googleApplyLinksRateLimitedWarning, normalizeGoogleApplyOptions, preloadResolvedJobList, selectGoogleApplyUrl, withoutGlassdoorJobPageUrl } from '../browser/manualScraper.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
 import { RECENT_INDEED_LOGIN_MS, clearLinkedInCeiling, indeedLoginStamp, jobsTelemetry, linkedInSameIpRetryDecision, linkedinCeiling, rememberLinkedInCeiling } from './state.js';
 import { admitContinuationProviderWork, assessDescriptionRecoveryCheckpoint, checkpointContinuationBeforeReply, descriptionRecoveryNotReadyWarning, descriptionRecoveryPersistenceWarning, loadDescriptionRecoveryCheckpoint, loadJobAnalysisSnapshot, requireDescriptionRecoveryCheckpointPersisted, requireSavedJobRecoveryCanvas, saveDescriptionRecoverySnapshotIfCurrent, withDescriptionRecoveryLock } from './analysisStore.js';
@@ -873,10 +873,11 @@ export function registerRecoveryHandlers(ctx) {
           const emptyRows = [];
           for (const candidate of candidates) {
             const row = byKey.get(sourceJobKey(candidate));
+            // Glassdoor's as-linked job-page address only serves the walk.
             if (hasResolvedJobDescription(row)) {
-              completeRows.push(mergeResolvedDescriptionRecoveryCandidate(candidate, row, sourceId));
+              completeRows.push(withoutGlassdoorJobPageUrl(mergeResolvedDescriptionRecoveryCandidate(candidate, row, sourceId)));
             }
-            else emptyRows.push(candidate);
+            else emptyRows.push(withoutGlassdoorJobPageUrl(candidate));
           }
 
           const recovery = reconcileResolvedDescriptionRecovery(

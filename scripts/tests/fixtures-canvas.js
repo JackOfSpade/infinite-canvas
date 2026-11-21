@@ -65,7 +65,7 @@ export default [
         && indeedSource.includes('resumeState: { remainingQueries: queryList, startPage: startPages[0] || 0, startPages, pageBudgets, queryIndexes }'),
       'Indeed Continue must preserve zero allocations and serialize the per-query cursor and resolved policy vector before retryable profile-reservation returns');
       const zeroBudgetGuard = manualSource.indexOf('const taskPageBudget = task.options?.maxPages ?? resolvePageCeiling(null);');
-      const manualPacing = manualSource.indexOf('if (qi > 0)', zeroBudgetGuard);
+      const manualPacing = manualSource.indexOf('if (qi > 0', zeroBudgetGuard);
       assert(zeroBudgetGuard >= 0 && manualPacing > zeroBudgetGuard
         && manualSource.includes("phase: 'query-skipped-page-budget'"),
       'manual zero-budget query tasks must be skipped before pacing or navigation while retaining bounded cap telemetry');
@@ -525,10 +525,10 @@ export default [
         '[data-brandviews*="joblisting-description"], [class*="JobDetails_jobDescription"]',
       );
 
-      assert(descriptionExpansionStrategy('glassdoor') === 'list-card-panel'
+      assert(descriptionExpansionStrategy('glassdoor') === 'job-page-then-list-card-panel'
         && descriptionExpansionStrategy('ziprecruiter') === 'detail-navigation'
         && descriptionExpansionStrategy('unknown') === 'none',
-      'Glassdoor must stay on the list-panel path while ZipRecruiter retains bounded detail navigation');
+      'Glassdoor reads job pages first with the list-panel path as its fallback, while ZipRecruiter retains bounded detail navigation');
       assert(jobs.length === 2 && jobs[0].url.startsWith('https://www.glassdoor.ca/'),
         'list extraction must keep the regional Glassdoor site without the language host a redirect put it on');
       assert(targets.map(target => target.key).join('|') === '101|102',
@@ -589,15 +589,16 @@ export default [
         'an unchanged stale Glassdoor panel must remain rejectable when its visible title is different');
       assert(glassdoor429 && !unrelated429 && googleCallback429 && !unrelatedGoogle429,
         'only known Glassdoor and Google detail-panel HTTP 429 responses are throttles; unrelated API failures must not halt the card walk');
-      assert(glassdoorInitialPacing.requestDelayMs === 4500 && !glassdoorInitialPacing.checkpointDue
-        && glassdoorInitialPacing.checkpointCooldownMs === 12000
-        && glassdoorCheckpointPacing.checkpointDue && glassdoorCheckpointPacing.checkpointCooldownMs === 12000
-        && googleInitialPacing.requestDelayMs === 3000 && !googleInitialPacing.checkpointDue
-        && googleInitialPacing.checkpointCooldownMs === 15000
-        && googleCheckpointPacing.checkpointDue && googleCheckpointPacing.checkpointCooldownMs === 15000
+      assert(glassdoorInitialPacing.requestDelayMs === 600 && !glassdoorInitialPacing.checkpointDue
+        && glassdoorInitialPacing.checkpointCooldownMs === 0
+        && !glassdoorCheckpointPacing.checkpointDue
+        && glassdoorInitialPacing.windowMax === 10 && glassdoorInitialPacing.windowMs === 300_000
+        && googleInitialPacing.requestDelayMs === 600 && !googleInitialPacing.checkpointDue
+        && googleInitialPacing.checkpointCooldownMs === 0
+        && !googleCheckpointPacing.checkpointDue
         && ordinaryPacing.requestDelayMs === 600 && !ordinaryPacing.checkpointDue
         && firstPacingSection.includes('if (signal?.aborted) break;'),
-      'Google and Glassdoor panel requests must use source-specific human-scale gaps plus rolling-window pauses without slowing unconfigured card walkers or clicking after a cancelled cooldown');
+      'Google and Glassdoor use the default card cadence (Glassdoor bounded by its measured 10-per-5-minute window), and no click follows a cancelled cooldown');
       assert(!descriptionPanelRetryAllowed('glassdoor') && descriptionPanelRetryAllowed('google'),
         'Glassdoor must issue at most one panel request per listing while other panel sources retain their bounded retry');
       return {
@@ -6433,7 +6434,8 @@ export default [
         'an empty ZipRecruiter page below its verified advertised total must not report lossless exhaustion');
       const manualScraperSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
       const walkRulesSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper/walkRules.js'), 'utf8');
-      assert(walkRulesSource.includes("ziprecruiter: 'a[title=\"Next Page\"]'")
+      assert(walkRulesSource.includes("ziprecruiter: 'a[title=\"Next Page\"], a[aria-label=\"Next page\"]'")
+        && walkRulesSource.includes("HARD_NAVIGATION_PAGER_SOURCES = new Set(['ziprecruiter'])")
         && walkRulesSource.includes("const SCROLL_SOURCES = new Set(['google']);")
         && manualScraperSource.includes("phase: 'direct-page-probe'")
         && manualScraperSource.includes('shouldTryZipRecruiterDirectContinuation({')

@@ -229,7 +229,7 @@ export default [
           epoch: { bump: noop }, moduleRunQueue: { cancelQueuedRunsOwnedByNode: noop },
           window: { electronAPI: { pauseJobRunAndCancel: async () => { backendPauses++; return { ok: true, settled: true }; } } },
           setScanning: noop, setScanProgress: noop, setCombining: noop, setCompensationProgress: noop, setCombineResearchProgress: noop, setRecoveryError: noop,
-          SAVED_HANDOFF_READY_MESSAGE: 'Paused', savedWorkflowQuitPausePatch, settlePreFenceCanvasBatches: async () => {},
+          SAVED_HANDOFF_READY_MESSAGE: 'Paused', savedPauseMessageForPlan: () => 'Paused', savedWorkflowQuitPausePatch, settlePreFenceCanvasBatches: async () => {},
         });
         const result = await pauseBoard();
         assert.equal(!!result.idle, !busy);

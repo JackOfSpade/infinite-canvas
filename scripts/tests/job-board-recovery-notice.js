@@ -3,7 +3,10 @@ import assert from 'node:assert';
 
 import {
   SAVED_HANDOFF_READY_MESSAGE,
+  SAVED_SEARCH_PAUSE_MESSAGE,
   combineCommitMismatchReason,
+  isSavedPauseNotice,
+  savedPauseMessageForPlan,
   isLiveCombineOwnedMarker,
   pauseBoardCombine,
 } from '../../src/nodes/jobboard/boardRecoveryNotice.js';
@@ -99,31 +102,50 @@ export default [
       const start = source.indexOf('    const plan = data.boardScanResume;', source.indexOf('// A Board-owned child can survive'));
       const end = source.indexOf('    if (boardRecoveryTouchesPendingDeletion', start);
       assert(start > 0 && end > start);
-      const restore = new Function('data', 'setRecoveryError', 'SAVED_HANDOFF_READY_MESSAGE',
+      const restore = new Function('data', 'setRecoveryError', 'savedPauseMessageForPlan',
         'scanRunRef', 'combineRunRef', 'autoResumedBoardScanRef', 'searchRecoveryErrorRef', 'foreignRecoveryWaitSigRef',
+        'boardRecoveryDiagnosticsRef', 'recoveryError', 'awaitedSourceTerminalStatus', 'getNode',
         source.slice(start, end) + '\nthrow new Error("recovery continued");');
-      const clearStart = source.indexOf('    if (recoveryError !== SAVED_HANDOFF_READY_MESSAGE) return;');
+      const clearStart = source.indexOf('    if (!isSavedPauseNotice(recoveryError)) return;');
       const clearEnd = source.indexOf('\n  }, [', clearStart);
-      const clear = new Function('data', 'recoveryError', 'setRecoveryError', 'SAVED_HANDOFF_READY_MESSAGE',
+      const clear = new Function('data', 'recoveryError', 'setRecoveryError', 'isSavedPauseNotice',
         'isBoardCombineManualAiRunId', 'combineRunRef', source.slice(clearStart, clearEnd));
       const plan = { version: 1, phase: 'searches', boardRunId: 'saved-board',
         activeSourceId: 'paused-search', completedSourceRuns: { other: { runId: 'completed' } } };
-      for (const patch of [
-        { boardScanResume: { ...plan, autoResumeEligible: false } },
-        { boardScanResume: { ...plan, pausedByUser: true } },
-        { boardScanResume: plan, manualAiResume: { runId: 'saved-combine', pausedByUser: true } },
-        { boardScanResume: plan, manualAiResume: { runId: 'saved-combine', autoResumeEligible: false } },
+      // A searches-phase pause with no Board AI handoff is a search pause; one
+      // that holds a Combine handoff keeps the AI-handoff notice.
+      for (const [patch, expected] of [
+        [{ boardScanResume: { ...plan, autoResumeEligible: false } }, SAVED_SEARCH_PAUSE_MESSAGE],
+        [{ boardScanResume: { ...plan, pausedByUser: true } }, SAVED_SEARCH_PAUSE_MESSAGE],
+        [{ boardScanResume: plan, manualAiResume: { runId: 'saved-combine', pausedByUser: true } }, SAVED_HANDOFF_READY_MESSAGE],
+        [{ boardScanResume: plan, manualAiResume: { runId: 'saved-combine', autoResumeEligible: false } }, SAVED_HANDOFF_READY_MESSAGE],
       ]) {
         let notice = null;
         const ref = () => ({ current: null });
-        restore(patch, value => { notice = value; }, SAVED_HANDOFF_READY_MESSAGE,
-          ref(), ref(), ref(), ref(), ref());
-        assert.strictEqual(notice, SAVED_HANDOFF_READY_MESSAGE, 'paused restore must expose the explicit Continue action');
-        clear(patch, notice, value => { notice = value; }, SAVED_HANDOFF_READY_MESSAGE, () => false, ref());
-        assert.strictEqual(notice, SAVED_HANDOFF_READY_MESSAGE, 'a parent-only saved search still owns the notice');
-        clear({}, notice, value => { notice = value; }, SAVED_HANDOFF_READY_MESSAGE, () => false, ref());
+        const diagnostics = ref();
+        restore(patch, value => { notice = value; }, savedPauseMessageForPlan,
+          ref(), ref(), ref(), ref(), ref(), diagnostics, null, () => 'none', () => null);
+        assert.strictEqual(notice, expected, 'paused restore must expose the explicit Continue action');
+        assert.deepStrictEqual(diagnostics.current, { recoveryErrorLatch: 'paused-continue', awaitedSource: 'none' },
+          'the report latch names the saved pause instead of claiming no recovery message is set');
+        clear(patch, notice, value => { notice = value; }, isSavedPauseNotice, () => false, ref());
+        assert.strictEqual(notice, expected, 'a parent-only saved search still owns the notice');
+        clear({}, notice, value => { notice = value; }, isSavedPauseNotice, () => false, ref());
         assert.strictEqual(notice, null, 'retiring the final receipt removes the notice');
       }
+      // While a live scan owns the Board the branch publishes nothing, and the
+      // latch must not claim a saved pause.
+      {
+        let notice = null;
+        const diagnostics = { current: null };
+        restore({ boardScanResume: { ...plan, pausedByUser: true } }, value => { notice = value; }, savedPauseMessageForPlan,
+          { current: Symbol('scan') }, { current: null }, { current: null }, { current: null }, { current: null },
+          diagnostics, null, () => 'pending', () => null);
+        assert.strictEqual(notice, null);
+        assert.deepStrictEqual(diagnostics.current, { recoveryErrorLatch: 'none', awaitedSource: 'pending' });
+      }
+      assert.strictEqual(savedPauseMessageForPlan({ phase: 'combine' }, null), SAVED_HANDOFF_READY_MESSAGE,
+        'only the searches phase is renamed');
 
       const retryStart = source.indexOf('    const liveData = getNode(id)?.data || {};', source.indexOf('const handleRetryRecovery'));
       const retryEnd = source.indexOf('    setRecoveryError(null);', retryStart);
@@ -144,13 +166,13 @@ export default [
     name: 'Board completion reruns stale recovery notice cleanup after the live owner releases',
     run: async () => {
       const source = readNodeSource();
-      const start = source.indexOf('    if (recoveryError !== SAVED_HANDOFF_READY_MESSAGE) return;');
+      const start = source.indexOf('    if (!isSavedPauseNotice(recoveryError)) return;');
       const end = source.indexOf('\n  }, [', start);
-      const effect = new Function('data', 'recoveryError', 'setRecoveryError', 'SAVED_HANDOFF_READY_MESSAGE',
+      const effect = new Function('data', 'recoveryError', 'setRecoveryError', 'isSavedPauseNotice',
         'isBoardCombineManualAiRunId', 'combineRunRef', source.slice(start, end));
       const owner = { current: { runId: 'finishing-combine' } };
       let notice = SAVED_HANDOFF_READY_MESSAGE;
-      const run = () => effect({}, notice, value => { notice = value; }, SAVED_HANDOFF_READY_MESSAGE, () => false, owner);
+      const run = () => effect({}, notice, value => { notice = value; }, isSavedPauseNotice, () => false, owner);
       run(); // Result commit retired the marker, but finally still owns the run.
       assert.strictEqual(notice, SAVED_HANDOFF_READY_MESSAGE);
       owner.current = null;
@@ -200,6 +222,12 @@ export default [
         SAVED_HANDOFF_READY_MESSAGE === 'Saved AI handoff ready. Choose Continue saved AI handoff to resume this exact Board run.',
         'SAVED_HANDOFF_READY_MESSAGE must keep its exact user-facing text',
       );
+      assert.strictEqual(SAVED_SEARCH_PAUSE_MESSAGE,
+        'Search paused and saved. Choose Continue search to resume this exact Board run.');
+      assert.strictEqual(savedPauseMessageForPlan({ phase: 'searches' }, null), SAVED_SEARCH_PAUSE_MESSAGE);
+      assert.strictEqual(savedPauseMessageForPlan({}, null), SAVED_SEARCH_PAUSE_MESSAGE, 'a plan without a phase is a searches plan');
+      assert.strictEqual(savedPauseMessageForPlan({ phase: 'searches' }, { runId: 'combine' }), SAVED_HANDOFF_READY_MESSAGE);
+      assert.strictEqual(savedPauseMessageForPlan(null, { runId: 'combine' }), SAVED_HANDOFF_READY_MESSAGE);
 
       // All 8 boolean combinations, including priority order. `combineCommitMismatchReason`
       // fails on any non-true value and returns the first failing check, so feed the raw
@@ -254,8 +282,10 @@ export default [
       assert(guardAt < setAt, 'guard must return early before setRecoveryError(message)');
 
       // (c) A clearing effect exists referencing the constant and clearing the notice.
-      const clearEffect = source.indexOf('if (recoveryError !== SAVED_HANDOFF_READY_MESSAGE) return;');
-      assert(clearEffect !== -1, 'clearing effect must reference SAVED_HANDOFF_READY_MESSAGE');
+      const clearEffect = source.indexOf('if (!isSavedPauseNotice(recoveryError)) return;');
+      assert(clearEffect !== -1, 'clearing effect must recognise both saved-pause notices');
+      assert(isSavedPauseNotice(SAVED_HANDOFF_READY_MESSAGE) && isSavedPauseNotice(SAVED_SEARCH_PAUSE_MESSAGE)
+        && !isSavedPauseNotice('A real recovery failure'));
       const clearCall = source.indexOf('setRecoveryError(null)', clearEffect);
       assert(clearCall !== -1 && clearCall < source.indexOf('const handleRetryRecovery'), 'clearing effect must call setRecoveryError(null)');
 

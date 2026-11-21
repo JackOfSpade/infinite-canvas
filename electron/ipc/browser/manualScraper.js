@@ -17,9 +17,11 @@
  */
 
 import { manualScraperTelemetry, activitySinkState } from './manualScraper/scrapeState.js';
+import { measurementPacingOff } from './scrapeMeasurement.js';
 import {
   resetScrapePace,
   notePaceListPage,
+  notePaceDescriptionRoute,
   recordManualScraperTelemetry,
   recordIssuedManualQuery,
   clearManualScraperTelemetry,
@@ -75,6 +77,7 @@ import {
   composeDetailBlockReprobeResult,
   CONTENT_SELECTORS,
   NEXT_PAGE_SELECTORS,
+  HARD_NAVIGATION_PAGER_SOURCES,
   SCROLL_SOURCES,
   DESC_CONFIGS,
   descriptionExpansionStrategy,
@@ -164,6 +167,7 @@ import {
   waitIfPaused,
   safePageUrl,
   launchScrapePlatformBrowser,
+  scrapeFingerprintPolicy,
 } from './manualScraper/scrapeBrowser.js';
 import {
   waitForReady,
@@ -235,6 +239,33 @@ export {
 } from './manualScraper/listWalk.js';
 import { expandDescriptionsByNavigation } from './manualScraper/expandByNavigation.js';
 import { expandDescriptionsByPanel } from './manualScraper/expandByPanel.js';
+import {
+  expandGlassdoorDescriptions,
+  glassdoorPanelBlockIsSourceWide,
+  takeGlassdoorPanelBlockForSource,
+  withoutGlassdoorJobPageUrl,
+} from './manualScraper/glassdoorJobPage.js';
+export {
+  GLASSDOOR_JOB_PAGE_GAP_MS,
+  GLASSDOOR_JOB_PAGE_RATE_LIMITED_GAP_MS,
+  GLASSDOOR_JOB_PAGE_SETTLE_MS,
+  GLASSDOOR_JOB_PAGE_STOP_REASONS,
+  expandGlassdoorDescriptions,
+  glassdoorJobPageNeedsReprobe,
+  glassdoorJobPageSalary,
+  glassdoorJobPageTarget,
+  withoutGlassdoorJobPageUrl,
+  glassdoorPanelBlockIsSourceWide,
+  takeGlassdoorPanelBlockForSource,
+  isGlassdoorSecurityTitle,
+  noteGlassdoorJobPageUnreadable,
+  glassdoorJobPageEligible,
+  glassdoorJobPageGapMs,
+  glassdoorJobPageState,
+  glassdoorJobPageVerdict,
+  noteGlassdoorJobPageChallenge,
+  noteGlassdoorJobPageRateLimit,
+} from './manualScraper/glassdoorJobPage.js';
 import {
   closeStealthBrowser, getUserDataDir, findChromePath,
 } from '../stealthBrowser.js';
@@ -324,8 +355,33 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     };
   }
 
-  if (descriptionExpansionStrategy(sourceId) === 'detail-navigation') {
+  const strategy = descriptionExpansionStrategy(sourceId);
+  if (strategy === 'detail-navigation') {
     return expandDescriptionsByNavigation(page, jobs, sourceId, overlayBase, totalSoFar, signal, walkPlan, runtime, cfg);
+  }
+  if (strategy === 'job-page-then-list-card-panel') {
+    // Glassdoor: each row's own /job-listing/ page first (separate background
+    // tab, so the list page stays loaded), then the list-card panel on the
+    // still-loaded list page for whatever the job page did not settle.
+    return expandGlassdoorDescriptions(page, jobs, sourceId, overlayBase, totalSoFar, signal, walkPlan, runtime, cfg, {
+      byNavigation: expandDescriptionsByNavigation,
+      byPanel: expandDescriptionsByPanel,
+      record: route => recordManualScraperTelemetry({
+        phase: 'card-walk',
+        sourceId,
+        srcName: overlayBase.srcName,
+        queryIndex: overlayBase.queryIndex ?? null,
+        queryTotal: overlayBase.queryTotal ?? null,
+        pageNum: overlayBase.pageNum ?? null,
+        total: jobs.length,
+        itemTotal: jobs.length,
+        attempted: route.jobPageOpened,
+        expanded: route.fromJobPage,
+        strategy: 'job-page-then-list-card-panel',
+        descriptionRoute: route,
+      }, { updateActive: false }),
+      notePace: summary => notePaceDescriptionRoute(sourceId, { srcName: overlayBase.srcName, ...summary }),
+    });
   }
 
   return expandDescriptionsByPanel(page, jobs, sourceId, overlayBase, totalSoFar, signal, walkPlan, runtime, cfg);
@@ -580,6 +636,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       try {
         platform = await launchScrapePlatformBrowser({
           userDataDir, executablePath, sandboxArgs,
+          fingerprint: scrapeFingerprintPolicy(sourceId),
           onCrash: () => { earlyExit = true; browserClosedUnexpectedly = true; },
         });
       } catch (error) {
@@ -667,7 +724,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
 
         // Human-scale cooldown between queries (not before the first) — see
         // DEFAULT_INTER_QUERY_COOLDOWN_MS. Honors pause/abort while waiting.
-        if (qi > 0) {
+        if (qi > 0 && !measurementPacingOff(sourceId)) {
           const cooldownAnchor = DEFAULT_INTER_QUERY_COOLDOWN_MS;
           await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: 'Pacing before next query…' }).catch(() => {});
           if (await waitIfPaused(page, signal) === 'abort' || signal?.aborted) { earlyExit = true; break; }
@@ -1745,11 +1802,14 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             }
           }
 
-          allJobs.push(...enhanced);
+          // Glassdoor's as-linked job-page address only serves this scrape's
+          // description route; rows leave the scraper without it.
+          const savedPageRows = sourceId === 'glassdoor' ? enhanced.map(withoutGlassdoorJobPageUrl) : enhanced;
+          allJobs.push(...savedPageRows);
 
           // Per-page recovery flush is a durability boundary: checkpoint even
           // a duplicate-only page, and fail this source if it cannot be saved.
-          if (onPageJobs) await onPageJobs({ sourceId, query: task.query || '', queryIndex: task.queryIndex ?? qi, page: pageNum, jobs: enhanced });
+          if (onPageJobs) await onPageJobs({ sourceId, query: task.query || '', queryIndex: task.queryIndex ?? qi, page: pageNum, jobs: savedPageRows });
 
           if (descError) {
             if (!sourceSiteChangedWarning) sourceSiteChangedWarning = descError;
@@ -1771,7 +1831,26 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
               ? descWarning
               : mergeDescriptionDetailMissWarning(sourceSiteChangedWarning, descWarning);
           }
-          if (DETAIL_BLOCK_WARNING_CODES.includes(descWarning?.code)) {
+          // Glassdoor: a block from its PANEL fallback stops only the panel part
+          // while its job-page route is still on (glassdoorJobPage.js keeps
+          // that panel-only block and its cooldown/re-probe). The source-wide
+          // block below is armed only once both routes are blocked.
+          const glassdoorPanelOnlyBlock = Boolean(detailResult?.descriptionRoute)
+            && DETAIL_BLOCK_WARNING_CODES.includes(descWarning?.code)
+            && !glassdoorPanelBlockIsSourceWide(sourceDetailPacing);
+          if (glassdoorPanelOnlyBlock) {
+            if (sourceDetailFirstBlockPg == null) sourceDetailFirstBlockPg = pageNum;
+            if (sourceDetailFirstBlockQuery == null) sourceDetailFirstBlockQuery = task.query || null;
+            if (sourceDetailFirstBlockQueryIndex == null) sourceDetailFirstBlockQueryIndex = qi;
+            sourceDetailBlockCount += 1;
+            recordManualScraperTelemetry({
+              phase: 'detail-panel-block-only', sourceId, srcName,
+              queryIndex: qi + 1, queryTotal: sourceTasks.length, pageNum,
+              reason: descWarning.code,
+            }, { updateActive: false });
+          } else if (DETAIL_BLOCK_WARNING_CODES.includes(descWarning?.code)) {
+            // The panel-only copy (if any) is superseded by the source block.
+            if (detailResult?.descriptionRoute) takeGlassdoorPanelBlockForSource(sourceDetailPacing);
             // Stamping the clock on every arm is what re-arms a failed
             // cooldown re-probe: the probe clears the code before attempting,
             // so landing back here restarts the wait instead of retrying every
@@ -1794,6 +1873,17 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             sourceDetailBlockCode = descWarning?.code || 'description-rate-limited';
             sourceDetailBlockAt = Date.now();
             sourceDetailBlockCount += 1;
+          }
+          // Glassdoor's job-page route turned off while its panel was already
+          // blocked: both routes are blocked now, so the panel-only block
+          // becomes the source-wide one (keeping its original clock).
+          if (detailResult?.descriptionRoute && !sourceDetailBlockCode) {
+            const handover = takeGlassdoorPanelBlockForSource(sourceDetailPacing);
+            if (handover) {
+              if (sourceDetailBlockPage == null) sourceDetailBlockPage = pageNum;
+              sourceDetailBlockCode = handover.code;
+              sourceDetailBlockAt = handover.at;
+            }
           }
 
           await updateOverlay(page, {
@@ -2014,6 +2104,12 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
               }
               pageNum -= 1; // attempted page was never reached — the click never navigated
               break;
+            }
+            // A followed pager link replaces the document. The URL commits
+            // before the new HTML has finished parsing, so wait for parsing to
+            // finish before readiness and extraction read its server-rendered data.
+            if (HARD_NAVIGATION_PAGER_SOURCES.has(sourceId)) {
+              await page.waitForFunction(() => document.readyState !== 'loading', { timeout: CONTENT_TIMEOUT_MS }).catch(() => {});
             }
           }
 

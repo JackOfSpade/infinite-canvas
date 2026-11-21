@@ -1468,7 +1468,12 @@ export function registerSearchHandlers(ctx) {
           }, async (sourceId, result) => {
             await afterSearchProviderResult(sourceId, result);
             await assertSearchCurrent();
-          }, ageDaysBySource(), carriedQueriesBySource),
+          }, ageDaysBySource(), carriedQueriesBySource, {
+            // LinkedIn checkpoints each finished query through the browser
+            // sources' page ledger, and a resume skips the ones already terminal.
+            queryPlansBySource: resumeStartPages,
+            stageQuery: stageOnPage,
+          }),
         ];
         [browserOut, httpResults] = await Promise.all(gatherBranches);
       }

@@ -1,6 +1,6 @@
 import { isJobSourceWarningGating } from './jobSourceWarningPolicy.js';
 import { moduleCombineFingerprint } from '../nodes/jobboard/mergeJobs.js';
-import { SAVED_HANDOFF_READY_MESSAGE } from '../nodes/jobboard/boardRecoveryNotice.js';
+import { SAVED_HANDOFF_READY_MESSAGE, SAVED_SEARCH_PAUSE_MESSAGE } from '../nodes/jobboard/boardRecoveryNotice.js';
 
 function nonEmptyReceiptToken(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
@@ -229,6 +229,7 @@ export function awaitedSourceTerminalStatus(plan, getNode) {
 // the awaited-source retry below must never clear them.
 const BOARD_SAVED_PAUSE_MESSAGES = new Set([
   SAVED_HANDOFF_READY_MESSAGE,
+  SAVED_SEARCH_PAUSE_MESSAGE,
   'This Job Search is paused with its saved work. Continue from the Job Board when ready.',
 ]);
 

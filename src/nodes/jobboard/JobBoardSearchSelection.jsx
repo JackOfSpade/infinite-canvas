@@ -146,6 +146,12 @@ export function JobBoardSearchSelection({
     typeof onRun !== 'function' ? 'run-handler-unavailable' : null,
   ].filter(Boolean), [boardUpToDate, disabled, hasUnreadySelection, recoveryError, running, selectedRows.length, onRun]);
   const eligibilityReasonKey = eligibilityReasons.join('|');
+  // Which control block this render actually shows. The primary-action fields
+  // above describe the Search button only; while a recovery notice is set that
+  // button is not rendered and the recovery controls are what the user sees.
+  const renderedAction = recoveryError ? 'recovery' : boardUpToDate ? 'up-to-date' : running ? 'cancel' : 'run';
+  const finishSavedAvailable = !!recoveryError && typeof onFinishSaved === 'function' && !disabled;
+  const renderedRecoveryLabel = recoveryError ? String(recoveryActionLabel || '').slice(0, 80) : '';
 
   // The action predicate is split between Board state and selector state. Keep
   // a bounded snapshot of exactly what this mounted control evaluated, plus
@@ -159,6 +165,10 @@ export function JobBoardSearchSelection({
       actionVisible: !boardUpToDate,
       actionLabel: String(runLabel || '').slice(0, 80),
       eligibilityReasons: eligibilityReasonKey ? eligibilityReasonKey.split('|') : [],
+      renderedAction,
+      recoveryActionAvailable: renderedAction === 'recovery' ? canRetry : null,
+      recoveryActionLabel: renderedRecoveryLabel,
+      finishSavedAvailable: renderedAction === 'recovery' ? finishSavedAvailable : null,
       selectorBounds: layoutBounds(fieldsetRef.current),
       sourceListBounds: layoutBounds(sourceListRef.current),
     });
@@ -168,7 +178,7 @@ export function JobBoardSearchSelection({
     if (fieldsetRef.current) observer.observe(fieldsetRef.current);
     if (sourceListRef.current) observer.observe(sourceListRef.current);
     return () => observer.disconnect();
-  }, [boardUpToDate, canRun, eligibilityReasonKey, onRuntimeSnapshot, rows.length, runLabel, selectedRows.length]);
+  }, [boardUpToDate, canRetry, canRun, eligibilityReasonKey, finishSavedAvailable, onRuntimeSnapshot, renderedAction, renderedRecoveryLabel, rows.length, runLabel, selectedRows.length]);
 
   return (
     <fieldset

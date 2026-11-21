@@ -45,6 +45,7 @@ import { runBoardResearchStage, removedLookupEntry, MAX_BOARD_REMOVED_LOOKUPS } 
 import { attachProtectedCards, consolidateJobLocations, isProtectedJobCard } from '../utils/jobLocationConsolidation';
 // Shown only for a restored marker: 'Saved AI handoff ready. Choose Continue saved AI handoff…'
 import { SAVED_HANDOFF_READY_MESSAGE, isLiveCombineOwnedMarker, combineCommitMismatchReason } from './jobboard/boardRecoveryNotice';
+import { CONTINUE_SEARCH_ACTION_LABEL, SAVED_SEARCH_PAUSE_MESSAGE, isSavedPauseNotice, savedPauseMessageForPlan } from './jobboard/boardRecoveryNotice';
 import { JobBoardDoneState } from './jobboard/JobBoardDoneState';
 import { JobBoardSearchSelection } from './jobboard/JobBoardSearchSelection';
 import { JobBoardCareerOverridePanel } from './jobboard/JobBoardCareerOverridePanel';
@@ -2897,7 +2898,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     setCombining(false);
     setCompensationProgress(null);
     setCombineResearchProgress(null);
-    setRecoveryError(SAVED_HANDOFF_READY_MESSAGE);
+    // A pause taken while the Board is still searching names a search; one
+    // that holds a Combine handoff keeps the AI-handoff notice.
+    setRecoveryError(savedPauseMessageForPlan(plan, marker));
     updateGlobal(id, node => isQuitPauseCurrent() ? savedWorkflowQuitPausePatch(node, acknowledgement) : null);
     await settlePreFenceCanvasBatches();
     const committed = getNode(id)?.data;
@@ -6233,8 +6236,15 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       // A saved pause has no live executor after remount. Publish the explicit
       // Continue action before returning; the durable marker alone otherwise
       // leaves the selector showing recovery progress forever.
-      if (!scanRunRef.current && !combineRunRef.current && !data.boardCancellation) {
-        setRecoveryError(SAVED_HANDOFF_READY_MESSAGE);
+      const publishesPause = !scanRunRef.current && !combineRunRef.current && !data.boardCancellation;
+      // The report's latch must describe the message this branch publishes;
+      // the classification further down is never reached for a saved pause.
+      boardRecoveryDiagnosticsRef.current = {
+        recoveryErrorLatch: publishesPause ? 'paused-continue' : (recoveryError ? 'sticky' : 'none'),
+        awaitedSource: awaitedSourceTerminalStatus(plan, getNode),
+      };
+      if (publishesPause) {
+        setRecoveryError(savedPauseMessageForPlan(plan, data.manualAiResume));
       }
       return;
     }
@@ -6292,6 +6302,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         && marker.boardRunId === plan.boardRunId;
     });
     if (userPausedChild && !scanRunRef.current && !scanPreflightRef.current) {
+      boardRecoveryDiagnosticsRef.current = {
+        recoveryErrorLatch: 'paused-continue',
+        awaitedSource: awaitedSourceTerminalStatus(plan, getNode),
+      };
       setRecoveryError('This Job Search is paused with its saved work. Continue from the Job Board when ready.');
       return;
     }
@@ -7214,7 +7228,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // either executor settles: marker retirement can render before finally
   // releases the imperative combine owner.
   useEffect(() => {
-    if (recoveryError !== SAVED_HANDOFF_READY_MESSAGE) return;
+    if (!isSavedPauseNotice(recoveryError)) return;
     // An independent handoff never justifies this notice; clear it.
     if (isBoardCombineManualAiRunId(data.manualAiResume?.runId)) return;
     if (data.boardScanResume?.boardRunId) return;
@@ -7686,10 +7700,12 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           recoveryError={scanning || combining ? null : recoveryError}
           onRetry={handleRetryRecovery}
           recoveryActionLabel={
-            (data.manualAiResume?.runId && data.manualAiResume.retirementPending !== true)
-              || recoveryError?.includes('AI handoff')
-              ? 'Continue saved AI handoff'
-              : 'Retry recovery'
+            recoveryError === SAVED_SEARCH_PAUSE_MESSAGE
+              ? CONTINUE_SEARCH_ACTION_LABEL
+              : ((data.manualAiResume?.runId && data.manualAiResume.retirementPending !== true)
+                || recoveryError?.includes('AI handoff'))
+                ? 'Continue saved AI handoff'
+                : 'Retry recovery'
           }
           recoveryCanCancel={!cleanupOnlyRecovery && !cancellationCleanupActive && !finalizingCommittedCombine}
           // Only offer the early finish for a genuinely paused, resumable

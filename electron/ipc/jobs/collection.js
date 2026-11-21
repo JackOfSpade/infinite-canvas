@@ -979,13 +979,48 @@ export function __queryFanOutForTests(queries, fetcher, signal, options = {}) {
   return queryFanOut(queries, fetcher, signal, concurrency, minIntervalMs, label);
 }
 
+/**
+ * LinkedIn's query walk for this run. Entries carry each query's position in
+ * the run's full list. `carried` is the text subset a blocked earlier run left
+ * (fresh runs only); `resumePlan` is the index-aligned crash-recovery plan, in
+ * which a terminal query is skipped. `skipped` lists the skipped query texts.
+ */
+export function buildLinkedInQueryPlan(queries, carried = null, resumePlan = null) {
+  const all = (Array.isArray(queries) ? queries : [queries]).map((query, index) => ({ query, index }));
+  if (Array.isArray(resumePlan) && resumePlan.length === all.length) {
+    const entries = all.filter(entry => resumePlan[entry.index]?.terminal !== true);
+    const skipped = all.filter(entry => resumePlan[entry.index]?.terminal === true).map(entry => entry.query);
+    return { entries, skipped };
+  }
+  if (Array.isArray(carried)) {
+    // The carried list is the full list with finished texts filtered out, so a
+    // text filter over the full list reproduces it with exact positions. Any
+    // other shape keeps its own order with no ledger position (text-keyed).
+    const keep = new Set(carried);
+    const entries = all.filter(entry => keep.has(entry.query));
+    const sameOrder = entries.length === carried.length && entries.every((entry, i) => entry.query === carried[i]);
+    return { entries: sameOrder ? entries : carried.map(query => ({ query, index: null })), skipped: [] };
+  }
+  return { entries: all, skipped: [] };
+}
+
 export const __fetchHttpSourcesForTests = (...args) => fetchHttpSources(...args);
 
 /**
  * Fetch API-based sources in parallel (no Puppeteer needed).
  * @returns {{ sourceId: string, jobs: object[], error?: string }[]}
  */
-export async function fetchHttpSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, preferredLocation = '', onlySources = null, emit = null, stageSource = null, collectionLimits = null, beforeSourceDispatch = null, afterProviderResult = null, maxAgeDaysBySource = null, queriesBySource = null) {
+export async function fetchHttpSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, preferredLocation = '', onlySources = null, emit = null, stageSource = null, collectionLimits = null, beforeSourceDispatch = null, afterProviderResult = null, maxAgeDaysBySource = null, queriesBySource = null, {
+  // Index-aligned crash-recovery plan per source (computeResumeStartPagesByQuery).
+  // Only LinkedIn consumes it here: a query whose ledger entry is terminal was
+  // already walked and checkpointed by this run, so it is not fetched again.
+  queryPlansBySource = null,
+  // Per-query durable checkpoint (the browser sources' page hook). LinkedIn
+  // calls it once per cleanly finished query with that query's rows.
+  stageQuery = null,
+  // Unit-test seam only (request pacing); production never passes it.
+  linkedInFetchOptions = null,
+} = {}) {
   // Route progress through the caller's recorder (emitProgress) so the five
   // pure-HTTP sources appear in jobsTelemetry.sourceEvents — without this they
   // bypassed the trail and were invisible in bug reports (exactly the sources
@@ -1021,10 +1056,18 @@ export async function fetchHttpSources(queries, sender, signal = null, nodeId = 
   // Pure-HTTP sources ONLY — no browser, no shared profile, so they run fully
   // concurrent with each other AND with the serialized browser driver. Indeed is
   // NOT here (it is browser-based and runs in the search-jobs browser driver).
+  // LinkedIn's walk plan, as { query, index } entries in the run's own query
+  // positions so a checkpoint lands on the same ledger key a resume reads.
+  const linkedInPlan = buildLinkedInQueryPlan(queries, queriesBySource?.linkedin, queryPlansBySource?.linkedin);
+  // Rows LinkedIn already checkpointed per query. The whole-source stage at
+  // the end writes only the rest, so a finished query's rows are appended once.
+  const linkedInCheckpointed = new Set();
   const apiTasks = [
     // LinkedIn alone may be given fewer queries: the ones a blocked earlier run
-    // already finished are left out (see carriedFinishedQueries in search-jobs).
-    { sourceId: 'linkedin',      fn: (s) => fetchLinkedInJobs(Array.isArray(queriesBySource?.linkedin) ? queriesBySource.linkedin : queries, s, daysForSource('linkedin'), location, ({ completed, count, detail }) => {
+    // already finished are left out (see carriedFinishedQueries in search-jobs),
+    // and a resumed run leaves out the ones this run already checkpointed.
+    { sourceId: 'linkedin',      fn: async (s) => {
+      const result = await fetchLinkedInJobs(linkedInPlan.entries.map(entry => entry.query), s, daysForSource('linkedin'), location, ({ completed, count, detail }) => {
       // Intermediate heartbeat during LinkedIn's multi-minute paced walk — without
       // this the pre-loop 'searching' stamp below is the only event LinkedIn ever
       // emits until it fully resolves, which reads as a stale/hung task in a bug
@@ -1032,8 +1075,32 @@ export async function fetchHttpSources(queries, sender, signal = null, nodeId = 
       // intentional — see fetchLinkedInJobs). `total` stays this run's queryTotal
       // rather than the extractor's own count so one source never reports two
       // different denominators mid-run.
-      send({ nodeId, sourceId: 'linkedin', status: 'searching', count, detail, completed, total: queryTotal });
-    }) },
+      send({ nodeId, sourceId: 'linkedin', status: 'searching', count, detail, completed: completed + linkedInPlan.skipped.length, total: queryTotal });
+      }, {
+        ...(linkedInFetchOptions && typeof linkedInFetchOptions === 'object' ? linkedInFetchOptions : {}),
+        onQueryFinished: typeof stageQuery === 'function'
+          ? async ({ queryIndex, query, jobs, pages }) => {
+            const entry = linkedInPlan.entries[queryIndex];
+            await stageQuery({
+              sourceId: 'linkedin',
+              query: entry?.query ?? query,
+              queryIndex: Number.isSafeInteger(entry?.index) ? entry.index : null,
+              page: pages,
+              jobs,
+              terminal: true,
+            });
+            for (const job of jobs) linkedInCheckpointed.add(job);
+          }
+          : null,
+      });
+      // A query skipped because this run already finished it is still a
+      // finished query of this run: the walk-complete and carried-query
+      // bookkeeping downstream must not mistake it for one never walked.
+      if (linkedInPlan.skipped.length > 0 && result && !Array.isArray(result)) {
+        result.finishedQueries = [...linkedInPlan.skipped, ...(Array.isArray(result.finishedQueries) ? result.finishedQueries : [])];
+      }
+      return result;
+    } },
     // USAJobs now walks its pager to the provider's own reported total, which
     // for a broad keyword is ~1000 rows rather than the old single 150-row page.
     { sourceId: 'usajobs',       fn: (s) => queryFanOut(queries, (q, sig) => fetchUSAJobs(q, apiKey, email, sig, daysForSource('usajobs'), location, usajobsRowBudget), s, Infinity, 0, 'USAJobs API') },
@@ -1157,7 +1224,10 @@ export async function fetchHttpSources(queries, sender, signal = null, nodeId = 
           || (sourceId === 'remoteok'
             && warning?.severity === 'throttle'
             && remoteFeedProvenance.some(entry => entry?.fanoutStopped === true));
-        await stageSource({ sourceId, jobs, warning, retryablePartial });
+        const unstaged = sourceId === 'linkedin' && linkedInCheckpointed.size > 0
+          ? jobs.filter(job => !linkedInCheckpointed.has(job))
+          : jobs;
+        await stageSource({ sourceId, jobs: unstaged, warning, retryablePartial });
       }
       return { sourceId, jobs, warning, gathered, providerGathered, providerTotal, truncated, capDropped, crossQueryDuplicates, stopReasons, finishedQueries, sourceCap, sourceCaps, pagesFetched, relevanceDropped, sponsoredDropped, preCapRelevanceDropped, relevanceRejected, remoteFeedProvenance, relevanceTrace, walkGuards, ...(pageShapeFailures > 0 ? { pageShapeFailures } : {}) };
     } catch (error) {

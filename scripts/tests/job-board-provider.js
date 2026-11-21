@@ -3,7 +3,7 @@ import { readAllJobsSources, readJobsSource, readJobsSources } from './jobsSourc
 import path from 'node:path';
 import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 import { readFileSync } from 'node:fs';
-import { JSDOM } from 'jsdom';
+import { JSDOM, VirtualConsole } from 'jsdom';
 import { buildOverlayScript, linkDetailOverlayPages, overlayControlPage, overlayTabLayout, updateOverlay as paintScraperOverlay } from '../../electron/ipc/browser/scraperOverlay.js';
 import { runInNewContext } from 'node:vm';
 import { isJobBoardUserCancellation, isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../../src/utils/jobBoardAiProvider.js';
@@ -190,7 +190,7 @@ export default [
         let listForegrounds = 0;
         let waited = 0;
         const actual = await runInNewContext(`(async () => {
-          let solvedDetailChallenges = 0, lastDetailNavigationAt = 1, keepDetailForeground = false;
+          let solvedDetailChallenges = 0, lastDetailNavigationAt = 1, keepDetailForeground = false, rateLimitedGapMs = 0;
           ${source.slice(begin, end)}
           for (let once = 0; once < 1; once++) { ${source.slice(gapStart, gapEnd)} }
           return { keepDetailForeground, solvedDetailChallenges, lastDetailNavigationAt };
@@ -200,14 +200,15 @@ export default [
           page: { bringToFront: async () => { listForegrounds++; } },
           getChallengeSignals: async () => ({}), injectOverlay: async () => {},
           recordManualScraperTelemetry() {}, zipRecruiterDetailGapMs,
+          measurementPacingOff: () => false,
           runtime: { delay: async ms => { waited = ms; return true; } },
         });
         if (result === 'abort') {
           assert(!actual.keepDetailForeground && actual.solvedDetailChallenges === 0 && listForegrounds === 1);
         } else {
           assert(actual.keepDetailForeground && actual.solvedDetailChallenges === 1 && listForegrounds === 0);
-          assert(actual.lastDetailNavigationAt === 120_000 && waited === 10_000,
-            'a long human solve must not exhaust the cooldown before clearance');
+          assert(actual.lastDetailNavigationAt === 120_000 && waited === 2_500,
+            'a solved check restarts the normal detail gap from clearance; the gap does not escalate');
         }
       }
     },
@@ -217,6 +218,7 @@ export default [
     async run() {
       for (const [html, sourceId, expected] of [
         ['<a title="Next page" href="/jobs-search/2">Next page</a>', 'ziprecruiter', true],
+        ['<a aria-label="Next page" href="/jobs-search/2?search=x&days=21"></a>', 'ziprecruiter', true],
         ['<button aria-label="Next page">→</button>', 'ziprecruiter', true],
         ['<a title="Next Page" style="display:none">hidden</a><a title="Next page">Next page</a>', 'ziprecruiter', true],
         ['<a title="Next page" aria-disabled="true">Next page</a>', 'ziprecruiter', false],
@@ -227,7 +229,12 @@ export default [
         ['<button style="display:none">Show more jobs</button>', 'glassdoor', false],
         ['<a>See more jobs like this</a>', 'glassdoor', false],
       ]) {
-        const dom = new JSDOM(html, { url: 'https://www.example.test/', runScripts: 'outside-only' });
+        // jsdom does not implement navigation; it reports each attempt on the
+        // virtual console instead, which is how a followed link is counted.
+        let navigations = 0;
+        const virtualConsole = new VirtualConsole();
+        virtualConsole.on('jsdomError', error => { if (/navigation/i.test(String(error?.message))) navigations++; });
+        const dom = new JSDOM(html, { url: 'https://www.example.test/', runScripts: 'outside-only', virtualConsole });
         let clicks = 0;
         dom.window.HTMLElement.prototype.scrollIntoView = () => {};
         dom.window.document.addEventListener('click', event => { clicks++; event.preventDefault(); });
@@ -236,13 +243,19 @@ export default [
           const result = sourceId === 'glassdoor'
             ? await clickLoadMore(page, '[data-test="load-more"]')
             : await clickNextPage(page, sourceId);
-          assert(result.clicked === expected && clicks === Number(expected), html);
+          assert(result.clicked === expected && clicks + navigations === Number(expected), html);
+          // ZipRecruiter's pager link is followed as a document load, never
+          // clicked: a click is a client-side route change that leaves page 1's
+          // ItemList JSON-LD in place. A control without an href is still clicked.
+          if (expected && sourceId === 'ziprecruiter') {
+            const followed = /<a [^>]*href=/.test(html);
+            assert(navigations === Number(followed) && clicks === Number(!followed), `${html}: followed=${followed}`);
+          }
         } finally { dom.window.close(); }
       }
-      assert(zipRecruiterDetailGapMs(0) === 2500);
-      assert(zipRecruiterDetailGapMs(1) === 10000);
-      assert(zipRecruiterDetailGapMs(2) === 20000);
-      assert(zipRecruiterDetailGapMs(20) === 30000);
+      for (const solved of [0, 1, 2, 20]) {
+        assert(zipRecruiterDetailGapMs(solved) === 2500, 'solved checks must not stretch the ZipRecruiter detail gap');
+      }
     },
   },
   {

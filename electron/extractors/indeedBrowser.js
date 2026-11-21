@@ -13,6 +13,8 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import path from 'path';
 import electronPkg from 'electron';
 import { logger } from '../logger.js';
+import { measurementPacingOff, measurementPacingScale } from '../ipc/browser/scrapeMeasurement.js';
+import { scrapeFingerprintPolicy } from '../ipc/browser/manualScraper/scrapeBrowser.js';
 import { findChromePath, findSystemChromePath, getUserDataDir, getSharedProfileReservationInfo, launchWithProfileLockRetry, reserveSharedProfile } from '../ipc/stealthBrowser.js';
 import { extractIndeedJobsFromHtml, pushWalkGuard } from './apiExtractors.js';
 import { indeedPageUnreadable, mostFirstPagesUnreadable } from '../ipc/jobSourcePageShape.js';
@@ -223,9 +225,24 @@ async function closeOwnedIndeedBrowser(browser, label) {
   await waitForOwnedProcessExit(proc, 2_000);
 }
 
-// Page and query delays mirror the probe script step 7 (7.9s/page avg achieved).
+// Indeed's anti-bot pacing is a quarter of what it was. Measured live
+// 2026-11-20 on one IP, plain fingerprint, 5 queries each, run to ~500+ jobs:
+//   full pacing  — 508 jobs in 50 min, no check
+//   half pacing  — 554 jobs in 35 min, no check
+//   quarter      — 588 jobs in 24 min (all 5 queries finished), no check, 99% described
+//   no pacing    — checked twice (after 111 and after ~400 jobs), each needing a
+//                  native handoff
+// So pacing does matter on Indeed at volume, but a quarter of the old amount
+// is enough. INDEED_PACING_SCALE applies to the card dwell, the gap between
+// cards, and the page and query delays below.
+const INDEED_PACING_SCALE = 0.25;
 const PAGE_DELAY_MS  = [1500, 3000];
 const QUERY_DELAY_MS = [3000, 5000];
+/** Production pacing multiplier, unless a measurement harness overrides it. */
+function indeedPacingScale() {
+  const override = measurementPacingScale('indeed');
+  return override === 1 ? INDEED_PACING_SCALE : override;
+}
 
 const CARD_SELECTOR  = '[data-testid="jobTitle"] a, .jobTitle a, h2.jobTitle a, a[data-jk]';
 // Indeed's panel moved to .simple-job-description-html, which also holds a <style> block.
@@ -460,7 +477,7 @@ async function humanClickCard(page, selector, jobKey) {
     box.y + (Math.random() * 8 - 4),
     { steps: 8 + Math.round(Math.random() * 8) },
   );
-  await sleepMs(jitterMs(60, 100));
+  if (!measurementPacingOff('indeed')) await sleepMs(jitterMs(60, 100));
   await page.mouse.click(box.x, box.y);
   return { clicked: true, covered: box.covered };
 }
@@ -607,7 +624,7 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
     }
 
     // Keep the pace this scrape has always run at: a panel can answer in 200ms, but clicking through a page that fast is what bot scoring looks for.
-    const dwellMs = PANEL_MIN_DWELL_MS + Math.round(Math.random() * 1500) - (Date.now() - clickedAt);
+    const dwellMs = Math.round((PANEL_MIN_DWELL_MS + Math.random() * 1500) * indeedPacingScale()) - (Date.now() - clickedAt);
     if (dwellMs > 0) await sleepMs(dwellMs);
 
     const settled = await readIndeedPanel(page);
@@ -638,7 +655,7 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
       recordIndeedEnrichmentAttempt(job, { stage: 'card-panel', outcome: 'blank', length: 0 });
     }
 
-    if (t < limit - 1) await sleepMs(jitterMs(800, 600));
+    if (t < limit - 1 && !measurementPacingOff('indeed')) await sleepMs(Math.round(jitterMs(800, 600) * indeedPacingScale()));
   }
 
   if (enriched > 0) logger.info(`[Indeed/Browser] Enriched ${enriched}/${limit} jobs with full descriptions`);
@@ -725,6 +742,8 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
     args: LAUNCH_ARGS,
     defaultViewport: { width: 1400, height: 900 },
     ignoreHTTPSErrors: true,
+    // Same per-source policy as the manual scraper (scrapeFingerprintPolicy).
+    plainAutomation: scrapeFingerprintPolicy('indeed').plain,
   });
 
   let releaseProfileReservation;
@@ -1024,6 +1043,8 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     args: LAUNCH_ARGS,
     defaultViewport: { width: 1400, height: 900 },
     ignoreHTTPSErrors: true,
+    // Same per-source policy as the manual scraper (scrapeFingerprintPolicy).
+    plainAutomation: scrapeFingerprintPolicy('indeed').plain,
   });
 
   let releaseProfileReservation;
@@ -1573,12 +1594,12 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           break;
         }
 
-        await sleepMs(jitterMs(PAGE_DELAY_MS[0], PAGE_DELAY_MS[1] - PAGE_DELAY_MS[0]));
+        if (!measurementPacingOff('indeed')) await sleepMs(Math.round(jitterMs(PAGE_DELAY_MS[0], PAGE_DELAY_MS[1] - PAGE_DELAY_MS[0]) * indeedPacingScale()));
       }
 
       // Pace the gap between queries so consecutive searches don't look scripted.
       if (!signal?.aborted) {
-        await sleepMs(jitterMs(QUERY_DELAY_MS[0], QUERY_DELAY_MS[1] - QUERY_DELAY_MS[0]));
+        if (!measurementPacingOff('indeed')) await sleepMs(Math.round(jitterMs(QUERY_DELAY_MS[0], QUERY_DELAY_MS[1] - QUERY_DELAY_MS[0]) * indeedPacingScale()));
       }
 
       wi++;

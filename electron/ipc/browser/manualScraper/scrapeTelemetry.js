@@ -122,6 +122,20 @@ export function notePaceDetailOpened(sourceId, meta = {}) {
   });
 }
 
+// Glassdoor's description route (glassdoorJobPage.js): running source totals of
+// descriptions read from job pages vs the panel fallback, and the fixed code
+// for why the job-page route stopped. Counts and codes only.
+const DESCRIPTION_ROUTE_STOP_CODES = new Set(['none', 'unreadable', '429-first', '429-second', 'challenge']);
+export function notePaceDescriptionRoute(sourceId, meta = {}) {
+  return updateScrapePace(sourceId, meta, pace => {
+    pace.descriptionRoute = {
+      fromJobPage: Math.max(0, Number(meta.fromJobPage) || 0),
+      fromPanel: Math.max(0, Number(meta.fromPanel) || 0),
+      stopReason: DESCRIPTION_ROUTE_STOP_CODES.has(meta.stopReason) ? meta.stopReason : 'none',
+    };
+  });
+}
+
 export function notePaceSpacingWait(sourceId, meta = {}) {
   return updateScrapePace(sourceId, meta, pace => {
     pace.spacingWaitMs += Math.max(0, Number(meta.waitMs) || 0);
@@ -218,6 +232,12 @@ export function formatScrapePaceLine(pace, now = Date.now()) {
       if (popup) parts.push(`${popup} popup(s)`);
       if (covered) parts.push(`${covered} covered`);
       return parts.length ? [`panel walk interruptions: ${parts.join(', ')}`] : [];
+    })(),
+    ...(() => {
+      const route = pace.descriptionRoute;
+      if (!route || typeof route !== 'object') return [];
+      const stop = DESCRIPTION_ROUTE_STOP_CODES.has(route.stopReason) ? route.stopReason : 'none';
+      return [`descriptions: ${Math.max(0, Number(route.fromJobPage) || 0)} from job pages, ${Math.max(0, Number(route.fromPanel) || 0)} from panel fallback · job-page route stop ${stop}`];
     })(),
     `spacing ${duration(spacingMs)}`,
     `page loads ${duration(loadMs)}`,

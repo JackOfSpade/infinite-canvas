@@ -1,10 +1,12 @@
 /**
- * Detail-navigation description walk (ZipRecruiter).
+ * Detail-navigation description walk (ZipRecruiter, and Glassdoor's job-page
+ * route — see glassdoorJobPage.js for its pacing, 429 ladder and challenge rule).
  */
 import { CONTENT_POLL_MS, waitForAbortableDelay } from './walkRules.js';
 import {
   ZIPRECRUITER_APPCAST_RESTRICTED_RECOVERY_RETRIES,
   ZIPRECRUITER_429_RETRIES,
+  ZIPRECRUITER_RATE_LIMITED_GAP_MS,
   ZIPRECRUITER_DETAIL_ERROR_SHELL_RETRIES,
   ZIPRECRUITER_MONEY_SRC,
   captureZipRecruiterListingLiveness,
@@ -28,7 +30,22 @@ import {
   zipRecruiterDetailGapMs,
   zipRecruiterRetryAfterMs,
 } from './detailParsing.js';
-import { OVERLAY_SCRIPT, injectOverlay, updateOverlay, waitIfPaused, safePageUrl } from './scrapeBrowser.js';
+import { OVERLAY_SCRIPT, applyStealthMask, injectOverlay, updateOverlay, waitIfPaused, safePageUrl, scrapeFingerprintPolicy } from './scrapeBrowser.js';
+import { measurementPacingOff } from '../scrapeMeasurement.js';
+import {
+  GLASSDOOR_JOB_PAGE_RATE_LIMITED_GAP_MS,
+  GLASSDOOR_JOB_PAGE_SETTLE_MS,
+  glassdoorJobPageGapMs,
+  glassdoorJobPageNeedsReprobe,
+  glassdoorJobPageSalary,
+  glassdoorJobPageSignalCodes,
+  formatGlassdoorJobPageSignalCodes,
+  glassdoorJobPageState,
+  glassdoorJobPageVerdict,
+  noteGlassdoorJobPageUnreadable,
+  noteGlassdoorJobPageChallenge,
+  noteGlassdoorJobPageRateLimit,
+} from './glassdoorJobPage.js';
 import {
   formatWaitDuration,
   notePaceDetailOpened,
@@ -88,6 +105,15 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
   // number of rows actually removed.
   let boardClosedDetailKept = 0;
   const listUrl = page.url();
+  // Glassdoor's job-page route (glassdoorJobPage.js). Every row the job page
+  // does not settle stays 'pending' and goes to the list-card panel fallback;
+  // 'expanded' = description read here, 'closed' = closed-listing rules applied.
+  const glassdoorJobPage = sourceId === 'glassdoor';
+  const rowOutcomes = new Array(enhanced.length).fill('pending');
+  // `silentMisses`: rows whose navigation/extraction failed and that went to the
+  // panel without a 'desc-miss' anomaly (the panel may still recover them).
+  const jobPageRoute = { stopReason: 'none', opened: 0, silentMisses: 0 };
+  const glassdoorRouteState = glassdoorJobPage ? glassdoorJobPageState(walkPlan?.detailPacing) : null;
 
   // Open a dedicated background page for detail fetches so the main list page
   // stays put — eliminates the visual ping-pong between search results and
@@ -95,16 +121,17 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
   let detailPage = null;
   let unlinkDetailOverlays = () => {};
   const createDetailPage = async () => {
-    const nextPage = await createBackgroundScrapePage(page.browser(), { width: 1280, height: 900 });
-    await nextPage.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver',           { get: () => false });
-      Object.defineProperty(navigator, 'platform',            { get: () => 'MacIntel' });
-      Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-      Object.defineProperty(navigator, 'deviceMemory',        { get: () => 8 });
-      Object.defineProperty(navigator, 'maxTouchPoints',      { get: () => 0 });
-    }).catch(() => {});
-    const ua = await page.evaluate(() => navigator.userAgent).catch(() => null);
-    if (ua) await nextPage.setUserAgent(ua).catch(() => {});
+    // runtime.createBackgroundPage is a fake-page test seam; production passes no runtime.
+    const nextPage = await (runtime?.createBackgroundPage || createBackgroundScrapePage)(page.browser(), { width: 1280, height: 900 });
+    // Same fingerprint as the list tab it came from: masked only when the
+    // source's policy masks its list tab (scrapeFingerprintPolicy).
+    if (!scrapeFingerprintPolicy(sourceId).plain) await applyStealthMask(nextPage).catch(() => {});
+    // Never copy the list tab's user agent onto this tab. The detail tab is in
+    // the same browser, so it already has that UA — and setUserAgent() with a
+    // string alone drops User-Agent Client Hints (no sec-ch-ua headers, empty
+    // navigator.userAgentData.brands), which real Chrome never does. That made
+    // every detail page look like a bot; on ZipRecruiter 27 of 30 checks in one
+    // run hit this tab, not the list tab.
     const vp = page.viewport();
     if (vp) await nextPage.setViewport(vp).catch(() => {});
     await nextPage.evaluateOnNewDocument(OVERLAY_SCRIPT).catch(() => {});
@@ -122,6 +149,15 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
   } catch {
     detailPage = null;
   }
+  // Glassdoor's panel fallback needs the list page intact, so its job pages
+  // are only ever opened in the separate detail tab — never on the list page.
+  if (glassdoorJobPage && !detailPage) {
+    return {
+      jobs: enhanced, rows: enhanced, rowOutcomes, jobPageRoute,
+      descError: null, descWarning: null, expandedCount: 0,
+      unavailableDetailDropped: 0, boardClosedDetailKept: 0,
+    };
+  }
   let fetchPage = detailPage ?? page;
 
   // Fire the desc/date "miss" diagnostics on the FIRST failure ANYWHERE in the
@@ -136,6 +172,8 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
   const detailPacing = walkPlan?.detailPacing || {};
   let lastDetailNavigationAt = detailPacing.lastNavigationAt || 0;
   let solvedDetailChallenges = detailPacing.solvedChallenges || 0;
+  // Raised for the rest of this source's walk after its first 429.
+  let rateLimitedGapMs = detailPacing.rateLimitedGapMs || 0;
   let keepDetailForeground = false;
   let zipRecruiter429Retries = 0;
   let zipRecruiterAppcastRestrictionRetries = 0;
@@ -166,25 +204,28 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
       if (!viewUrl) continue;
 
       // Keep Glassdoor detail navigation on the exact country host whose list
-      // page loaded successfully. Only the navigation target is rewritten.
-      //
-      // NOTE: no DESC_CONFIGS entry currently sets `pinToListHost`, so this
-      // branch is unreachable in production today — host pinning is NOT
-      // active, even though pinGlassdoorDetailUrlToListHost is unit-tested and
-      // reads as though it were. It is kept (rather than deleted) because
-      // Glassdoor's country redirect is a known, recurring failure mode and
-      // this is the ready mitigation; enable it by setting the flag on the
-      // glassdoor entry once a run actually shows cross-host detail failures.
-      // Don't infer from this code that a mixed .com/.ca walk is being
-      // corrected — it isn't.
-      if (cfg.pinToListHost) {
+      // page loaded successfully. Only the navigation target is rewritten;
+      // the row keeps its own URL. DESC_CONFIGS.glassdoor sets this flag, and
+      // descriptionNavigationDecision then refuses anything not on that host.
+      // Glassdoor: open the job page exactly as Glassdoor linked it when the
+      // extractor kept that address (often fr.glassdoor.ca), never pinned.
+      const glassdoorAsLinked = glassdoorJobPage && typeof job.glassdoorJobPageUrl === 'string'
+        ? job.glassdoorJobPageUrl.trim() : '';
+      if (glassdoorAsLinked) {
+        viewUrl = glassdoorAsLinked;
+      } else if (cfg.pinToListHost) {
         viewUrl = pinGlassdoorDetailUrlToListHost(viewUrl, listUrl);
       }
       viewUrl = normalizeDetailNavigationUrl(viewUrl);
 
-      if (!shouldNavigateForDescription(sourceId, viewUrl)) {
+      if (!shouldNavigateForDescription(sourceId, viewUrl, { listUrl })) {
         const title = (job.title || job.url || '?').slice(0, 65);
         logger.info(`[BrowserScraper] ${overlayBase.srcName} skipped unsupported detail URL while enriching "${title}"`);
+        // Glassdoor: the row goes to the panel, which may still recover it.
+        if (glassdoorJobPage) {
+          jobPageRoute.silentMisses += 1;
+          continue;
+        }
         recordManualScraperTelemetry({
           phase: 'desc-miss', srcName: overlayBase.srcName,
           key: `${title} | unsupported detail URL skipped`,
@@ -202,9 +243,9 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
       const navPause = await waitIfPaused(interactionPage, signal);
       if (navPause === 'abort') break;
 
-      const detailGapMs = sourceId === 'ziprecruiter'
-        ? zipRecruiterDetailGapMs(solvedDetailChallenges)
-        : 0;
+      const detailGapMs = sourceId === 'ziprecruiter' && !measurementPacingOff(sourceId)
+        ? Math.max(zipRecruiterDetailGapMs(solvedDetailChallenges), rateLimitedGapMs)
+        : glassdoorJobPage ? glassdoorJobPageGapMs(rateLimitedGapMs) : 0;
       // Pace telemetry (diagnostics only): the deliberate spacing wait is one of
       // the three places a slow run's wall time hides. This is a timestamp only;
       // the wait below is untouched.
@@ -247,13 +288,18 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
         const detailOpenStartedAt = Date.now();
         try {
           if (detailGapMs > 0) lastDetailNavigationAt = Date.now();
-          navigationResponse = await fetchPage.goto(viewUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
+          // Glassdoor's job pages were measured with the list page as Referer.
+          navigationResponse = await fetchPage.goto(viewUrl, {
+            waitUntil: 'domcontentloaded', timeout: 12000,
+            ...(glassdoorJobPage ? { referer: listUrl } : {}),
+          });
         } catch (error) {
           navigationError = error;
         }
         // Pace telemetry (diagnostics only): counts the detail page opened and
         // adds its load time — a failed goto still consumed that time, so it is
         // recorded here rather than only on success. Fail-soft.
+        if (glassdoorJobPage) jobPageRoute.opened += 1;
         notePaceDetailOpened(sourceId, {
           srcName: overlayBase.srcName,
           queryIndex: overlayBase?.queryIndex,
@@ -291,6 +337,10 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
             break;
           }
           logger.warn(`[BrowserScraper] ${overlayBase.srcName} detail navigation failed for "${job.title || job.url || '?'}": ${reason}`);
+          if (glassdoorJobPage) {
+            jobPageRoute.silentMisses += 1;
+            continue;
+          }
           recordManualScraperTelemetry({
             phase: 'desc-miss', srcName: overlayBase.srcName,
             key: `${(job.title || job.url || '?').slice(0, 65)} | navigation failed`,
@@ -333,7 +383,8 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
         }
         let detailSawInteractiveChallenge = !!challengeSignals?.interactive;
         let detailTerminalSince = null;
-        if (challengeSignals?.isChallenge) {
+        // Glassdoor never waits on a challenge: its verdict below acts at once.
+        if (challengeSignals?.isChallenge && !glassdoorJobPage) {
           if (!await waitForAbortableDelay(DETAIL_CHALLENGE_SETTLE_MS, signal)) break;
           challengeSignals = await getChallengeSignals(fetchPage);
         }
@@ -381,6 +432,66 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
           httpStatus: navigationStatus,
           zipRecruiterClosedJobRedirect: isZipRecruiterClosedDetailRedirect(rawPageInfo.finalUrl),
         };
+
+        // Glassdoor job page: a 429, an unreadable page or any challenge ends
+        // this route here, with no retry, no wait for a person and no
+        // foreground. The rows from this one on stay 'pending' for the panel;
+        // the detail tab closes in finally. A 429/Security page, an unreadable
+        // probe or a page with no JobPosting description is probed ONCE more
+        // after a short settle, because Cloudflare can inject its widget after
+        // DOMContentLoaded; the verdict is taken from that second read.
+        if (glassdoorJobPage) {
+          const readJobPostingDescription = () => fetchPage.evaluate(() => {
+            const isPosting = (t) => (Array.isArray(t) ? t.includes('JobPosting') : t === 'JobPosting');
+            for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+              try {
+                const parsed = JSON.parse(script.textContent);
+                for (const root of (Array.isArray(parsed) ? parsed : [parsed])) {
+                  const nodes = [root, ...(Array.isArray(root?.['@graph']) ? root['@graph'] : [])];
+                  if (nodes.some(node => node && isPosting(node['@type']) && String(node.description || '').trim())) return true;
+                }
+              } catch { /* malformed JSON-LD */ }
+            }
+            return false;
+          }).catch(() => null);
+          let hasJobPostingDescription = await readJobPostingDescription();
+          let verdict = glassdoorJobPageVerdict({ httpStatus: navigationStatus, signals: challengeSignals, hasJobPostingDescription });
+          if (verdict !== 'challenge'
+            && (glassdoorJobPageNeedsReprobe({ httpStatus: navigationStatus, signals: challengeSignals }) || hasJobPostingDescription !== true)) {
+            if (!await (runtime?.delay || waitForAbortableDelay)(GLASSDOOR_JOB_PAGE_SETTLE_MS, signal)) break;
+            challengeSignals = await getChallengeSignals(fetchPage);
+            hasJobPostingDescription = await readJobPostingDescription();
+            verdict = glassdoorJobPageVerdict({ httpStatus: navigationStatus, signals: challengeSignals, hasJobPostingDescription });
+          }
+          // A page this route reads as 'ok' never enters the generic detail
+          // challenge branch below (its foreground solve wait is not for
+          // Glassdoor): the posting is read, or the row goes to the panel.
+          if (verdict === 'ok') detailChallengeAction = 'none';
+          if (verdict !== 'ok') {
+            const signalCodes = glassdoorJobPageSignalCodes({ httpStatus: navigationStatus, signals: challengeSignals, hasJobPostingDescription });
+            logger.info(`[BrowserScraper] ${overlayBase.srcName} job-page stop signals: verdict=${verdict} ${formatGlassdoorJobPageSignalCodes(signalCodes)}`);
+            const ladder = verdict === 'rate-limited'
+              ? noteGlassdoorJobPageRateLimit(glassdoorRouteState)
+              : verdict === 'unreadable'
+                ? noteGlassdoorJobPageUnreadable(glassdoorRouteState)
+                : noteGlassdoorJobPageChallenge(glassdoorRouteState);
+            if (verdict === 'rate-limited') {
+              rateLimitedGapMs = Math.max(rateLimitedGapMs, GLASSDOOR_JOB_PAGE_RATE_LIMITED_GAP_MS);
+            }
+            jobPageRoute.stopReason = ladder.stopReason;
+            const handedToPanel = enhanced.length - i;
+            logger.warn(`[BrowserScraper] ${overlayBase.srcName} job page ${verdict === 'rate-limited' ? 'rate-limited' : verdict === 'unreadable' ? 'could not be read twice' : 'showed a check'} (${ladder.stopReason}); ${handedToPanel} row(s) go to the list-card panel${glassdoorRouteState.off ? '; job pages off for the rest of this source run' : `; later batches wait ${Math.round(glassdoorJobPageGapMs(rateLimitedGapMs) / 1000)}s between job pages`}`);
+            recordManualScraperTelemetry({
+              phase: 'detail-job-page-route-stop', sourceId, srcName: overlayBase.srcName,
+              reason: ladder.stopReason, status: navigationStatus,
+              challengeReason: verdict === 'challenge' ? (challengeSignals?.reason || null) : null,
+              itemIndex: i + 1, itemTotal: enhanced.length, handedToPanel,
+              routeOff: !!glassdoorRouteState.off,
+              verdict, signals: signalCodes,
+            }, { updateActive: false });
+            break;
+          }
+        }
 
         // Appcast shows its restriction either as page text or inside
         // DataDome's block frame. The frame can arrive after the first probe,
@@ -474,7 +585,8 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
           }, { updateActive: false });
           if (zipRecruiter429Retries < ZIPRECRUITER_429_RETRIES && !signal?.aborted) {
             zipRecruiter429Retries++;
-            logger.warn(`[BrowserScraper] ${overlayBase.srcName} detail fetch rate-limited for "${title}" — waiting ${Math.ceil(waitMs / 1000)}s before one retry`);
+            rateLimitedGapMs = Math.max(rateLimitedGapMs, ZIPRECRUITER_RATE_LIMITED_GAP_MS);
+            logger.warn(`[BrowserScraper] ${overlayBase.srcName} detail fetch rate-limited for "${title}" — waiting ${Math.ceil(waitMs / 1000)}s, then continuing with a ${Math.ceil(rateLimitedGapMs / 1000)}s gap (retry ${zipRecruiter429Retries}/${ZIPRECRUITER_429_RETRIES})`);
             await updateOverlay(page, {
               ...overlayBase, count: baseCount + i + 1,
               status: `ZipRecruiter rate-limited — retrying in ${Math.ceil(waitMs / 1000)}s…`,
@@ -486,7 +598,7 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
           logger.warn(`[BrowserScraper] ${overlayBase.srcName} stayed rate-limited after its bounded retry — stopping detail enrichment`);
           descWarning = {
             code: 'description-rate-limited', severity: 'warn',
-            evidence: `${overlayBase.srcName} returned HTTP 429 while fetching "${job.title || 'an untitled listing'}". The scraper waited and retried once, then stopped further detail fetches to avoid extending the rate limit.`,
+            evidence: `${overlayBase.srcName} returned HTTP 429 while fetching "${job.title || 'an untitled listing'}". The scraper waited and retried ${ZIPRECRUITER_429_RETRIES} times with a slower gap, then stopped further detail fetches to avoid extending the rate limit.`,
             suggestion: `Wait a few minutes before rerunning ${overlayBase.srcName}; list results were retained, but this and later rows may lack full descriptions.`,
           };
           const unexpandedCount = enhanced.length - (i + 1);
@@ -898,6 +1010,7 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
             pageInfo, job: enhanced[i], sourceId, expectedUrl: viewUrl, finalUrl: rawPageInfo.finalUrl || fetchPage.url(),
           });
           const keptBoardClosed = boardClosedRow != null;
+          rowOutcomes[i] = 'closed';
           logger.info(`[BrowserScraper] ${overlayBase.srcName} ${keptBoardClosed ? 'kept board-closed' : 'dropped unavailable'} detail listing "${job.title || job.url || '?'}" (${reason})`);
           recordManualScraperTelemetry({
             phase: 'detail-unavailable', srcName: overlayBase.srcName,
@@ -947,7 +1060,7 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
           }
         }
         if (cfg.jsonLdType && !isExternalZipDetail) {
-          const ld = await fetchPage.evaluate((type, field, datePattern) => {
+          const ld = await fetchPage.evaluate((type, field, datePattern, domDateFallback = true) => {
             let desc = '';
             let datePosted = '';
             let baseSalary = null; // schema.org JobPosting.baseSalary (employer-stated pay)
@@ -1007,7 +1120,7 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
             // <p>. Match by TEXT PATTERN (robust to ZR's churning Tailwind class
             // names), taking the first short text leaf that reads like a relative
             // date. Returns the clean phrase ("28 days ago") for parsePostedDate.
-            if (!datePosted) {
+            if (!datePosted && domDateFallback) {
               const re = new RegExp(datePattern, 'i');
               const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
               let node;
@@ -1019,16 +1132,18 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
               }
             }
             return { desc, datePosted, baseSalary, company };
-          }, cfg.jsonLdType, cfg.jsonLdField, POSTED_DATE_PATTERN).catch(() => ({ desc: '', datePosted: '', baseSalary: null, company: '' }));
+            // Glassdoor's page chrome can be French: only its JSON-LD is read.
+          }, cfg.jsonLdType, cfg.jsonLdField, POSTED_DATE_PATTERN, !glassdoorJobPage).catch(() => ({ desc: '', datePosted: '', baseSalary: null, company: '' }));
           text = inertDescriptionText(ld.desc);
-          if (text) descriptionCapture = 'json-ld-job-description';
+          if (text) descriptionCapture = glassdoorJobPage ? 'glassdoor-job-page-json-ld' : 'json-ld-job-description';
           jsonLdDate = ld.datePosted;
-          jsonLdSalary = formatJsonLdSalary(ld.baseSalary);
+          // Glassdoor writes the currency the way its own list chips do.
+          jsonLdSalary = glassdoorJobPage ? glassdoorJobPageSalary(ld.baseSalary, listUrl) : formatJsonLdSalary(ld.baseSalary);
           if (jsonLdSalary) jsonLdSalaryProvenance = sourceId === 'google' ? 'unknown' : 'posted';
           jsonLdCompany = ld.company;
         }
         // __NEXT_DATA__ fallback: walk a dot-separated field path into pageProps.
-        if (!text && cfg.nextDataField && !isExternalZipDetail) {
+        if (!text && cfg.nextDataField && !isExternalZipDetail && !glassdoorJobPage) {
           text = await fetchPage.evaluate(fieldPath => {
             try {
               const nd = JSON.parse(document.getElementById('__NEXT_DATA__')?.textContent || 'null');
@@ -1048,13 +1163,13 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
           text = inertDescriptionText(text);
           if (text) descriptionCapture = 'next-data-job-description';
         }
-        if (!text && !isExternalZipDetail) {
+        if (!text && !isExternalZipDetail && !glassdoorJobPage) {
           text = await fetchPage.evaluate(sel => {
             return document.querySelector(sel)?.innerText?.trim() || '';
           }, cfg.panelSelector).catch(() => '');
           if (text) descriptionCapture = 'detail-page-description';
         }
-        if (!text && !isExternalZipDetail) {
+        if (!text && !isExternalZipDetail && !glassdoorJobPage) {
           // Structural fallback: find "Job description" heading and grab next sibling.
           text = await fetchPage.evaluate(() => {
             for (const h of document.querySelectorAll('h2, h3')) {
@@ -1066,7 +1181,7 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
           }).catch(() => '');
           if (text) descriptionCapture = 'detail-page-description';
         }
-        if (!text && !isExternalZipDetail) {
+        if (!text && !isExternalZipDetail && !glassdoorJobPage) {
           // Some detail pages hydrate their visible description shortly after
           // DOMContentLoaded. Wait for ANY supported carrier, not only the CSS
           // panel: React/Next pages can inject JSON-LD or __NEXT_DATA__ first.
@@ -1197,6 +1312,14 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
           }, ZIPRECRUITER_MONEY_SRC).catch(() => '');
           if (jsonLdSalary) jsonLdSalaryProvenance = 'estimated';
         }
+        // Glassdoor: no JobPosting JSON-LD description is a miss for the
+        // fallback, not an error. The row is left exactly as the list gave it
+        // ('pending') and the panel walk reads it; nothing is reported here, so
+        // a row the panel recovers never shows up as a miss.
+        if (glassdoorJobPage && !text) {
+          logger.info(`[BrowserScraper] ${overlayBase.srcName} job page ${i + 1}/${enhanced.length} had no JobPosting description (HTTP ${navigationStatus ?? '?'}); left for the list-card panel`);
+          continue;
+        }
         // Record every partial row in the dedicated anomaly ring. The rich page
         // context below remains first-only so one degraded batch cannot crowd out
         // all other telemetry, but this lightweight row preserves exact affected
@@ -1288,6 +1411,7 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
           enhanced[i] = stamped;
         }
         if (text) expandedCount++;
+        if (text) rowOutcomes[i] = 'expanded';
         // Date-miss diagnostic (once per batch): a description was recovered but
         // NO posted date — not from the list extractor, the JobPosting JSON-LD,
         // OR the visible "Posted X ago" DOM fallback. Capture the JSON-LD @types
@@ -1330,6 +1454,11 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
         // Per-listing navigation errors are non-fatal; keep the batch moving.
         const reason = String(error?.message || error).replace(/\s+/g, ' ').slice(0, 180);
         logger.warn(`[BrowserScraper] ${overlayBase.srcName} detail extraction failed for "${job.title || job.url || '?'}": ${reason}`);
+        if (glassdoorJobPage) {
+          // Row stays 'pending' for the panel; only a panel miss is reported.
+          jobPageRoute.silentMisses += 1;
+          continue;
+        }
         recordManualScraperTelemetry({
           phase: 'desc-miss', srcName: overlayBase.srcName,
           key: `${(job.title || job.url || '?').slice(0, 65)} | detail extraction error`,
@@ -1348,6 +1477,7 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
   } finally {
     detailPacing.lastNavigationAt = lastDetailNavigationAt;
     detailPacing.solvedChallenges = solvedDetailChallenges;
+    detailPacing.rateLimitedGapMs = rateLimitedGapMs;
     unlinkDetailOverlays();
     await detailPage?.close().catch(() => {});
     if (keepDetailForeground) await page.bringToFront().catch(() => {});
@@ -1372,6 +1502,10 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
   });
   return {
     jobs: enhanced.filter(Boolean),
+    // Aligned with the input (a retired row is null), for the Glassdoor merge.
+    rows: enhanced,
+    rowOutcomes,
+    jobPageRoute,
     descError: null,
     descWarning,
     expandedCount,

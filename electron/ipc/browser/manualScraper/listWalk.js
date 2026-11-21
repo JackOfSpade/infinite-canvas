@@ -3,6 +3,7 @@ import {
   CONTENT_TIMEOUT_MS,
   SCROLL_SOURCES,
   NEXT_PAGE_SELECTORS,
+  HARD_NAVIGATION_PAGER_SOURCES,
   SOURCE_LABELS,
   parseClaimedResultTotal,
 } from './walkRules.js';
@@ -118,7 +119,7 @@ export async function clickNextPage(page, sourceId) {
   if (!sel && SCROLL_SOURCES.has(sourceId)) return { clicked: false, unhandled: null };
   if (!sel) return { clicked: false, unhandled: await inspectNextPageControl(page) };
   try {
-    const clicked = await page.evaluate((s, allowLabelFallback) => {
+    const clicked = await page.evaluate((s, allowLabelFallback, hardNavigation) => {
       const usable = el => {
         if (!el || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
         const style = window.getComputedStyle(el);
@@ -130,9 +131,18 @@ export async function clickNextPage(page, sourceId) {
             .some(label => /^next\s+page$/i.test(String(label || '').trim()))
         )));
       if (!btn) return false;
+      // A same-origin link href becomes a real navigation, so the next page's
+      // server-rendered data replaces the old document (HARD_NAVIGATION_PAGER_SOURCES).
+      if (hardNavigation && btn.tagName === 'A' && btn.href) {
+        const target = new URL(btn.href, location.href);
+        if (target.origin === location.origin) {
+          window.location.assign(target.href);
+          return true;
+        }
+      }
       btn.click();
       return true;
-    }, sel, sourceId === 'ziprecruiter');
+    }, sel, sourceId === 'ziprecruiter', HARD_NAVIGATION_PAGER_SOURCES.has(sourceId));
     return { clicked, unhandled: clicked ? null : await inspectNextPageControl(page) };
   } catch {
     return { clicked: false, unhandled: await inspectNextPageControl(page) };

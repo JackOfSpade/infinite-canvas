@@ -14,6 +14,28 @@
 export const SAVED_HANDOFF_READY_MESSAGE =
   'Saved AI handoff ready. Choose Continue saved AI handoff to resume this exact Board run.';
 
+// The same saved pause taken while the Board is still running its Searches.
+// No AI handoff exists yet in that phase, so it is named as a search.
+export const SAVED_SEARCH_PAUSE_MESSAGE =
+  'Search paused and saved. Choose Continue search to resume this exact Board run.';
+
+// The Continue button label for the search-phase pause above.
+export const CONTINUE_SEARCH_ACTION_LABEL = 'Continue search';
+
+// Which saved-pause notice a paused Board publishes. Only a searches-phase
+// plan with no Board AI handoff marker is a search pause; every other saved
+// pause (a Combine handoff, or a plan of any other phase) keeps the AI-handoff
+// notice and its behaviour unchanged.
+export function savedPauseMessageForPlan(plan, manualAiResume = null) {
+  const searchesPhase = !!plan && (!plan.phase || plan.phase === 'searches');
+  return searchesPhase && !manualAiResume ? SAVED_SEARCH_PAUSE_MESSAGE : SAVED_HANDOFF_READY_MESSAGE;
+}
+
+// Either saved-pause notice: both mean "waiting for Continue", never a failure.
+export function isSavedPauseNotice(message) {
+  return message === SAVED_HANDOFF_READY_MESSAGE || message === SAVED_SEARCH_PAUSE_MESSAGE;
+}
+
 // Reports which of the three pre-commit invariants failed, in the same
 // priority order the guard historically evaluated them. Any non-true value
 // counts as failing so callers can pass raw boolean expressions directly.

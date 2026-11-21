@@ -346,17 +346,23 @@ export function isLinkedInGuestPageLimit(response, start) {
  */
 export function linkedInApiRequestPacing({ requestsIssued = 0 } = {}) {
   const issued = Math.max(0, Math.floor(Number(requestsIssued) || 0));
-  const checkpointEvery = 3;
   return {
     // The first request has no predecessor; every following request gets this
     // minimum gap, including page-0 of the next query module.
-    requestDelayMs: 6000,
+    //
+    // Measured live 2026-11-20, same IP, 12 minutes per arm with the real
+    // walk and its 429 retry ladder: 6s + a 20s pause every 3rd request gave
+    // 22 rows/min (11 of 55 requests throttled); 6s alone 22 rows/min; 2s
+    // with no pause 41 rows/min (18 of 77); no gap 39 rows/min (25 of 89).
+    // The guest limit is a rolling window: a 429 arrives at any spacing and
+    // the retry ladder absorbs it, so a long gap only spends the time the
+    // retry would have. 2s is the throughput peak. The every-3rd pause gave
+    // no protection: 37% of first 429s on 11-20 came right after it.
+    requestDelayMs: 2000,
     delayDue: issued > 0,
-    checkpointEvery,
-    // Pause before request 4, 7, ... so a long multi-query walk does not turn
-    // a sequence of individually-safe gaps into a rolling-window burst.
-    checkpointDue: issued > 0 && issued % checkpointEvery === 0,
-    checkpointCooldownMs: 20000,
+    checkpointEvery: null,
+    checkpointDue: false,
+    checkpointCooldownMs: 0,
   };
 }
 
@@ -426,6 +432,16 @@ export function linkedInNextStart(start, cardCount) {
  */
 export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = null, location = '', onProgress = null, {
   throttleRetryWaitsMs = LINKEDIN_THROTTLE_RETRY_WAITS_MS,
+  // Durable per-query checkpoint, awaited after a query's walk ends cleanly
+  // (the same condition that adds it to `finishedQueries`). `queryIndex` is
+  // the position in THIS call's query list; `jobs` are the rows that query
+  // added to the output (cross-query repeats were already returned by an
+  // earlier query). A throw propagates: a saved canvas must not keep walking
+  // past a checkpoint it could not write.
+  onQueryFinished = null,
+  // Request-pacing policy. Production always uses the guest-API cadence; the
+  // unit suite passes a no-wait policy so a multi-query walk runs instantly.
+  requestPacing = linkedInApiRequestPacing,
 } = {}) {
   const locParam = String(location || '').trim();
   const queryList = Array.isArray(queries) ? queries : [queries];
@@ -463,10 +479,10 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     }
     // Walk until the provider is exhausted or demonstrably no-progress.
     // LinkedIn's guest API is heavily anti-bot, so depth is PACED, not blitzed:
-    //   • a human-scale gap before every request after the first plus a small
-    //     rolling-window checkpoint. One counter spans page walks AND query
+    //   • the measured 2s gap before every request after the first (see
+    //     linkedInApiRequestPacing). One counter spans page walks AND query
     //     modules, so a one-page module cannot make the next module's page 0
-    //     arrive at the old shorter 4.5s cadence,
+    //     skip the gap,
     //   • an early-exit the moment a page returns no cards, or no card this
     //     QUERY has not already seen (below), so a low-volume query never walks
     //     every page — we only go deep when results justify it. Freshness is
@@ -478,6 +494,7 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     // Freshness is tracked per query; `seenUrls` remains the run-wide OUTPUT
     // dedup so the same posting is never returned twice across queries.
     const seenInThisQuery = new Set();
+    const rowsBeforeQuery = allJobs.length;
     const warningBeforeQuery = warning;
     let firstPageUnanswered = false;
     let stopReason = null;
@@ -489,7 +506,7 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     for (let start = 0; ;) {
       if (signal?.aborted) break;
       pageIndex++;
-      const pacing = linkedInApiRequestPacing({ requestsIssued: apiRequestsIssued });
+      const pacing = requestPacing({ requestsIssued: apiRequestsIssued });
       if (pacing.delayDue) {
         if (pacing.checkpointDue) {
           logger.info(`[LinkedIn API] pausing at least ${Math.ceil(pacing.checkpointCooldownMs / 1000)}s after ${apiRequestsIssued} request(s) to drain the guest search window`);
@@ -692,6 +709,14 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     if (!signal?.aborted && warning === warningBeforeQuery && !firstPageUnanswered
       && stopReason !== 'blocked' && stopReason !== 'aborted') {
       finishedQueries.push(query);
+      if (typeof onQueryFinished === 'function') {
+        await onQueryFinished({
+          queryIndex: qi,
+          query,
+          jobs: allJobs.slice(rowsBeforeQuery),
+          pages: Math.max(1, pageIndex + 1),
+        });
+      }
     }
   }
 

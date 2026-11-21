@@ -4,8 +4,8 @@ import {
   canRetryBoardRecoveryAfterError,
   terminalJobSearchOutcome,
 } from '../../src/utils/jobBoardPausedSourceContinuation.js';
-import { SAVED_HANDOFF_READY_MESSAGE } from '../../src/nodes/jobboard/boardRecoveryNotice.js';
-import { boardSelectorRuntimeSummary } from '../../electron/ipc/bugReport/jobsSnapshot.js';
+import { SAVED_HANDOFF_READY_MESSAGE, SAVED_SEARCH_PAUSE_MESSAGE } from '../../src/nodes/jobboard/boardRecoveryNotice.js';
+import { boardSelectorRuntimeDiagnostic, boardSelectorRuntimeSummary, recoveryClaimMap, sourceSelectorAdmissionDiagnostic } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 
 // The exact source generation the paused Board recorded in
 // `boardScanResume.awaitingSourceResolution.jobRunId`.
@@ -192,6 +192,7 @@ export default [
       // not clear either published saved-pause message.
       for (const pausedMessage of [
         SAVED_HANDOFF_READY_MESSAGE,
+        SAVED_SEARCH_PAUSE_MESSAGE,
         'This Job Search is paused with its saved work. Continue from the Job Board when ready.',
       ]) {
         assert.strictEqual(
@@ -243,6 +244,70 @@ export default [
         boardSelectorRuntimeSummary({ ...sanitized, recoveryErrorLatch: 'Job Search failed', awaitedSource: AWAITED_RUN }),
         'rows=not retained · selected=not retained · action=not retained · reasons=none · selector=not retained · source-list=not retained · recovery-error-latch=not retained · awaited-source=not retained',
       );
+    },
+  },
+  {
+    name: 'boardSelectorRuntimeSummary names the recovery controls a paused Board shows instead of the hidden Search button',
+    run() {
+      const snapshot = boardSelectorRuntimeDiagnostic({
+        rowCount: 2,
+        selectedCount: 1,
+        actionEligible: false,
+        actionVisible: true,
+        actionLabel: 'Search selected & combine',
+        eligibilityReasons: ['recovery-error'],
+        renderedAction: 'recovery',
+        recoveryActionAvailable: true,
+        recoveryActionLabel: 'Continue search',
+        finishSavedAvailable: true,
+        recoveryErrorLatch: 'paused-continue',
+        awaitedSource: 'none',
+      });
+      assert.strictEqual(
+        boardSelectorRuntimeSummary(snapshot),
+        'rows=2 · selected=1 · action=hidden (recovery controls shown) · rendered=recovery · recovery-action=Continue search (available) · finish-saved=available · reasons=recovery-error · selector=not retained · source-list=not retained · recovery-error-latch=paused-continue · awaited-source=none',
+      );
+      const running = boardSelectorRuntimeDiagnostic({
+        rowCount: 1, selectedCount: 1, actionEligible: true, actionVisible: true,
+        actionLabel: 'Search selected & combine', eligibilityReasons: [], renderedAction: 'run',
+        recoveryActionAvailable: null, recoveryActionLabel: '', finishSavedAvailable: null,
+      });
+      assert.match(boardSelectorRuntimeSummary(running), /action=enabled \(Search selected & combine\) · rendered=run · reasons=none/);
+      // Free text never reaches the report.
+      const hostile = boardSelectorRuntimeDiagnostic({ renderedAction: 'recovery', recoveryActionLabel: 'run id abc', recoveryActionAvailable: 'yes' });
+      assert.strictEqual(hostile.recoveryActionLabel, null);
+      assert.strictEqual(hostile.recoveryActionAvailable, null);
+      assert.match(boardSelectorRuntimeSummary(hostile), /recovery-action=not retained \(not retained\)/);
+    },
+  },
+  {
+    name: 'Source admission diagnostics name a paused Board run as the owner instead of asking for a career re-import',
+    run() {
+      const source = { id: 'source-1', data: { hubState: 'empty' } };
+      assert.deepStrictEqual(
+        sourceSelectorAdmissionDiagnostic(source, 'fresh-import-requires-clear'),
+        { ready: false, status: 'Re-import career data', reason: 'admission:fresh-import-requires-clear' },
+        'with no paused Board claim the old verdict stands',
+      );
+      assert.deepStrictEqual(
+        sourceSelectorAdmissionDiagnostic(source, 'fresh-import-requires-clear', { heldByPausedBoardRun: true }),
+        { ready: false, status: 'Held by paused Board run', reason: 'admission:fresh-import-requires-clear · recovery-claim:paused-board-scan' },
+      );
+      assert.strictEqual(
+        sourceSelectorAdmissionDiagnostic(source, 'terminal-requires-fresh-input', { heldByPausedBoardRun: true }).status,
+        'Re-import career data',
+        'only the spent-input case the paused run explains is reworded',
+      );
+      const rows = paused => [{
+        board: { id: 'board-1' }, scope: 'root', connectedIds: ['source-1'],
+        resume: { version: 1, boardRunId: 'board-run', phase: 'searches', selectedSearchModuleIds: ['source-1'],
+          activeSourceId: 'source-1', ...(paused ? { pausedByUser: true, autoResumeEligible: false } : {}) },
+      }];
+      const pausedClaims = recoveryClaimMap(rows(true)).get('root').get('source-1');
+      assert(pausedClaims.length > 0 && pausedClaims.every(claim => claim.paused === true));
+      const liveClaims = recoveryClaimMap(rows(false)).get('root').get('source-1');
+      assert(liveClaims.length > 0 && liveClaims.every(claim => claim.paused === false),
+        'a Board run that is still live is not reported as paused');
     },
   },
 ];

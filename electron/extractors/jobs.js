@@ -125,6 +125,23 @@ export const GLASSDOOR_EXTRACTOR = `
       return /^https?:$/.test(parsed.protocol) ? parsed.href : '';
     } catch { return ''; }
   };
+  // The job-page address exactly as Glassdoor linked it, BEFORE the language-host
+  // rewrite above. Glassdoor's own English www.glassdoor.ca search links its cards
+  // to fr.glassdoor.ca/job-listing/... (30/30 live, 2026-11-20); those pages served
+  // full JobPosting JSON-LD, while the rewritten www. job page drew Cloudflare's
+  // "Just a moment..." / 403 "Security | Glassdoor" + hard-block text. The
+  // description route opens this address; the saved url above stays www. for the
+  // person's card and dedup. Only an https first-party /job-listing/ URL qualifies.
+  const jobPageUrl = (value) => {
+    if (typeof value !== 'string' || !value.trim()) return '';
+    try {
+      const parsed = new URL(value, gdOrigin + '/');
+      return parsed.protocol === 'https:'
+        && /(?:^|\.)glassdoor\.[a-z.]+$/i.test(parsed.hostname)
+        && parsed.pathname.startsWith('/job-listing/')
+        ? parsed.href : '';
+    } catch { return ''; }
+  };
 
   // Strategy 0: believe the board's own stated count.
   //
@@ -161,6 +178,7 @@ export const GLASSDOOR_EXTRACTOR = `
                       (value.__typename && value.__typename.includes('Job'));
         if (!isJob || !value.jobTitleText) continue;
         const employer = value.employer ? cache[value.employer.__ref || ''] || value.employer : {};
+        const glassdoorJobPageUrl = jobPageUrl(value.seoJobLink) || jobPageUrl(value.jobLink);
         jobs.push({
           title: value.jobTitleText || value.jobTitle || '',
           company: employer.shortName || employer.name || value.employerName || '',
@@ -170,7 +188,8 @@ export const GLASSDOOR_EXTRACTOR = `
           snippet: (employer.overallRating ? 'Rating: ' + employer.overallRating + '/5 | ' : '') + (value.jobDescription || ''),
           url: listingUrl(value.seoJobLink) || listingUrl(value.jobLink),
           posted: value.ageInDays != null ? (value.ageInDays + 'd ago') : '',
-          source: 'glassdoor'
+          source: 'glassdoor',
+          ...(glassdoorJobPageUrl ? { glassdoorJobPageUrl } : {})
         });
       }
     }
@@ -221,7 +240,9 @@ export const GLASSDOOR_EXTRACTOR = `
         const dateEl = card.querySelector('[data-test="job-age"], [class*="jobAge"]');
         const posted = dateEl?.innerText?.trim() || '';
 
-        jobs.push({ title, company, location, salary, salaryProvenance: 'unknown', snippet: '', url, posted, source: 'glassdoor' });
+        const glassdoorJobPageUrl = jobPageUrl(href);
+        jobs.push({ title, company, location, salary, salaryProvenance: 'unknown', snippet: '', url, posted, source: 'glassdoor',
+          ...(glassdoorJobPageUrl ? { glassdoorJobPageUrl } : {}) });
       } catch {}
     });
   }

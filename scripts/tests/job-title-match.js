@@ -104,15 +104,14 @@ export default [
       const fourth = linkedInApiRequestPacing({ requestsIssued: 3 });
       assert(!first.delayDue && !first.checkpointDue,
         'the first LinkedIn search request has no prior provider request to delay');
-      assert(second.delayDue && second.requestDelayMs === 6000 && !second.checkpointDue,
-        'every subsequent request, including a next query module page 0, has the same minimum gap');
-      assert(fourth.delayDue && fourth.checkpointDue && fourth.checkpointEvery === 3
-        && fourth.checkpointCooldownMs === 20000,
-      'before each fourth guest-search request, drain the rolling window without retrying a 429');
-      assert(linkedInPacingWaitMs(second) === 6000
-        && linkedInPacingWaitMs(fourth) === 20000
+      assert(second.delayDue && second.requestDelayMs === 2000 && !second.checkpointDue,
+        'every subsequent request, including a next query module page 0, has the same measured 2s gap');
+      assert(!fourth.checkpointDue && fourth.checkpointEvery === null && fourth.checkpointCooldownMs === 0,
+        'no extra pause every few requests: it measured no protection against the rolling-window 429');
+      assert(linkedInPacingWaitMs(second) === 2000
+        && linkedInPacingWaitMs(fourth) === 2000
         && linkedInPacingWaitMs({ requestDelayMs: 6000, checkpointDue: true, checkpointCooldownMs: 1000 }) === 6000,
-      'the actual pre-dispatch wait is one long checkpoint when it covers the ordinary gap, while a future short checkpoint still preserves the normal minimum');
+      'the actual pre-dispatch wait is the ordinary gap, and a short checkpoint can never weaken the minimum');
       return { gapMs: second.requestDelayMs, checkpointMs: fourth.checkpointCooldownMs, checkpointWaitMs: linkedInPacingWaitMs(fourth) };
     },
   },

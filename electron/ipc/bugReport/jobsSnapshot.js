@@ -55,6 +55,24 @@ export function renderScrapePaceLines(pace, now = Date.now()) {
     .map(line => `  - ${line}`);
 }
 
+// Glassdoor's job-page → panel-fallback route on its card-walk summary line.
+// Fixed codes and counts only; an unknown stop code is printed as 'unknown'.
+const CARD_WALK_ROUTE_STOP_CODES = new Set(['none', 'unreadable', '429-first', '429-second', 'challenge']);
+const CARD_WALK_PANEL_BLOCK_CODES = new Set(['armed', 'deferred', 'reprobe-failed', 'recovered']);
+export function describeCardWalkDescriptionRoute(route) {
+  if (!route || typeof route !== 'object' || Array.isArray(route)) return [];
+  const n = value => Math.max(0, Math.floor(Number(value) || 0));
+  const code = value => (CARD_WALK_ROUTE_STOP_CODES.has(value) ? value : 'unknown');
+  return [
+    `job-page ${n(route.fromJobPage)}/${n(route.jobPageEligible)} described (${n(route.jobPageOpened)} opened${n(route.jobPageClosed) > 0 ? `, ${n(route.jobPageClosed)} closed` : ''})`,
+    `panel-fallback ${n(route.fromPanel)}/${n(route.panelFallback)} described`,
+    `job-page-stop ${code(route.stopReason)}${route.routeOffAtStart === true ? ' (route already off)' : ''}`,
+    `source job-page-stop ${code(route.sourceStopReason)}`,
+    ...(n(route.silentMisses) > 0 ? [`job-page-unread ${n(route.silentMisses)} (sent to panel)`] : []),
+    ...(CARD_WALK_PANEL_BLOCK_CODES.has(route.panelBlock) ? [`panel-only-block ${route.panelBlock}`] : []),
+  ];
+}
+
 /**
  * Scrape Alarms entries for the current search's per-source health failures.
  * Pure: takes jobs telemetry `search` (`{ bySource }`) and returns only a site
@@ -2702,6 +2720,9 @@ const RECOVERY_PAGE_RESUME_SOURCES = Object.freeze({
   ziprecruiter: 'addressable',
   google: 'one-view',
   glassdoor: 'replay',
+  // LinkedIn (pure HTTP) checkpoints whole finished queries only: a terminal
+  // query is skipped, every other query is walked again from its first page.
+  linkedin: 'query-restart',
 });
 
 function durableRecoveryPage(value) {
@@ -2816,6 +2837,9 @@ function formatRecoveryQueryResumePlans(run) {
       if (strategy === 'one-view') {
         skippedOneView += 1;
         if (slotDetails.length < RECOVERY_QUERY_SLOT_RENDER_LIMIT) slotDetails.push(`${slot}: durable page ${cursor.page} → skip (one view)`);
+      } else if (strategy === 'query-restart') {
+        unaddressableReplay += 1;
+        if (slotDetails.length < RECOVERY_QUERY_SLOT_RENDER_LIMIT) slotDetails.push(`${slot}: durable page ${cursor.page} without a finished-query marker → restart 1 (query-level checkpoint)`);
       } else if (strategy === 'replay') {
         unaddressableReplay += 1;
         if (slotDetails.length < RECOVERY_QUERY_SLOT_RENDER_LIMIT) slotDetails.push(`${slot}: durable page ${cursor.page} → replay from 1 (load-more view)`);
@@ -4094,7 +4118,8 @@ function sourceAdmissionKind(source, boardId = null) {
 // platform-verification state, and the current Board-owner election. Report
 // only the persisted gates whose outcome is exact here; call out the remaining
 // fresh/setup case rather than falsely claiming the disabled button was ready.
-function sourceSelectorAdmissionDiagnostic(source, admissionKind) {
+// Exported for the regression test of the paused-Board ownership wording.
+export function sourceSelectorAdmissionDiagnostic(source, admissionKind, { heldByPausedBoardRun = false } = {}) {
   const data = diagnosticSourceData(source);
   const hubState = receiptIdentifier(boardDiagnosticValue(data, 'hubState'), 'empty');
   if (boardDiagnosticValue(data, 'locked') === true) {
@@ -4115,6 +4140,12 @@ function sourceSelectorAdmissionDiagnostic(source, admissionKind) {
   }
   if (admissionKind === 'rescrape-cooldown') {
     return { ready: true, status: 'Searched recently (skipped)', reason: 'admission:rescrape-cooldown' };
+  }
+  if (admissionKind === 'fresh-import-requires-clear' && heldByPausedBoardRun) {
+    // A paused Board scan claims this source and its saved run is what spent
+    // the career input. The way forward is that run's Continue, not a
+    // re-import; say only what the claim and the paused plan prove.
+    return { ready: false, status: 'Held by paused Board run', reason: `admission:${admissionKind} · recovery-claim:paused-board-scan` };
   }
   if (admissionKind === 'terminal-requires-fresh-input' || admissionKind === 'fresh-import-requires-clear') {
     return { ready: false, status: 'Re-import career data', reason: `admission:${admissionKind}` };
@@ -4192,9 +4223,10 @@ function recoveryCombineSourceIds(value) {
     .map(entry => boardDiagnosticValue(entry, 'sourceId')));
 }
 
-function recoveryClaimMap(rows) {
+// Exported for the regression test of paused-plan claims.
+export function recoveryClaimMap(rows) {
   const claimsByScope = new Map();
-  const add = (scope, connectedSourceIds, sourceIds, boardId, category) => {
+  const add = (scope, connectedSourceIds, sourceIds, boardId, category, paused = false) => {
     const safeBoardId = opaqueHubIdForCorrelation(boardId);
     if (!safeBoardId) return;
     const connected = new Set(diagnosticOpaqueIds(connectedSourceIds));
@@ -4203,7 +4235,7 @@ function recoveryClaimMap(rows) {
       if (!connected.has(sourceId)) continue;
       const entries = claims.get(sourceId) || [];
       if (!entries.some(entry => entry.boardId === safeBoardId && entry.category === category)) {
-        entries.push({ boardId: safeBoardId, category });
+        entries.push({ boardId: safeBoardId, category, paused: paused === true });
         claims.set(sourceId, entries);
       }
     }
@@ -4214,7 +4246,12 @@ function recoveryClaimMap(rows) {
     const plan = row.resume;
     const planRunId = recordedRunToken(boardDiagnosticValue(plan, 'boardRunId') || boardDiagnosticValue(plan, 'runId'));
     const connectedIds = row.connectedIds;
-    const addForRow = (sourceIds, category) => add(row.scope, connectedIds, sourceIds, boardId, category);
+    // A Board plan the user paused (Pause & save) or that waits for an
+    // explicit Continue: its claims are held by that saved run.
+    const planPaused = !!plan && typeof plan === 'object' && !Array.isArray(plan)
+      && (boardDiagnosticValue(plan, 'pausedByUser') === true || boardDiagnosticValue(plan, 'autoResumeEligible') === false);
+    const addForRow = (sourceIds, category) => add(row.scope, connectedIds, sourceIds, boardId, category,
+      planPaused && category.startsWith('scan-'));
     if (plan && typeof plan === 'object' && !Array.isArray(plan)
       && boardDiagnosticValue(plan, 'version') === 1 && planRunId) {
       const selected = diagnosticOpaqueIds(boardDiagnosticArray(boardDiagnosticValue(plan, 'selectedSearchModuleIds')) || []);
@@ -4271,9 +4308,12 @@ function connectedSourceDiagnosticSummary(source, selected, claimsByScope, scope
   const shownState = !shownRunId || shownRunId !== boardDiagnosticValue(data, 'jobRunId')
     ? 'no'
     : boardDiagnosticValue(shownMarker, 'boardId') === boardId ? 'this-board' : 'other-board';
-  const selector = sourceSelectorAdmissionDiagnostic(source, admissionKind);
+  const claims = claimsByScope.get(scope)?.get(sourceId) || [];
+  const selector = sourceSelectorAdmissionDiagnostic(source, admissionKind, {
+    heldByPausedBoardRun: claims.some(claim => claim.paused === true),
+  });
   const consumption = sourceConsumptionFacts(source);
-  const claimSummary = (claimsByScope.get(scope)?.get(sourceId) || [])
+  const claimSummary = claims
     .slice(0, MAX_BOARD_DIAGNOSTIC_IDS)
     .map(claim => `${boardDiagnosticIdList([claim.boardId], labelContext)}:${claim.category}`)
     .join(', ');
@@ -4508,7 +4548,12 @@ const JOB_BOARD_SELECTOR_ACTION_LABELS = new Set([
 // Why a paused Board's recovery error is (or is not) retryable, and what its
 // awaited source looks like. Fixed codes only: the report must never carry a
 // rendered message or a run id here.
-const JOB_BOARD_RECOVERY_ERROR_LATCHES = new Set(['none', 'search-retryable', 'sticky']);
+// `paused-continue`: a saved Pause published its Continue notice (search or
+// AI handoff); the retry classification is deliberately not run for it.
+const JOB_BOARD_RECOVERY_ERROR_LATCHES = new Set(['none', 'search-retryable', 'sticky', 'paused-continue']);
+// The control block the selector rendered. Older snapshots have none.
+const JOB_BOARD_SELECTOR_RENDERED_ACTIONS = new Set(['run', 'cancel', 'up-to-date', 'recovery']);
+const JOB_BOARD_RECOVERY_ACTION_LABELS = new Set(['Continue saved AI handoff', 'Continue search', 'Retry recovery']);
 const JOB_BOARD_AWAITED_SOURCE_STATUSES = new Set(['none', 'pending', 'run-changed', 'terminal-match']);
 
 function boundedSelectorCount(value) {
@@ -4528,7 +4573,8 @@ function selectorBoundsDiagnostic(value) {
   return Object.keys(bounds).length > 0 ? bounds : null;
 }
 
-function boardSelectorRuntimeDiagnostic(value) {
+// Exported for the regression test of the allow-listed snapshot fields.
+export function boardSelectorRuntimeDiagnostic(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const reasons = boardDiagnosticArray(boardDiagnosticValue(value, 'eligibilityReasons')) || [];
   return {
@@ -4554,6 +4600,18 @@ function boardSelectorRuntimeDiagnostic(value) {
     awaitedSource: JOB_BOARD_AWAITED_SOURCE_STATUSES.has(boardDiagnosticValue(value, 'awaitedSource'))
       ? boardDiagnosticValue(value, 'awaitedSource')
       : 'not retained',
+    renderedAction: JOB_BOARD_SELECTOR_RENDERED_ACTIONS.has(boardDiagnosticValue(value, 'renderedAction'))
+      ? boardDiagnosticValue(value, 'renderedAction')
+      : null,
+    recoveryActionLabel: JOB_BOARD_RECOVERY_ACTION_LABELS.has(boardDiagnosticValue(value, 'recoveryActionLabel'))
+      ? boardDiagnosticValue(value, 'recoveryActionLabel')
+      : null,
+    recoveryActionAvailable: typeof boardDiagnosticValue(value, 'recoveryActionAvailable') === 'boolean'
+      ? boardDiagnosticValue(value, 'recoveryActionAvailable')
+      : null,
+    finishSavedAvailable: typeof boardDiagnosticValue(value, 'finishSavedAvailable') === 'boolean'
+      ? boardDiagnosticValue(value, 'finishSavedAvailable')
+      : null,
   };
 }
 
@@ -4587,7 +4645,23 @@ export function boardSelectorRuntimeSummary(snapshot) {
   const awaitedSource = JOB_BOARD_AWAITED_SOURCE_STATUSES.has(snapshot.awaitedSource)
     ? snapshot.awaitedSource
     : 'not retained';
-  return `rows=${snapshot.rowCount ?? 'not retained'} · selected=${snapshot.selectedCount ?? 'not retained'} · action=${snapshot.actionVisible === false ? 'hidden (board up to date)' : `${snapshot.actionEligible === true ? 'enabled' : snapshot.actionEligible === false ? 'disabled' : 'not retained'}${snapshot.actionLabel ? ` (${snapshot.actionLabel})` : ''}`} · reasons=${reasons} · selector=${selectorBoundsSummary(snapshot.selectorBounds)} · source-list=${selectorBoundsSummary(snapshot.sourceListBounds)} · recovery-error-latch=${recoveryErrorLatch} · awaited-source=${awaitedSource}`;
+  const renderedAction = JOB_BOARD_SELECTOR_RENDERED_ACTIONS.has(snapshot.renderedAction) ? snapshot.renderedAction : null;
+  // While a recovery notice is set the Search button is not rendered at all,
+  // so its eligibility/label would describe a control nobody can see.
+  const action = renderedAction === 'recovery'
+    ? 'hidden (recovery controls shown)'
+    : snapshot.actionVisible === false
+      ? 'hidden (board up to date)'
+      : `${snapshot.actionEligible === true ? 'enabled' : snapshot.actionEligible === false ? 'disabled' : 'not retained'}${snapshot.actionLabel ? ` (${snapshot.actionLabel})` : ''}`;
+  const availability = value => (value === true ? 'available' : value === false ? 'unavailable' : 'not retained');
+  // Older snapshots carry no rendered-action fields; print nothing for them
+  // rather than guessing which controls were on screen.
+  const rendered = renderedAction == null
+    ? ''
+    : ` · rendered=${renderedAction}${renderedAction === 'recovery'
+      ? ` · recovery-action=${JOB_BOARD_RECOVERY_ACTION_LABELS.has(snapshot.recoveryActionLabel) ? snapshot.recoveryActionLabel : 'not retained'} (${availability(snapshot.recoveryActionAvailable)}) · finish-saved=${availability(snapshot.finishSavedAvailable)}`
+      : ''}`;
+  return `rows=${snapshot.rowCount ?? 'not retained'} · selected=${snapshot.selectedCount ?? 'not retained'} · action=${action}${rendered} · reasons=${reasons} · selector=${selectorBoundsSummary(snapshot.selectorBounds)} · source-list=${selectorBoundsSummary(snapshot.sourceListBounds)} · recovery-error-latch=${recoveryErrorLatch} · awaited-source=${awaitedSource}`;
 }
 
 const JOB_BOARD_COMBINE_PHASES = new Set([
@@ -7822,6 +7896,16 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // stops that line from reading "not running" mid-scrape.
       const launchedAgo = scrapeBrowser.launchedAt ? `${Math.max(0, Math.round((Date.now() - scrapeBrowser.launchedAt) / 1000))}s ago` : 'unknown';
       lines.push(`- Manual-scrape Chrome: ${scrapeBrowser.running ? '🟢 running' : '⚪ closed'} · launched ${launchedAgo}${scrapeBrowser.pid ? ` · pid ${scrapeBrowser.pid}` : ''}`);
+      {
+        const BUILD_KINDS = new Set(['chrome-for-testing', 'google-chrome', 'chromium', 'brave', 'other', 'unknown']);
+        const build = BUILD_KINDS.has(scrapeBrowser.buildKind) ? scrapeBrowser.buildKind : 'not recorded';
+        const versionMatch = /^(?:HeadlessChrome|Chrome)\/(\d+(?:\.\d+){0,3})$/.exec(String(scrapeBrowser.browserVersion || ''));
+        const fingerprint = scrapeBrowser.fingerprint === 'plain' || scrapeBrowser.fingerprint === 'stealth'
+          ? scrapeBrowser.fingerprint : 'not recorded';
+        // plain = puppeteer-core without the stealth plugin or navigator mask
+        // (scrapeFingerprintPolicy); stealth = puppeteer-extra stealth + mask.
+        lines.push(`  - Build: \`${build}\`${versionMatch ? ` ${versionMatch[1]}` : ''} · fingerprint: \`${fingerprint}\` (last launched source's policy)`);
+      }
       if (scrapeBrowser.profileDir) {
         const dir = String(scrapeBrowser.profileDir);
         lines.push(`  - Profile: \`${redactReportPath(dir)}\``);
@@ -8040,6 +8124,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
             ? `×${repeatCount} identical retries${repeatSpan} (folded)`
             : null,
           e.strategy ? 'strategy recorded' : null,
+          ...describeCardWalkDescriptionRoute(e.descriptionRoute),
           e.panelSelector ? 'panel selector recorded (withheld)' : null,
           e.queryIndex && e.queryTotal ? `q${e.queryIndex}/${e.queryTotal}` : null,
           e.pageNum ? `p${e.pageNum}` : null,

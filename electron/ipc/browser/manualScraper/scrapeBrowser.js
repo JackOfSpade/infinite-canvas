@@ -4,6 +4,7 @@ import { buildOverlayScript, updateOverlay as paintOverlay, overlayControlPage, 
 import { closeOwnedBrowserProcess, launchWithProfileLockRetry } from '../../stealthBrowser.js';
 import { prepareBackgroundScrapeLaunchOptions, createBackgroundScrapePage } from '../backgroundScrapeBrowser.js';
 import { humanDelay } from '../../../utils/humanDelay.js';
+import { measurementFingerprintOverride } from '../scrapeMeasurement.js';
 
 // ── Overlay ───────────────────────────────────────────────────────────────────
 // Injected via evaluateOnNewDocument (runs before site JS on every new document)
@@ -85,6 +86,46 @@ export function safePageUrl(page) {
   try { return page.url() || null; } catch { return null; }
 }
 
+// ── Per-source browser fingerprint policy ───────────────────────────────────
+// Cloudflare-fronted boards score the browser itself, not just request pacing.
+// On ZipRecruiter (measured live 2026-11-20, same IP, 20 detail pages per arm)
+// the "stealth" layer WAS the tell: the puppeteer-extra stealth plugin
+// (sec-ch-ua-platform "Mac OS X", stale GREASE brand) plus applyStealthMask's
+// own-property navigator getters (hardwareConcurrency 8 on the page vs the real
+// core count in workers, getter source `() => 8`). The app's configuration drew
+// 7 checks (3 needing a person); the same Chrome for Testing build with neither
+// layer drew 0, as did system Chrome. Pacing gaps of 10–30 s never helped.
+//
+// `plain` = launch through puppeteer-core (no stealth plugin) and skip the
+// navigator mask; --disable-blink-features=AutomationControlled already makes
+// navigator.webdriver false natively. Other sources keep the stealth layer
+// until each is measured — a board that never challenged must not change blind.
+export const SCRAPE_FINGERPRINT_POLICY = Object.freeze({
+  ziprecruiter: Object.freeze({ plain: true }),
+  // Indeed: no fingerprint difference showed at 30 jobs, and every volume run
+  // that set its quarter pacing (indeedBrowser.js) was plain — ship what was measured.
+  indeed: Object.freeze({ plain: true }),
+  // Google: stealth drew a panel 429 at card 32 whatever the pacing; plain read
+  // 158/165 with no gaps (2026-11-20). Same Chrome for Testing build, so the
+  // Google session rule (login and scrape share one build) still holds.
+  google: Object.freeze({ plain: true }),
+});
+
+/** Fixed code for the Chrome build a scrape launched; never the path itself. */
+export function scrapeBrowserBuildKind(executablePath) {
+  const name = String(executablePath || '');
+  if (!name) return 'unknown';
+  if (/Google Chrome for Testing/i.test(name)) return 'chrome-for-testing';
+  if (/Google Chrome\.app|google-chrome|chrome\.exe$/i.test(name)) return 'google-chrome';
+  if (/chromium/i.test(name)) return 'chromium';
+  if (/brave/i.test(name)) return 'brave';
+  return 'other';
+}
+
+export function scrapeFingerprintPolicy(sourceId) {
+  return measurementFingerprintOverride(sourceId) || SCRAPE_FINGERPRINT_POLICY[sourceId] || { plain: false };
+}
+
 // Stealth navigator/screen masking applied on every document of a page (main
 // frame + iframes + post-navigation). Mirrors createStealthPage() in
 // stealthBrowser.js — keeps the fingerprint coherent across the session.
@@ -117,8 +158,10 @@ export async function applyStealthMask(page) {
  *
  * @returns {{ browser:object, page:object, navStatusRef:{last:number|null}, isClosed:()=>boolean, teardown:()=>Promise<void> }}
  */
-export async function launchScrapePlatformBrowser({ userDataDir, executablePath, sandboxArgs, onCrash }) {
+export async function launchScrapePlatformBrowser({ userDataDir, executablePath, sandboxArgs, onCrash, fingerprint = { plain: false } }) {
+  const plainFingerprint = fingerprint?.plain === true;
   const browser = await launchWithProfileLockRetry(prepareBackgroundScrapeLaunchOptions({
+    plainAutomation: plainFingerprint,
     headless: false,
     executablePath,
     userDataDir,
@@ -149,7 +192,7 @@ export async function launchScrapePlatformBrowser({ userDataDir, executablePath,
   const navStatusRef = { last: null };
   try {
     page = await createBackgroundScrapePage(browser, { width: 1280, height: 900 });
-    await applyStealthMask(page);
+    if (!plainFingerprint) await applyStealthMask(page);
 
     // Capture browser-side console errors/warnings for the bug report. Fires for all
     // frames (challenge-page + Turnstile frames included). error/warning only.
@@ -218,10 +261,17 @@ export async function launchScrapePlatformBrowser({ userDataDir, executablePath,
   // before spawning THIS process on the same shared profile. Recording it here
   // is what stops a report from stating "not running (profile lock free)" while
   // a visible scrape Chrome holds that very profile.
+  // Which build and fingerprint mode a Cloudflare-heavy run used. The report
+  // redacts the executable path, so without these a "checks every few pages"
+  // report could not say whether the stealth layer or a stale build was in play.
+  const browserVersion = await browser.version().catch(() => null);
   manualScraperTelemetry.browser = {
     running: true,
     launchedAt: Date.now(),
     executablePath: executablePath || null,
+    buildKind: scrapeBrowserBuildKind(executablePath),
+    browserVersion: typeof browserVersion === 'string' ? browserVersion.slice(0, 60) : null,
+    fingerprint: plainFingerprint ? 'plain' : 'stealth',
     profileDir: userDataDir || null,
     pid: browser.process()?.pid ?? null,
   };
@@ -250,6 +300,7 @@ export async function launchScrapePlatformBrowser({ userDataDir, executablePath,
     browser,
     page,
     navStatusRef,
+    fingerprint: { plain: plainFingerprint },
     isClosed: () => closed,
     teardown: async () => {
       intentional = true; // suppress onCrash for our own close

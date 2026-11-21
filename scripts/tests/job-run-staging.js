@@ -1336,6 +1336,76 @@ export default [
     },
   },
   {
+    name: 'job search resume hands LinkedIn its per-query plan so a query checkpointed terminal is skipped, and checkpoints land on the page ledger',
+    run: async () => {
+      const { snapshotId: careerSnapshotId } = await writeApprovedCareerSnapshotFixture();
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-linkedin-query-resume-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      const nodeId = 'linkedin-query-resume';
+      const runId = 'linkedin-query-resume-run';
+      const queries = ['platform engineer', 'site reliability engineer'];
+      const startedAt = Date.now() - 120_000;
+      const searchWindow = freshJobSearchWindow(null, new Date(startedAt));
+      const fingerprint = 'd'.repeat(64);
+      const row = (n) => ({ title: `Platform Engineer ${n}`, company: `LinkedIn Resume ${n}`, location: 'Remote',
+        url: `https://www.linkedin.com/jobs/view/${9000 + n}`, posted: 'recently listed', source: 'linkedin',
+        description: `Platform engineering role ${'x'.repeat(500)}` });
+      try {
+        const initialAuthority = await claimStagingAuthority(canvasPath, nodeId, runId, careerSnapshotId);
+        await startRun(canvasPath, {
+          runId, startedAt, queries, profileFingerprint: fingerprint, careerSnapshotId, canonicalLocation: '',
+          nodeId, sourceIds: ['linkedin'], searchWindow, maxAgeDays: searchWindow.providerLookbackDays,
+          operationAuthority: initialAuthority,
+        });
+        // What a Pause after query 1 leaves: that query's rows, terminal at its run position.
+        assert(await recordSourcePage(canvasPath, {
+          nodeId, expectedRunId: runId, sourceId: 'linkedin', query: queries[0], queryIndex: 0, page: 25,
+          jobs: [row(1)], terminal: true, now: startedAt + 1, expectedOperationAuthority: initialAuthority,
+        }) === true, 'the per-query checkpoint is written');
+        const resumeAuthority = await claimStagingAuthority(canvasPath, nodeId, runId, careerSnapshotId, {
+          kind: 'resume', predecessor: initialAuthority,
+        });
+        const seen = [];
+        let stageError = null;
+        let ledgerAfterCheckpoint = null;
+        __registerJobsHandlersForTests({
+          resolveOfficialPostings: async jobs => ({ jobs: jobs.map(job => ({ ...job, ...unresolvedOfficialPosting(job) })), telemetry: { total: jobs.length } }),
+          fetchHttpSources: async (...args) => {
+            const options = args[14] || {};
+            seen.push({ scope: [...(args[6] || [])], plan: options.queryPlansBySource?.linkedin || null, carried: args[13]?.linkedin || null });
+            await args[10]('linkedin');
+            // The resumed walk runs query 2 only and checkpoints it.
+            try {
+              await options.stageQuery({ sourceId: 'linkedin', query: queries[1], queryIndex: 1, page: 2, jobs: [row(2)], terminal: true });
+              const midRun = await readRunState(canvasPath, Date.now(), { nodeId });
+              ledgerAfterCheckpoint = midRun?.manifest?.sources?.linkedin?.queries || null;
+            } catch (error) { stageError = error; throw error; }
+            const result = { sourceId: 'linkedin', jobs: [row(2)], gathered: 1, finishedQueries: [...queries] };
+            await args[11]('linkedin', result);
+            await args[8]({ sourceId: 'linkedin', jobs: [], warning: null, retryablePartial: false });
+            return [result];
+          },
+        });
+        const sender = { id: 68_100, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {}, send: () => {} };
+        await ipcMain.__getInvokeHandler('search-jobs')({ sender }, {
+          nodeId, canvasFilePath: canvasPath, queries, canonicalLocation: '', resume: true, resumeRunId: runId,
+          profileFingerprint: fingerprint, careerSnapshotId, operationAuthority: resumeAuthority,
+        });
+        assert(seen.length === 1 && seen[0].scope.includes('linkedin'),
+          `the resumed run dispatches LinkedIn again, got ${JSON.stringify(seen)}`);
+        assert(seen[0].plan?.length === 2 && seen[0].plan[0].terminal === true && seen[0].plan[1].terminal !== true
+          && seen[0].carried === null,
+        `LinkedIn receives the exact per-query resume plan (query 1 terminal, query 2 not), got ${JSON.stringify(seen[0])}`);
+        assert(stageError === null && ledgerAfterCheckpoint?.['#0']?.terminal === true
+          && ledgerAfterCheckpoint?.['#1']?.terminal === true && ledgerAfterCheckpoint['#1'].lastPage === 2,
+        `the LinkedIn query checkpoint is written through the page ledger at its run position, got ${JSON.stringify({ stageError: stageError?.message, ledgerAfterCheckpoint })}`);
+      } finally {
+        registerJobsHandlers();
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'job run queue: separate hubs serialize on the shared job-search lane and queued cancellation is isolated',
     run: async () => {
       const queue = createModuleRunQueue();
@@ -6484,7 +6554,8 @@ export default [
         && !httpSlice.includes('jobs.length > 0')
         && httpSlice.includes("const retryablePartial = warning?.code === 'query-error'")
         && httpSlice.includes("entry?.fanoutStopped === true")
-        && httpSlice.includes('stageSource({ sourceId, jobs, warning, retryablePartial })')
+        && httpSlice.includes('stageSource({ sourceId, jobs: unstaged, warning, retryablePartial })')
+        && httpSlice.includes("sourceId === 'linkedin' && linkedInCheckpointed.size > 0")
         && terminalSlice.includes('r?.retryablePartial === true')
         && terminalSlice.includes("blocked ? 'blocked' : 'done'"),
       'a fatal gather branch must abort/drain concurrent provider work; clean HTTP zeroes terminalize, while explicit retryable partial HTTP coverage stays automatically blocked');

@@ -12,6 +12,7 @@
  * Uses puppeteer-core (no bundled Chromium) pointing at system Chrome for native JA4 TLS.
  */
 import puppeteer from 'puppeteer-extra';
+import puppeteerCore from 'puppeteer-core';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import electronPkg from 'electron';
 const { app } = electronPkg;
@@ -580,19 +581,32 @@ export async function launchWithProfileLockRetry(launchOpts, context, url = null
       let callerAborted = false;
       let timer = null;
       const launchDeadline = new AbortController();
-      const { signal: callerSignal = null, ...launchOptions } = launchOpts || {};
+      // `plainAutomation` launches through puppeteer-core with NO stealth
+      // plugin. Its evasions are themselves a fingerprint on Cloudflare boards:
+      // it sends sec-ch-ua-platform "Mac OS X" (real Chrome sends "macOS") and
+      // an outdated GREASE brand. Measured live on ZipRecruiter 2026-11-20 —
+      // 20 detail pages each, same IP: stealth+masks 7 checks (3 needing a
+      // person), plain launch 0. See SCRAPE_FINGERPRINT_POLICY.
+      const { signal: callerSignal = null, plainAutomation = false, ...launchOptions } = launchOpts || {};
       const onCallerAbort = () => { callerAborted = true; };
       if (callerSignal?.aborted) callerAborted = true;
       else callerSignal?.addEventListener?.('abort', onCallerAbort, { once: true });
       const launchSignal = launchSignalFor(callerSignal, launchDeadline);
-      const rawLaunch = puppeteer.launch({
-        ...launchOptions,
-        args: withBrowserSigninOffArgs(launchOptions.args),
-        // puppeteer-extra deep-merges native AbortSignals into `{}`. Preserve
-        // cancellation and the canonical launch deadline with its compatible
-        // forwarding bridge instead of handing the raw signal to that merge.
-        signal: toPuppeteerExtraAbortSignal(launchSignal),
-      });
+      const rawLaunch = plainAutomation
+        ? puppeteerCore.launch({
+          ...launchOptions,
+          args: withBrowserSigninOffArgs(launchOptions.args),
+          // puppeteer-core takes a native AbortSignal as-is.
+          signal: launchSignal,
+        })
+        : puppeteer.launch({
+          ...launchOptions,
+          args: withBrowserSigninOffArgs(launchOptions.args),
+          // puppeteer-extra deep-merges native AbortSignals into `{}`. Preserve
+          // cancellation and the canonical launch deadline with its compatible
+          // forwarding bridge instead of handing the raw signal to that merge.
+          signal: toPuppeteerExtraAbortSignal(launchSignal),
+        });
       const observedLaunch = rawLaunch.then(async browser => {
         // A late success belongs to the abandoned attempt, never to a new
         // singleton generation. Close it without reviving caller state.

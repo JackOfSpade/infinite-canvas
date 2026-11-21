@@ -338,14 +338,26 @@ export const CONTENT_SELECTORS = {
   glassdoor:    '[data-test="jobListing"], .JobCard_jobCardWrapper',
 };
 
+// Sources whose Next link must be FOLLOWED as a full document load instead of
+// clicked. ZipRecruiter's pager click is a client-side route change: the URL
+// turns to /jobs-search/2 and the visible cards change, but the server-rendered
+// ItemList JSON-LD the extractor reads stays page 1's. Measured live
+// 2026-11-20 — after clicks to pages 2, 3 and 4 the ItemList's first rows were
+// still page 1's, while a hard load of the same href served the real page 2.
+// Clicking therefore re-read page 1 until the no-new-jobs stop fired, so every
+// query ended after one page (~18 of the 166 results one query advertised).
+export const HARD_NAVIGATION_PAGER_SOURCES = new Set(['ziprecruiter']);
+
 // Selector for the "Next page" control (null = no auto-pagination for this source).
 // These need validation in-browser — flag any that don't work.
 export const NEXT_PAGE_SELECTORS = {
   google:       null,
   // ZipRecruiter changed from scroll-loading results to a conventional pager.
-  // The current control is an anchor (`<a title="Next Page">`), rather than a
-  // button, so it must be clicked as part of the regular pagination loop.
-  ziprecruiter: 'a[title="Next Page"]',
+  // The control is an anchor: `<a title="Next Page">` earlier, and
+  // `<a aria-label="Next page">` (href /jobs-search/N?…) as of 2026-11-20.
+  // It is followed by a full document load, never a click — see
+  // HARD_NAVIGATION_PAGER_SOURCES.
+  ziprecruiter: 'a[title="Next Page"], a[aria-label="Next page"]',
   // Glassdoor has no pager: its Next.js rewrite replaced it with an in-page
   // "Show more jobs" append, and its `?p=N` param is ignored. The old
   // `button[data-test="pagination-next"]` here matched nothing, and a
@@ -391,13 +403,12 @@ export const DESC_CONFIGS = {
     panelSelector: 'span.OOyDTc, span.ejCXj',
     panelMulti:    true,         // description split across visible + hidden spans
     closeSelector: null,
-    // Detail panels are separate network requests. At the old generic 600ms
-    // cadence Google reliably returned HTTP 429 near the end of a 30–40 card
-    // page. Use a minimum human-scale gap and periodically let the rolling
-    // request window drain; list extraction remains fast and is never retried.
-    clickDelayMs: 3000,
-    panelCooldownEvery: 8,
-    panelCooldownMs: 15000,
+    // No panel gap or every-8th pause beyond the generic card cadence. The old
+    // 429 "near the end of a 30-40 card page" was the stealth fingerprint, not
+    // the click rate. Measured live 2026-11-20 on one IP: stealth drew a panel
+    // 429 at card 32 with a 3s gap + 15s/8 pauses AND at card 32 with no gap;
+    // plain (scrapeFingerprintPolicy) with no gap read 158 of 165 cards over
+    // 3 queries in 135s with no 429 (paced plain: 54/56 in 333s).
   },
   ziprecruiter: {
     keyParam:      'jid',
@@ -438,22 +449,28 @@ export const DESC_CONFIGS = {
     cardIdPrefix:  null,
     cardHrefKey:   null,
     clickSelector: null,
-    // Keep enrichment on the successful search document. Direct navigation to
-    // an otherwise-valid www.glassdoor.ca detail URL can itself trigger
-    // Glassdoor's Turnstile → terminal "Humans only" sequence. Clicking the
-    // list card asks the site's own SPA to populate its right-side panel without
-    // opening a fresh detail document. This was the app's original Glassdoor
-    // strategy and avoids turning one empty list snippet into a session block.
+    // Descriptions come first from each row's own /job-listing/ page (see
+    // descriptionExpansionStrategy and glassdoorJobPage.js), then from the
+    // list-card side panel below for whatever the job page could not read.
+    // The job page carries the employer's JobPosting JSON-LD; its page chrome
+    // can be French on glassdoor.ca, so only JSON-LD fields are read there and
+    // the title always stays the list card's.
+    navUrlField:   'url',
+    jsonLdType:    'JobPosting',
+    jsonLdField:   'description',
+    // Detail navigation stays on the exact host whose list page loaded.
+    pinToListHost: true,
+    // Panel fallback: clicking the list card asks the site's own SPA to
+    // populate its right-side panel without opening a fresh detail document.
     panelSelector: '[data-brandviews*="joblisting-description"], [class*="JobDetails_jobDescription"]',
     panelMulti:    false,
     closeSelector: null,
-    // The panel request is network-backed. The 2026-08-25 diagnostic showed
-    // 10 successful requests in roughly 20 seconds followed by an HTTP 429;
-    // 1.5s was still a burst, not human reading cadence. Space requests well
-    // apart and let the endpoint's rolling window recover before request nine.
-    clickDelayMs: 4500,
-    panelCooldownEvery: 8,
-    panelCooldownMs: 12000,
+    // No click gap or every-8th pause beyond the generic card cadence: the
+    // window below is what keeps the panel API under its limit. Measured live
+    // 2026-11-20 on one IP, 30 cards each: with no gap Glassdoor served 10
+    // panels and then a 429 under BOTH the stealth and the plain fingerprint;
+    // with the window it served 30/30. Inside the window a 4.5s gap and a 12s
+    // pause only delay requests the window would admit anyway.
     // The click gap is not what trips the throttle. On 2026-11-11, at three
     // times the August gap, Glassdoor still allowed only 11-13 requests before
     // a 429, the same as at 1.5s. After a 429, 2 minutes' rest gave 0 of 4
@@ -481,24 +498,84 @@ export function panelWindowWaitMs(sourceId, requestTimes, now = Date.now()) {
 }
 
 /**
+ * Glassdoor's first-party hosts. A detail URL is only ever compared with the
+ * list page's own host, so this decides which list pages count as Glassdoor.
+ */
+export const GLASSDOOR_FIRST_PARTY_HOST = /^(?:[a-z0-9-]+\.)*glassdoor\.(?:com|ca|co\.uk|ie|de|fr|es|it|nl|pt|com\.au|co\.nz|co\.in|co\.jp|com\.mx|com\.br|co\.za|com\.sg|com\.hk)$/i;
+
+/**
+ * The Glassdoor country domain of a first-party host ('glassdoor.ca' for
+ * www.glassdoor.ca, fr.glassdoor.ca or glassdoor.ca), or null for anything
+ * else, including deeper or non-language subdomains.
+ */
+export function glassdoorCountryDomain(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  if (!GLASSDOOR_FIRST_PARTY_HOST.test(host)) return null;
+  const match = host.match(/^(?:(?:www|[a-z]{2})\.)?(glassdoor\.[a-z.]+)$/u);
+  return match ? match[1] : null;
+}
+
+/**
  * Decide whether a source is permitted to open an individual posting while
  * enriching descriptions. This is deliberately separate from ordinary search,
  * location-lookup, and user-facing Solve navigation: those actions keep their
  * existing Glassdoor URLs and are not detail enrichment.
  *
- * Glassdoor has one safe enrichment shape: stay on the already-loaded result
- * document and let its own card click populate the side panel. A direct detail
- * document request, even to the same first-party host, has repeatedly caused a
- * Turnstile → text-only "Humans only" escalation. Keep this source-level so a
- * future config edit cannot silently turn an empty panel into a `goto()` loop.
+ * Glassdoor: only an https `/job-listing/` page on a first-party host of the
+ * SAME country domain as the list page (`context.listUrl`) may be opened —
+ * www., a two-letter language host such as fr., or the bare domain: from a
+ * www.glassdoor.ca list, fr.glassdoor.ca and www.glassdoor.ca qualify, never
+ * glassdoor.com. Every other URL — another country, another path, an
+ * employer/ATS link, plain http — is refused and that row stays with the panel.
+ *
+ * Which host to open: the address exactly as Glassdoor linked it
+ * (row.glassdoorJobPageUrl). Live 2026-11-20, Glassdoor's own English
+ * www.glassdoor.ca search linked 30/30 cards to fr.glassdoor.ca/job-listing/…,
+ * and every successful job-page load (~70, full JSON-LD) was on fr.; the same
+ * job opened on www.glassdoor.ca — the host the extractor rewrites the saved
+ * link to — drew Cloudflare's "Just a moment..." with block text, and the app's
+ * own run on www. got a 403 "Security | Glassdoor" with hard-block text on its
+ * first page. That rewrite is the likely trigger of the old escalation below.
+ *
+ * History: under an older setup a direct Glassdoor detail request repeatedly
+ * caused a Turnstile → text-only "Humans only" escalation, so navigation was
+ * blocked outright. Measured again live on 2026-11-20 (same IP, the app's
+ * Chrome for Testing build, stealth fingerprint): direct navigation to a row's
+ * own www.glassdoor.ca/job-listing/ URL with the list page as referer returned
+ * full JobPosting JSON-LD, with no Turnstile and no "Humans only" page at a 3 s
+ * gap under either fingerprint. The job page has its own rate limit, separate
+ * from the panel API's 10 per 5 minutes: ~13 pages in a burst, then about one
+ * per ~6 s (3 s gap: 30/30 then 21/30, a 429 after ~51 pages; 2 s gap: 13 then
+ * a 429 on every page and a Cloudflare check on the next batch). The old
+ * escalation cannot recur as a loop because a job page showing ANY challenge,
+ * Turnstile, "Humans only" or hard block is never waited on and never
+ * foregrounded: it ends the job-page route for the rest of that source run and
+ * the remaining rows go to the panel (glassdoorJobPageVerdict).
  */
-export function descriptionNavigationDecision(sourceId, rawUrl) {
+export function descriptionNavigationDecision(sourceId, rawUrl, context = {}) {
   if (sourceId === 'glassdoor') {
-    return {
-      allowed: false,
-      reason: 'glassdoor-list-card-panel-only',
-      url: String(rawUrl || '').trim(),
-    };
+    const url = String(rawUrl || '').trim();
+    let detail;
+    let list;
+    try {
+      detail = new URL(url);
+    } catch {
+      return { allowed: false, reason: 'malformed-detail-url', url };
+    }
+    try {
+      list = new URL(String(context?.listUrl || '').trim());
+    } catch {
+      return { allowed: false, reason: 'glassdoor-list-host-unknown', url };
+    }
+    if (detail.protocol !== 'https:') return { allowed: false, reason: 'glassdoor-detail-not-https', url };
+    const listDomain = glassdoorCountryDomain(list.hostname);
+    if (!listDomain || glassdoorCountryDomain(detail.hostname) !== listDomain) {
+      return { allowed: false, reason: 'glassdoor-detail-other-host', url };
+    }
+    if (!detail.pathname.startsWith('/job-listing/')) {
+      return { allowed: false, reason: 'glassdoor-detail-not-job-listing', url };
+    }
+    return { allowed: true, reason: 'glassdoor-same-host-job-listing', url: detail.toString() };
   }
   if (sourceId !== 'ziprecruiter') {
     return { allowed: true, reason: 'source-has-no-detail-navigation-restriction', url: String(rawUrl || '').trim() };
@@ -520,10 +597,16 @@ export function descriptionNavigationDecision(sourceId, rawUrl) {
 export function descriptionExpansionStrategy(sourceId) {
   const cfg = DESC_CONFIGS[sourceId];
   if (!cfg) return 'none';
-  // This is an intentional hard guard, not merely the current config shape.
-  // If someone later restores `expandViaNavigation`/`navUrlField` while trying
-  // to repair a selector, Glassdoor still remains on the successful list page.
-  if (sourceId === 'glassdoor') return cfg.panelSelector ? 'list-card-panel' : 'none';
+  // Glassdoor is an intentional hard guard, not merely the current config
+  // shape: it never becomes a plain 'detail-navigation' source. Its job pages
+  // are read first and only for same-host /job-listing/ URLs
+  // (descriptionNavigationDecision); the list-card panel stays the fallback
+  // for every row the job page could not read. Without JSON-LD config it is
+  // panel-only, as before the 2026-11-20 measurement.
+  if (sourceId === 'glassdoor') {
+    if (!cfg.panelSelector) return 'none';
+    return cfg.jsonLdType && cfg.navUrlField ? 'job-page-then-list-card-panel' : 'list-card-panel';
+  }
   if (cfg.expandViaNavigation && (cfg.navUrlTemplate || cfg.navUrlField)) return 'detail-navigation';
   return cfg.panelSelector ? 'list-card-panel' : 'none';
 }

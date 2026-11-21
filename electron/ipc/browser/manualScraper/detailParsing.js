@@ -5,7 +5,7 @@
  * constants. Imports only walkRules among the siblings.
  */
 
-import { descriptionNavigationDecision } from './walkRules.js';
+import { GLASSDOOR_FIRST_PARTY_HOST, descriptionNavigationDecision } from './walkRules.js';
 import { decodeHtmlEntities, repairMojibake, stripHtmlToText } from '../../../../src/utils/textEncoding.js';
 import { withListingClosed, withListingLiveness } from '../../officialPostingBoardClosed.js';
 import { LISTING_LIVENESS_RULES, classifyListingLiveness, finalizeListingEvidence, listingLivenessPageProbe } from '../../listingLiveness.js';
@@ -19,17 +19,27 @@ import { parseSalaryToNumeric } from '../../../../src/nodes/jobsearch/buildJobTr
 // rate-limited session for every remaining card.
 export const ZIPRECRUITER_DETAIL_GAP_MS = 2500;
 
-export function zipRecruiterDetailGapMs(solvedChallenges = 0) {
-  return solvedChallenges > 0
-    ? Math.min(30_000, 10_000 * (2 ** Math.min(2, solvedChallenges - 1)))
-    : ZIPRECRUITER_DETAIL_GAP_MS;
+// The gap does NOT grow after a solved check. Measured live 2026-11-20 with
+// the plain fingerprint: one check that cleared by itself in 9s escalated every
+// later gap to 10-30s and cost 7 minutes of a 50-page walk, while no gap at all
+// drew a 429 after ~45 pages. The 2.5s base gap is what keeps ZipRecruiter's
+// request-rate limit away; the check itself came from the fingerprint
+// (scrapeFingerprintPolicy), which slower pages never changed.
+export function zipRecruiterDetailGapMs() {
+  return ZIPRECRUITER_DETAIL_GAP_MS;
 }
 
 export const ZIPRECRUITER_429_FALLBACK_WAIT_MS = 45_000;
 
 export const ZIPRECRUITER_429_MAX_WAIT_MS = 60_000;
 
-export const ZIPRECRUITER_429_RETRIES = 1;
+// A 429 is answered by waiting, then continuing more slowly — not by giving
+// up on every remaining description. Measured live 2026-11-20 (plain
+// fingerprint): ~3.7s per detail page drew a 429 after ~45 pages, while ~9s
+// per page walked 50 with none. After the first 429 the rest of the source's
+// walk uses ZIPRECRUITER_RATE_LIMITED_GAP_MS (gap + ~3s page load ≈ 9s).
+export const ZIPRECRUITER_429_RETRIES = 3;
+export const ZIPRECRUITER_RATE_LIMITED_GAP_MS = 6000;
 
 // Appcast can intermittently block a ZipRecruiter outbound detail redirect
 // while the original ZipRecruiter result page remains usable. Recover once by
@@ -277,7 +287,7 @@ export function normalizeDetailNavigationUrl(rawUrl) {
   return input;
 }
 
-export const GLASSDOOR_FIRST_PARTY_HOST = /^(?:[a-z0-9-]+\.)*glassdoor\.(?:com|ca|co\.uk|ie|de|fr|es|it|nl|pt|com\.au|co\.nz|co\.in|co\.jp|com\.mx|com\.br|co\.za|com\.sg|com\.hk)$/i;
+export { GLASSDOOR_FIRST_PARTY_HOST };
 
 /**
  * Keep a Glassdoor detail request on the exact first-party host whose list page
@@ -322,8 +332,8 @@ export function isDetachedDetailFrameError(error) {
  * next listing. The scraper never clicks Apply, fills fields, logs in, or
  * submits anything on an external page.
  */
-export function shouldNavigateForDescription(sourceId, rawUrl) {
-  return descriptionNavigationDecision(sourceId, rawUrl).allowed;
+export function shouldNavigateForDescription(sourceId, rawUrl, context = {}) {
+  return descriptionNavigationDecision(sourceId, rawUrl, context).allowed;
 }
 
 /**
