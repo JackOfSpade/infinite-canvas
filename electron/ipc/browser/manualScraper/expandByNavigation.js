@@ -182,6 +182,9 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
   // both outside and re-arm them when the row index actually changes.
   let errorShellRetryIndex = -1;
   let errorShellRetries = 0;
+  // Set once the walk's first Glassdoor job page was opened: only that page may
+  // be a warm-up 403 (see the warm-up rule below).
+  let glassdoorWarmupUsed = false;
   try {
     for (let i = 0; i < enhanced.length; i++) {
       const job = enhanced[i];
@@ -467,6 +470,30 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
           // challenge branch below (its foreground solve wait is not for
           // Glassdoor): the posting is read, or the row goes to the panel.
           if (verdict === 'ok') detailChallengeAction = 'none';
+          // The first job page a browser session opens comes back HTTP 403
+          // (empty, or a "Security | Glassdoor" page) and the next ones load
+          // normally — a first-visit handshake, not a block. Measured live
+          // 2026-11-20/21 on every fresh session: 403, then 200 with full
+          // JSON-LD. Treating that 403 as a challenge switched job pages off
+          // on page one of every run. So the first 403 of this walk is a
+          // warm-up: retry the same row once and keep the route on. A real
+          // Cloudflare challenge (Turnstile, its frame or shell, "Just a
+          // moment") is never a warm-up.
+          const strictCloudflareCheck = !!(challengeSignals?.hasCloudflareTurnstileWidget
+            || challengeSignals?.hasCloudflareChallengeFrame
+            || challengeSignals?.hasChallengeShell
+            || /^just a moment/i.test(String(challengeSignals?.title || '')));
+          const isFirstJobPageOfWalk = !glassdoorWarmupUsed;
+          glassdoorWarmupUsed = true;
+          if ((verdict !== 'ok' || hasJobPostingDescription !== true) && isFirstJobPageOfWalk && navigationStatus === 403 && !strictCloudflareCheck) {
+            logger.info(`[BrowserScraper] ${overlayBase.srcName} first job page of this walk answered 403 (warm-up); retrying it once with job pages still on`);
+            recordManualScraperTelemetry({
+              phase: 'detail-job-page-warmup', sourceId, srcName: overlayBase.srcName,
+              status: navigationStatus, verdict, itemIndex: i + 1, itemTotal: enhanced.length,
+            }, { updateActive: false });
+            i--;
+            continue;
+          }
           if (verdict !== 'ok') {
             const signalCodes = glassdoorJobPageSignalCodes({ httpStatus: navigationStatus, signals: challengeSignals, hasJobPostingDescription });
             logger.info(`[BrowserScraper] ${overlayBase.srcName} job-page stop signals: verdict=${verdict} ${formatGlassdoorJobPageSignalCodes(signalCodes)}`);

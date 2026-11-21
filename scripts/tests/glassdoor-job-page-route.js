@@ -84,7 +84,10 @@ function fakeBrowser(pages) {
         const jl = new URL(url).searchParams.get('jl');
         observed.navigations.push(url);
         observed.gotoOptions.push(options);
-        const served = pages[jl] || { status: 200, title: 'Emploi', head: '', body: '<main><h1>Emploi</h1></main>' };
+        // An array serves its entries in order (the last one repeats).
+        const entry = pages[jl];
+        const served = (Array.isArray(entry) ? (entry.length > 1 ? entry.shift() : entry[0]) : entry)
+          || { status: 200, title: 'Emploi', head: '', body: '<main><h1>Emploi</h1></main>' };
         currentUrl = url;
         load(url, served);
         // afterSettle: what the page becomes once the settle window passed
@@ -686,6 +689,51 @@ export default [
           byPanel: async (_p, jobs) => ({ jobs, expandedCount: 0 }),
         });
       assert.equal('glassdoorJobPageUrl' in out.jobs[0], false);
+    },
+  },
+  {
+    name: 'Glassdoor warm-up: the walk\'s first job page answering 403 is retried once and the route stays on',
+    async run() {
+      // Live 2026-11-20/21: a fresh browser session's first job page answers
+      // 403 (empty or a Security page), and the next pages load normally.
+      for (const warmup of [
+        { status: 403, title: '', head: '', body: '' },
+        { status: 403, title: 'Security | Glassdoor', head: '', body: '<h1>Humans only</h1><p>If you have been mistakenly blocked from accessing our site</p>' },
+      ]) {
+        const pacing = {};
+        const fake = fakeBrowser({ 1: [warmup, okPage()], 2: okPage(), 3: okPage() });
+        try {
+          resetManualScraperTelemetry();
+          const result = await walk(fake, [row(1), row(2), row(3)], pacing);
+          assert.equal(result.jobPageRoute.stopReason, 'none', `warm-up ${warmup.title || 'empty'} must not stop the route`);
+          assert.equal(pacing.glassdoorJobPage?.off ?? false, false);
+          assert.equal(fake.observed.navigations.filter(u => u.includes('jl=1')).length, 2, 'the first row is opened twice: warm-up, then the real read');
+          assert.deepEqual(result.rowOutcomes, ['expanded', 'expanded', 'expanded']);
+          const warmups = (getManualScraperTelemetry().events || []).filter(e => e?.phase === 'detail-job-page-warmup');
+          assert.equal(warmups.length, 1);
+        } finally { fake.close(); }
+      }
+    },
+  },
+  {
+    name: 'Glassdoor warm-up never covers a real Cloudflare check or a later page',
+    async run() {
+      // A Turnstile on the first page stops the route at once.
+      const pacing = {};
+      const fake = fakeBrowser({ 1: { status: 403, title: 'Just a moment...', head: '', body: '<div class="cf-turnstile"></div>' }, 2: okPage() });
+      try {
+        const result = await walk(fake, [row(1), row(2)], pacing);
+        assert.equal(result.jobPageRoute.stopReason, 'challenge');
+        assert.equal(fake.observed.navigations.length, 1, 'a real check is not retried');
+      } finally { fake.close(); }
+      // A 403 block on a LATER page is a stop, not a warm-up.
+      const later = {};
+      const fake2 = fakeBrowser({ 1: okPage(), 2: { status: 403, title: 'Security | Glassdoor', head: '', body: '<h1>Humans only</h1>' }, 3: okPage() });
+      try {
+        const result = await walk(fake2, [row(1), row(2), row(3)], later);
+        assert.notEqual(result.jobPageRoute.stopReason, 'none');
+        assert.equal(fake2.observed.navigations.length, 2);
+      } finally { fake2.close(); }
     },
   },
 ];

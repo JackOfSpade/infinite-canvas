@@ -21,7 +21,8 @@ export default [
       assert.equal(scrapeFingerprintPolicy('ziprecruiter').plain, true);
       assert.equal(scrapeFingerprintPolicy('indeed').plain, true, 'Indeed ships the plain launch its pacing was measured with');
       assert.equal(scrapeFingerprintPolicy('google').plain, true, 'Google: stealth drew the panel 429, plain did not');
-      for (const sourceId of ['glassdoor', 'linkedin', 'dice', 'unknown-source']) {
+      assert.equal(scrapeFingerprintPolicy('glassdoor').plain, true, 'Glassdoor: stealth drew a Cloudflare check on job pages, plain did not');
+      for (const sourceId of ['linkedin', 'dice', 'unknown-source']) {
         assert.equal(scrapeFingerprintPolicy(sourceId).plain, false, `${sourceId} must not change fingerprint without its own measurement`);
       }
       assert(Object.isFrozen(SCRAPE_FINGERPRINT_POLICY) && Object.isFrozen(SCRAPE_FINGERPRINT_POLICY.ziprecruiter),

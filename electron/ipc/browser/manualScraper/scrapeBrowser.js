@@ -109,6 +109,11 @@ export const SCRAPE_FINGERPRINT_POLICY = Object.freeze({
   // 158/165 with no gaps (2026-11-20). Same Chrome for Testing build, so the
   // Google session rule (login and scrape share one build) still holds.
   google: Object.freeze({ plain: true }),
+  // Glassdoor: the app's own walk, back to back on one IP (2026-11-21): stealth
+  // drew Cloudflare's "Just a moment…" check on the second job page; plain read
+  // 11 job pages with full descriptions and then met only Glassdoor's ordinary
+  // 429 (no check). The panel's 10-per-5-minute limit is the same under both.
+  glassdoor: Object.freeze({ plain: true }),
 });
 
 /** Fixed code for the Chrome build a scrape launched; never the path itself. */
