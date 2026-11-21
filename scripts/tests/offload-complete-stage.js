@@ -331,8 +331,8 @@ export default [
     name: 'aiCallProviders: every application entry names route, reasoning, Claude fallback, date and rationale',
     async run() {
       const keys = Object.keys(AI_CALL_PROVIDERS);
-      assert.deepEqual(keys, ['application:requirements-audit', 'task:job-gap-review', 'task:job-role-audit', 'task:job-location-consolidation-confirmation']);
-      const reasoning = { 'application:requirements-audit': 'off', 'task:job-gap-review': 'low', 'task:job-role-audit': 'low', 'task:job-location-consolidation-confirmation': 'low' };
+      assert.deepEqual(keys, ['application:requirements-audit', 'task:job-gap-review', 'task:job-role-audit', 'task:job-location-consolidation-confirmation', 'task:job-taxonomy-classify-batch', 'task:job-listing-liveness', 'task:job-experience-band-assessment']);
+      const reasoning = { 'application:requirements-audit': 'off', 'task:job-gap-review': 'low', 'task:job-role-audit': 'low', 'task:job-location-consolidation-confirmation': 'low', 'task:job-taxonomy-classify-batch': 'off', 'task:job-listing-liveness': 'high', 'task:job-experience-band-assessment': 'off' };
       for (const key of keys) {
         const entry = AI_CALL_PROVIDERS[key];
         assert.equal(entry.provider, 'offload', key);
@@ -348,6 +348,10 @@ export default [
       // The gap review's Claude fallback is its own task profile, and its entry carries its own decision date.
       assert.deepEqual(AI_CALL_PROVIDERS['task:job-gap-review'].claude, CLAUDE_TASK_PROFILES['job-gap-review']);
       assert.equal(AI_CALL_PROVIDERS['task:job-gap-review'].decided, '2026-11-15');
+      for (const task of ['job-taxonomy-classify-batch', 'job-listing-liveness']) {
+        assert.deepEqual(AI_CALL_PROVIDERS[`task:${task}`].claude, CLAUDE_TASK_PROFILES[task], task);
+        assert.equal(AI_CALL_PROVIDERS[`task:${task}`].decided, '2026-11-20', task);
+      }
       for (const task of ['job-role-audit', 'job-location-consolidation-confirmation']) {
         assert.deepEqual(AI_CALL_PROVIDERS[`task:${task}`].claude, CLAUDE_TASK_PROFILES[task], task);
         assert.equal(CLAUDE_TASK_PROFILES[task].tools, '', `${task}: only a task with no tools can be answered off Claude`);

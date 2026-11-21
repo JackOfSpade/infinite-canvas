@@ -81,6 +81,14 @@ Shadow measurement: launch the app with `INFINITE_CANVAS_SHADOW_OFFLOAD` (comma 
 
 ## Session log
 
+### 2026-11-21 — confirmations: the planner and fact recheck return to Opus; model label updated again; not an improvement session
+
+The 2026-11-20 planner change did not hold: with the current Opus low cover-only writer, Haiku high outlines' letters trailed the latest Opus xhigh control beyond noise, so the editorial planner is back on latest Opus xhigh. A same-day trial of fact-recheck on latest Haiku high was reverted after blind judges found its extra flags were not real. Net change since 2026-11-19: only the cover-letter-only writer, now latest Opus low like the other writers, and the firmer letter-capacity line (confirmed: shorter letters, judged better). The label in `config/application-model.json` reads as before less "letter-only medium", so the app archives pairs and resets the counter once more on its next read. Measurements: `docs/ai-model-selection.md`, its 2026-11-21 log.
+
+### 2026-11-20 — stage profiles changed by measurement; model label updated; not an improvement session
+
+User-directed, from the 2026-11-20 model and effort audit (`docs/ai-model-selection.md`, its log): the editorial planner moved from latest Opus xhigh to latest Haiku high (within noise of xhigh across 4 blind downstream panels, 28 jobs), and the cover-letter-only writer from latest Opus medium to latest Opus low (ranked above medium over 5 cover-only jobs). The label in `config/application-model.json` changed with them, so the app archives the stored pairs and resets the counter on its next read. The counter stood at 6 with a session due; no session ran, and the watch list and frozen regression set are untouched. Two prompt changes shipped in the same pass: the letter-capacity line now gives a 2,000-2,200 character target under the 2,400 limit and asks the writer to count, and the role-family ladder assessment gained an overlapping-range rule (a compensation call, not the generator). Neither is measured on Claude yet; the runbook is in the audit's run folder.
+
 ### 2026-11-18 — cover-letter checks set to off were deleted; user-directed; no guidance change; counter not reset
 
 Removed the 29 cover-letter check ids whose disposition was `off` (they ran only in tests), with their functions, tests and table rows, and the `off` value and `activeOnly` flag of the letter table. The active checks, their messages, ids and order, and every prompt and schema sentence are unchanged.

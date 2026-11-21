@@ -3242,11 +3242,11 @@ const workerRawResearchTasks = new Set(WORKER_RAW_RESEARCH_TASKS);
 // task is manual by default until it is deliberately reviewed here.
 export const WORKER_RELEASE_ONE_TASKS = Object.freeze([
   'job-listing-liveness', 'job-official-posting-research', 'job-official-posting-match',
-  'bundle-price-synthesis', 'job-compensation-assessment-batch',
+  'bundle-price-synthesis', 'job-compensation-assessment-batch', 'job-experience-band-assessment',
   'job-compensation-research-batch', 'job-preference-evaluation',
   'job-preference-interpretation',
-  'job-preference-research-batch', 'job-preference-research-batch-assessment', 'job-query-generation',
-  'career-profile-compile', 'career-profile-clean', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
+  'job-preference-research-batch', 'job-preference-research-batch-assessment', 'job-query-generation', 'job-search-location',
+  'career-profile-compile', 'career-profile-compile-edit', 'career-profile-clean', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
   'career-profile-audit-attribution', 'career-profile-audit-metrics', 'career-profile-audit-skills',
   'career-profile-audit-conflicts', 'career-profile-repair',
   'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen-batch', 'job-role-snippet-screen-batch', 'job-scoring', 'job-gap-review', 'application-edit-recurrence',

@@ -1272,7 +1272,7 @@ ${JSON.stringify(profile || {})}
 
 Return only { "canonicalLocation": { "city": "", "stateCode": "", "region": "", "country": "", "isRemote": false, "display": "" } }.`, {
     signal,
-    task: 'job-query-generation',
+    task: 'job-search-location',
     responseSchema: JOB_LOCATION_RESOLUTION_SCHEMA,
     meta,
   });

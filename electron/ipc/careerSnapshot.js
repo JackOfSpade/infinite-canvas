@@ -178,6 +178,7 @@ const TECHNOLOGY_LEDGER_COMPLETENESS_INSTRUCTION = 'For every achievement/projec
 export const CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS = Object.freeze({
   'career-profile-clean': CAREER_CLEAN_RESPONSE_TOKEN_LIMIT,
   'career-profile-compile': BATCH_OUTPUT_TOKEN_BUDGET,
+  'career-profile-compile-edit': BATCH_OUTPUT_TOKEN_BUDGET,
   'career-profile-repair': BATCH_OUTPUT_TOKEN_BUDGET,
   'career-profile-audit-completeness': 8_192,
   'career-profile-audit-grounding': 8_192,
@@ -4866,7 +4867,7 @@ export async function compileAuditedCareerSnapshot({
           return normalizeQualifiedPageProfile(applied.shard, page);
         };
         const update = normalizeAiObject(await callText(updatePrompt, {
-          signal, task: 'career-profile-compile', responseSchema: CAREER_PROFILE_INCREMENTAL_EDIT_SCHEMA,
+          signal, task: 'career-profile-compile-edit', responseSchema: CAREER_PROFILE_INCREMENTAL_EDIT_SCHEMA,
           responseValidator: value => { materialize(value); return value; },
           hints: { phase: 'incremental-edit', pageId: page.id, pageIndex: page.index, pageCount: pages.length,
             promptLength: page.sourceChars, segmentCount: page.segments.length, baselineSnapshotId: baseline.snapshot.snapshotId },

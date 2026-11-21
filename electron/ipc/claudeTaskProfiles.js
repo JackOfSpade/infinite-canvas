@@ -26,19 +26,22 @@ export const profile = (model, effort, tools = '', options = {}) => Object.freez
 
 export const CLAUDE_TASK_PROFILES = Object.freeze({
   'job-role-screen-batch': profile('haiku', 'low'),
-  // 2026-11-12: Same cost as Haiku low ($0.0056 a call) and, on 106 disputed rows judged blind, dropped fewer real jobs (28 vs 40 of 212 judgments); Sonnet medium dropped 118 (docs/ai-model-selection.md).
-  'job-role-snippet-screen-batch': profile('haiku', 'medium'),
+  // 2026-11-21: Haiku low (was Haiku medium). Confirmed on all 11 real snippet prompts x 2 runs after the test-posting rule:
+  // 90.0% agreement with production vs 89.9% (48/20 vs 47/22 extra/missed removals), within the rep-to-rep spread, at
+  // $0.0049 vs $0.0053 a call; the two blind judges (11-12, 11-20) split on which Haiku arm drops more real jobs (docs/ai-model-selection.md).
+  'job-role-snippet-screen-batch': profile('haiku', 'low'),
   'job-taxonomy-plan': profile('haiku', 'low'),
   // 2026-11-12: Same cost as Haiku low; matched production on every real page and caught every planted closed, open and login-wall page Sonnet medium caught (docs/ai-model-selection.md).
+  // Routed to DeepSeek Flash, reasoning high since 2026-11-20 (aiCallProviders.js); this profile is what a re-test compares with.
   'job-listing-liveness': profile('haiku', 'medium'),
   'platform-fit-assessment': profile('haiku', 'low'),
   'marketplace-hub-scan-batch': profile('haiku', 'low'),
   'career-profile-clean': profile('haiku', 'low'),
   'job-preference-interpretation': profile('haiku', 'medium'),
-  // Chosen by analogy 2026-11-15, not yet tested on a real prompt (none is stored): it judges whether the same kind of
-  // edit recurs across bundles and can stop generation, like the gap review and role audit, where Haiku high matched
-  // the stronger settings at the same price and Haiku medium was less reliable (docs/ai-model-selection.md).
-  'application-edit-recurrence': profile('haiku', 'high'),
+  // 2026-11-20: measured on the one real gate check plus 3 planted ones, confirmed by a second run: Haiku medium 16/16
+  // verdicts (the real 3-bundle block 4/4), level with Haiku high at about 75% of its cost; Haiku low and DeepSeek Flash
+  // off missed the real block every time, Flash low 1 time in 4 (docs/ai-model-selection.md).
+  'application-edit-recurrence': profile('haiku', 'medium'),
   'career-profile-audit-completeness': profile('haiku', 'medium'),
   'career-profile-audit-grounding': profile('haiku', 'medium'),
   'career-profile-audit-attribution': profile('haiku', 'medium'),
@@ -50,9 +53,8 @@ export const CLAUDE_TASK_PROFILES = Object.freeze({
   // and additions at about 1/10 the cost; Haiku low and Sonnet low removed brief-allowed Senior titles, which a
   // blind judge ruled a clear rule violation (docs/ai-model-selection.md).
   'job-role-audit': profile('haiku', 'high'),
-  // Chosen by analogy 2026-11-15, not yet tested on a real prompt (none is stored): on every measured sibling that
-  // sorts jobs (taxonomy plan, both role screens) Haiku beat Sonnet medium at about a tenth of the cost, and Haiku
-  // medium was the pick where descriptions are read (docs/ai-model-selection.md).
+  // Routed to DeepSeek Flash, reasoning off since 2026-11-20 (aiCallProviders.js); this Haiku medium analogy profile is
+  // what it ran on before and what a re-test compares with (docs/ai-model-selection.md).
   'job-taxonomy-classify-batch': profile('haiku', 'medium'),
   // 2026-11-09: Sonnet low agreed with Sonnet high within run-to-run noise (decision 98.0% vs 96.8%,
   // 6 batches x 2 runs) at about 15% less cost; Haiku fell 12-14 points short (docs/ai-model-selection.md).
@@ -65,6 +67,10 @@ export const CLAUDE_TASK_PROFILES = Object.freeze({
   'job-scoring': profile('opus', 'low'),
   // 2026-11-12: Blind-judged ranges scored 9 and 8 against production's 8 and Opus low reruns' 6 and 5, all answers passed the app validator, at about half the cost (docs/ai-model-selection.md).
   'job-compensation-assessment-batch': profile('sonnet', 'low'),
+  // The role-family experience-band ladder assessment, its own id since 2026-11-21 (it ran under the cohort assessment).
+  // Routed to DeepSeek Flash, reasoning off (aiCallProviders.js); this Sonnet low profile, which also passed 6/6 once the
+  // overlapping-range rule was added, is what it ran on before and what a re-test compares with (docs/ai-model-selection.md).
+  'job-experience-band-assessment': profile('sonnet', 'low'),
   // 2026-11-10: On the real board prompt plus planted pairs (a copy with changed seniority, employment type,
   // team, required stack, level, or a separate requisition must be split; a location-only or boilerplate-only
   // copy must merge), Haiku low decided 40 of 40 correctly across 2 runs, the same as Opus low or better (Opus
@@ -92,10 +98,23 @@ export const CLAUDE_TASK_PROFILES = Object.freeze({
   // with unactionable findings (docs/ai-model-selection.md).
   'career-profile-audit-skills': profile('haiku', 'medium'),
   'career-profile-compile': profile('opus', 'xhigh'),
-  // Chosen by analogy 2026-11-15, not yet tested (a blank-brief search is rare): it turns the profile into search
-  // titles, like preference interpretation, where Haiku medium was judged best and Sonnet medium worst at 7x the cost
+  // The incremental-edit prompt (edits/mode/notes), its own id since 2026-11-21 (it ran under career-profile-compile).
+  // 2026-11-21: Opus high. On 3 real prompts x 2 runs, plus a confirmation, it was 6/6 valid after one correction like xhigh
+  // and kept every bounded skill the judge required, at $0.32 vs $0.37 a call; Sonnet high and Haiku high dropped a required
+  // bounded skill on the dense prompt in 4 of 4 runs (docs/ai-model-selection.md).
+  'career-profile-compile-edit': profile('opus', 'high'),
+  // Placeholder chosen by reasoning 2026-11-21, not yet tested (a blank-brief search is rare and no prompt is stored): it
+  // turns the profile into title, adjacent-role and skill queries plus a structured location, a judgement over many brief
+  // details like preference interpretation, where Haiku medium was judged best (8/10), Haiku low lost a brief item (7/10),
+  // Sonnet medium was worse at 7x the cost and DeepSeek failed; its output cap already allows for reasoning
   // (docs/ai-model-selection.md).
   'job-query-generation': profile('haiku', 'medium'),
+  // Its own id since 2026-11-20 (it ran under job-query-generation with a different prompt and schema). Placeholder chosen
+  // by reasoning 2026-11-21, not yet tested (it calls the model only when a typed location does not resolve locally): it
+  // corrects a typo and fills a six-field place object, general knowledge with no judgement over the brief, so the
+  // cheapest Claude setting; DeepSeek is not chosen untested because a wrong country silently narrows every board
+  // search and a routed call has no fallback (docs/ai-model-selection.md).
+  'job-search-location': profile('haiku', 'low'),
   // Not tested: no product photos were available; marketplace calls are skipped by the owner's decision.
   'vision-product-analysis': profile('sonnet', 'medium'),
   // Judges the page text the app downloads for each lead; tools only for a lead with no usable page. Tested

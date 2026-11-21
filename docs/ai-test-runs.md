@@ -3642,3 +3642,2785 @@ Recorded cost so far: $0.816.
 Recorded cost so far: $4.690.
 - Note: Rows carried title, company and link only; in the app they also carry the card location, which may help the judges. Not run through the app's own worker.
 <!-- /ai-test-run:2026-11-19T05-52-59-158Z-employer-posting-read-measure-2a2dd6 -->
+
+<!-- ai-test-run:2026-11-20T21-48-46-651Z-claude-effort-ladderrun-0ab027 -->
+### 2026-11-20 21:48 UTC · claude-effort-ladder run · job-role-snippet-screen-batch · haiku:medium, haiku:low, sonnet:medium, flash:low
+
+- Status: **finished** (updated 2026-11-20 21:53:22 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/runs/snippet`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/records/snippet.jsonl --configs haiku:medium,haiku:low,sonnet:medium,flash:low --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/runs/snippet`
+- Records: 7 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/records/snippet.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-role-snippet-screen-batch flash:low | 14 | 14 | 0 | $0.043 |  |
+| job-role-snippet-screen-batch haiku:low | 14 | 14 | 0 | $0.082 |  |
+| job-role-snippet-screen-batch haiku:medium | 14 | 14 | 0 | $0.087 |  |
+| job-role-snippet-screen-batch sonnet:medium | 14 | 14 | 0 | $0.857 |  |
+
+Recorded cost so far: $1.069.
+<!-- /ai-test-run:2026-11-20T21-48-46-651Z-claude-effort-ladderrun-0ab027 -->
+
+<!-- ai-test-run:2026-11-20T21-48-46-652Z-claude-effort-ladderrun-892d1d -->
+### 2026-11-20 21:48 UTC · claude-effort-ladder run · job-role-screen-batch · haiku:low, haiku:medium, sonnet:medium, flash:off
+
+- Status: **finished** (updated 2026-11-20 22:04:26 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/runs/title`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/records/title.jsonl --configs haiku:low,haiku:medium,sonnet:medium,flash:off --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/runs/title`
+- Records: 7 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/records/title.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-role-screen-batch flash:off | 14 | 14 | 0 | $0.044 |  |
+| job-role-screen-batch haiku:low | 14 | 14 | 0 | $0.223 |  |
+| job-role-screen-batch haiku:medium | 14 | 14 | 0 | $0.261 |  |
+| job-role-screen-batch sonnet:medium | 14 | 14 | 0 | $1.288 |  |
+
+Recorded cost so far: $1.816.
+<!-- /ai-test-run:2026-11-20T21-48-46-652Z-claude-effort-ladderrun-892d1d -->
+
+<!-- ai-test-run:2026-11-20T21-49-55-745Z-claude-effort-ladderrun-5bc287 -->
+### 2026-11-20 21:49 UTC · claude-effort-ladder run · job-taxonomy-classify-batch · haiku:low, haiku:medium, haiku:high, sonnet:medium, flash:off, flash:low
+
+- Status: **finished** (updated 2026-11-20 21:51:11 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/runs/taxonomy`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/records/taxonomy.jsonl --configs haiku:low,haiku:medium,haiku:high,sonnet:medium,flash:off,flash:low --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/runs/taxonomy`
+- Records: 5 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/records/taxonomy.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-taxonomy-classify-batch flash:low | 10 | 10 | 0 | $0.002 |  |
+| job-taxonomy-classify-batch flash:off | 10 | 10 | 0 | $0.001 |  |
+| job-taxonomy-classify-batch haiku:high | 10 | 10 | 0 | $0.009 |  |
+| job-taxonomy-classify-batch haiku:low | 10 | 10 | 0 | $0.006 |  |
+| job-taxonomy-classify-batch haiku:medium | 10 | 10 | 0 | $0.006 |  |
+| job-taxonomy-classify-batch sonnet:medium | 10 | 10 | 0 | $0.074 |  |
+
+Recorded cost so far: $0.098.
+<!-- /ai-test-run:2026-11-20T21-49-55-745Z-claude-effort-ladderrun-5bc287 -->
+
+<!-- ai-test-run:2026-11-20T21-49-55-748Z-claude-effort-ladderrun-176038 -->
+### 2026-11-20 21:49 UTC · claude-effort-ladder run · job-listing-liveness · haiku:medium, haiku:low, sonnet:medium, flash:off, flash:high
+
+- Status: **finished** (updated 2026-11-20 21:52:34 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/runs/liveness`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/records/liveness.jsonl --configs haiku:medium,haiku:low,sonnet:medium,flash:off,flash:high --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/runs/liveness`
+- Records: 13 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/records/liveness.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-listing-liveness flash:high | 26 | 26 | 0 | $0.012 |  |
+| job-listing-liveness flash:off | 26 | 26 | 0 | $0.012 |  |
+| job-listing-liveness haiku:low | 26 | 26 | 0 | $0.054 |  |
+| job-listing-liveness haiku:medium | 26 | 26 | 0 | $0.053 |  |
+| job-listing-liveness sonnet:medium | 26 | 26 | 0 | $0.524 |  |
+
+Recorded cost so far: $0.655.
+<!-- /ai-test-run:2026-11-20T21-49-55-748Z-claude-effort-ladderrun-176038 -->
+
+<!-- ai-test-run:2026-11-20T21-49-55-747Z-claude-effort-ladderrun-5e41b9 -->
+### 2026-11-20 21:49 UTC · claude-effort-ladder run · application-edit-recurrence · haiku:low, haiku:medium, haiku:high, sonnet:medium, flash:off, flash:low, pro:low
+
+- Status: **finished** (updated 2026-11-20 21:53:19 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/runs/recurrence`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/records/recurrence.jsonl --configs haiku:low,haiku:medium,haiku:high,sonnet:medium,flash:off,flash:low,pro:low --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/runs/recurrence`
+- Records: 4 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/records/recurrence.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| application-edit-recurrence flash:low | 8 | 8 | 0 | $0.005 |  |
+| application-edit-recurrence flash:off | 8 | 7 | 0 | $0.002 |  |
+| application-edit-recurrence haiku:high | 8 | 8 | 0 | $0.020 |  |
+| application-edit-recurrence haiku:low | 8 | 8 | 0 | $0.014 |  |
+| application-edit-recurrence haiku:medium | 8 | 8 | 0 | $0.014 |  |
+| application-edit-recurrence pro:low | 8 | 8 | 0 | $0.064 |  |
+| application-edit-recurrence sonnet:medium | 8 | 7 | 0 | $0.103 |  |
+
+Recorded cost so far: $0.222.
+<!-- /ai-test-run:2026-11-20T21-49-55-747Z-claude-effort-ladderrun-5e41b9 -->
+
+<!-- ai-test-run:2026-11-20T21-50-08-236Z-claude-effort-ladderrun-d59884 -->
+### 2026-11-20 21:50 UTC · claude-effort-ladder run · fact-check · opus:high, sonnet:high, haiku:high
+
+- Status: **finished** (updated 2026-11-20 21:54:29 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fc-plants-r2`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-check-plants.jsonl --configs opus:high,sonnet:high,haiku:high --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fc-plants-r2`
+- Records: 7 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-check-plants.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| fact-check haiku:high | 14 | 14 | 0 | $0.235 |  |
+| fact-check opus:high | 14 | 14 | 0 | $4.231 |  |
+| fact-check sonnet:high | 14 | 14 | 0 | $2.209 |  |
+
+Recorded cost so far: $6.675.
+<!-- /ai-test-run:2026-11-20T21-50-08-236Z-claude-effort-ladderrun-d59884 -->
+
+<!-- ai-test-run:2026-11-20T21-50-12-256Z-claude-effort-ladderrunrequirementswrapperrealvalidatorresumedcorrections-f40dfb -->
+### 2026-11-20 21:50 UTC · claude-effort-ladder run (requirements wrapper: real validator + resumed corrections) · requirements · sonnet:high, haiku:medium
+
+- Status: **finished** (updated 2026-11-20 22:01:06 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/requirements/runs/main`
+- Command: `node run-arms.mjs sonnet:high,haiku:medium 2 ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/requirements/runs/main`
+- Records: 10 newest accepted first-attempt prompts (capture-stage)
+- Reps: 2
+- Validator: validatePasteResponse (app) via expose-hook.mjs
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| requirements haiku:medium | 20 | 8 | 0 | $0.179 |  |
+| requirements sonnet:high | 20 | 18 | 0 | $2.247 |  |
+
+Recorded cost so far: $2.426.
+<!-- /ai-test-run:2026-11-20T21-50-12-256Z-claude-effort-ladderrunrequirementswrapperrealvalidatorresumedcorrections-f40dfb -->
+
+<!-- ai-test-run:2026-11-20T21-50-14-424Z-claude-effort-ladderrun-cc00f3 -->
+### 2026-11-20 21:50 UTC · claude-effort-ladder run · write · opus:medium, opus:low
+
+- Status: **finished** (updated 2026-11-20 21:59:54 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/a-cover`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/write-cover.jsonl --configs opus:medium,opus:low --reps 2 --concurrency 2 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/a-cover`
+- Records: 5 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/write-cover.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| write opus:low | 10 | 10 | 0 | $3.977 |  |
+| write opus:medium | 10 | 10 | 0 | $5.004 |  |
+
+Recorded cost so far: $8.981.
+<!-- /ai-test-run:2026-11-20T21-50-14-424Z-claude-effort-ladderrun-cc00f3 -->
+
+<!-- ai-test-run:2026-11-20T21-50-14-435Z-claude-effort-ladderrun-29252f -->
+### 2026-11-20 21:50 UTC · claude-effort-ladder run · write · opus:low
+
+- Status: **finished** (updated 2026-11-20 21:55:04 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/b-both`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/write-both.jsonl --configs opus:low --reps 2 --concurrency 2 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/b-both`
+- Records: 6 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/write-both.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| write opus:low | 12 | 12 | 0 | $4.972 |  |
+
+Recorded cost so far: $4.972.
+<!-- /ai-test-run:2026-11-20T21-50-14-435Z-claude-effort-ladderrun-29252f -->
+
+<!-- ai-test-run:2026-11-20T21-50-14-437Z-claude-effort-ladderrun-282904 -->
+### 2026-11-20 21:50 UTC · claude-effort-ladder run · editorial-plan · opus:xhigh, haiku:high
+
+- Status: **finished** (updated 2026-11-20 21:54:32 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/c1-editorial`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/editorial-cover.jsonl --configs opus:xhigh,haiku:high --reps 1 --concurrency 2 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/c1-editorial`
+- Records: 5 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/editorial-cover.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| editorial-plan haiku:high | 5 | 5 | 0 | $0.101 |  |
+| editorial-plan opus:xhigh | 5 | 5 | 0 | $2.193 |  |
+
+Recorded cost so far: $2.294.
+<!-- /ai-test-run:2026-11-20T21-50-14-437Z-claude-effort-ladderrun-282904 -->
+
+<!-- ai-test-run:2026-11-20T21-51-04-072Z-claude-effort-ladderrun-1f6840 -->
+### 2026-11-20 21:51 UTC · claude-effort-ladder run · career-profile-compile · opus:xhigh, opus:high, opus:medium, sonnet:high, haiku:high
+
+- Status: **finished** (updated 2026-11-20 21:59:52 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/runs/incremental`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/records/incremental.jsonl --configs opus:xhigh,opus:high,opus:medium,sonnet:high,haiku:high --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/runs/incremental`
+- Records: 3 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/records/incremental.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-compile haiku:high | 6 | 6 | 0 | $0.093 |  |
+| career-profile-compile opus:high | 6 | 6 | 0 | $1.933 |  |
+| career-profile-compile opus:medium | 6 | 6 | 0 | $1.824 |  |
+| career-profile-compile opus:xhigh | 6 | 6 | 0 | $2.245 |  |
+| career-profile-compile sonnet:high | 6 | 6 | 0 | $0.963 |  |
+
+Recorded cost so far: $7.059.
+<!-- /ai-test-run:2026-11-20T21-51-04-072Z-claude-effort-ladderrun-1f6840 -->
+
+<!-- ai-test-run:2026-11-20T21-51-04-074Z-claude-effort-ladderrun-cfc462 -->
+### 2026-11-20 21:51 UTC · claude-effort-ladder run · job-compensation-assessment-batch · sonnet:low, flash:low, haiku:medium, haiku:high, sonnet:medium, opus:low
+
+- Status: **finished** (updated 2026-11-20 21:53:00 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/runs/ladders`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/records/ladders.jsonl --configs sonnet:low,flash:low,haiku:medium,haiku:high,sonnet:medium,opus:low --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/runs/ladders`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/records/ladders.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-compensation-assessment-batch flash:low | 4 | 4 | 0 | $0.006 |  |
+| job-compensation-assessment-batch haiku:high | 4 | 4 | 0 | $0.016 |  |
+| job-compensation-assessment-batch haiku:medium | 4 | 4 | 0 | $0.013 |  |
+| job-compensation-assessment-batch opus:low | 4 | 4 | 0 | $0.183 |  |
+| job-compensation-assessment-batch sonnet:low | 4 | 4 | 0 | $0.109 |  |
+| job-compensation-assessment-batch sonnet:medium | 4 | 4 | 0 | $0.116 |  |
+
+Recorded cost so far: $0.442.
+<!-- /ai-test-run:2026-11-20T21-51-04-074Z-claude-effort-ladderrun-cfc462 -->
+
+<!-- ai-test-run:2026-11-20T21-52-06-155Z-claude-effort-ladderrun-4d773b -->
+### 2026-11-20 21:52 UTC · claude-effort-ladder run · career-profile-repair · haiku:medium, haiku:high, sonnet:low, sonnet:medium
+
+- Status: **finished** (updated 2026-11-20 22:05:21 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/attempt0`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/repair-attempt0.jsonl --configs haiku:medium,haiku:high,sonnet:low,sonnet:medium --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/attempt0`
+- Records: 12 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/repair-attempt0.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-repair haiku:high | 24 | 24 | 0 | $0.238 |  |
+| career-profile-repair haiku:medium | 24 | 24 | 0 | $0.179 |  |
+| career-profile-repair sonnet:low | 24 | 24 | 0 | $1.614 |  |
+| career-profile-repair sonnet:medium | 24 | 23 | 0 | $1.632 |  |
+
+Recorded cost so far: $3.663.
+<!-- /ai-test-run:2026-11-20T21-52-06-155Z-claude-effort-ladderrun-4d773b -->
+
+<!-- ai-test-run:2026-11-20T21-52-09-719Z-claude-effort-ladderrun-5b8c58 -->
+### 2026-11-20 21:52 UTC · claude-effort-ladder run · career-profile-audit-skills, career-profile-audit-completeness, career-profile-audit-grounding, career-profile-audit-attribution, career-profile-audit-metrics, career-profile-audit-conflicts · haiku:medium, haiku:low
+
+- Status: **finished** (updated 2026-11-20 22:11:50 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-audits/runs/real`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-audits/records/real.jsonl --configs haiku:medium,haiku:low --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-audits/runs/real`
+- Records: 42 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-audits/records/real.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-audit-attribution haiku:low | 14 | 14 | 0 | $0.061 |  |
+| career-profile-audit-attribution haiku:medium | 14 | 14 | 0 | $0.066 |  |
+| career-profile-audit-completeness haiku:low | 14 | 14 | 0 | $0.067 |  |
+| career-profile-audit-completeness haiku:medium | 14 | 14 | 0 | $0.079 |  |
+| career-profile-audit-conflicts haiku:low | 14 | 14 | 0 | $0.062 |  |
+| career-profile-audit-conflicts haiku:medium | 14 | 14 | 0 | $0.066 |  |
+| career-profile-audit-grounding haiku:low | 14 | 14 | 0 | $0.064 |  |
+| career-profile-audit-grounding haiku:medium | 14 | 14 | 0 | $0.077 |  |
+| career-profile-audit-metrics haiku:low | 14 | 14 | 0 | $0.053 |  |
+| career-profile-audit-metrics haiku:medium | 14 | 14 | 0 | $0.056 |  |
+| career-profile-audit-skills haiku:low | 14 | 14 | 0 | $0.142 |  |
+| career-profile-audit-skills haiku:medium | 14 | 13 | 0 | $0.192 |  |
+
+Recorded cost so far: $0.986.
+<!-- /ai-test-run:2026-11-20T21-52-09-719Z-claude-effort-ladderrun-5b8c58 -->
+
+<!-- ai-test-run:2026-11-20T21-53-07-098Z-claude-effort-ladderrun-bf4647 -->
+### 2026-11-20 21:53 UTC · claude-effort-ladder run · career-profile-audit-skills · haiku:low, haiku:medium
+
+- Status: **finished** (updated 2026-11-20 22:05:37 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-audits/runs/plants-haiku`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-audits/records/plants.jsonl --configs haiku:low,haiku:medium --reps 2 --concurrency 2 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-audits/runs/plants-haiku`
+- Records: 6 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-audits/records/plants.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-audit-skills haiku:low | 12 | 12 | 0 | $0.115 |  |
+| career-profile-audit-skills haiku:medium | 12 | 12 | 0 | $0.152 |  |
+
+Recorded cost so far: $0.267.
+<!-- /ai-test-run:2026-11-20T21-53-07-098Z-claude-effort-ladderrun-bf4647 -->
+
+<!-- ai-test-run:2026-11-20T21-53-49-283Z-archiveregressioncheckregression-archivepy-2b8a8c -->
+### 2026-11-20 21:53 UTC · archive regression check (regression-archive.py) · verify-correction,fit-correction · 2026-11-20 regression: resume-only correction stages
+
+- Status: **finished** (updated 2026-11-20 21:53:49 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections`
+- Doc 2026-11-10: verify Haiku medium 25% vs production 27-32%; fit 89-100%
+- Verdict: both current settings still pass
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| verify-correction sonnet:high before 11-15 | 270 | 62 | 208 | $0.286 | 23% of submissions accepted; 40 jobs, 29 reached an accepted round; 6.8 calls/job; 1.30 USD/job over 15 costed jobs |
+| verify-correction haiku:medium from 11-16 | 53 | 11 | 42 | $0.170 | 21% accepted; 12 jobs, 8 reached an accepted round; 4.4 calls/job; 0.75 USD/job; 6 new target-company-binding rejections |
+| verify-correction haiku:medium 11-15 only | 17 | 6 | 11 | $0.201 | 2 jobs, too few |
+| fit-correction sonnet:high before 11-15 | 126 | 111 | 15 | $0.301 | 88% accepted; 41/42 jobs; 0.92 USD/job over 18 costed jobs |
+| fit-correction sonnet:high from 11-16 | 33 | 30 | 3 | $0.326 | 91% accepted; 10/10 jobs; 1.04 USD/job; output about 10-13% of list cost |
+
+Recorded cost so far: $1.284.
+<!-- /ai-test-run:2026-11-20T21-53-49-283Z-archiveregressioncheckregression-archivepy-2b8a8c -->
+
+<!-- ai-test-run:2026-11-20T21-54-19-789Z-small-sample-scoremjs-59f857 -->
+### 2026-11-20 21:54 UTC · small-sample-score.mjs · job-taxonomy-classify-batch
+
+- Status: **finished** (updated 2026-11-20 21:54:19 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:low | 10 | 10 | 0 | $0.006 | placements 43/68, records all-right 3/10, real job put in Other 2/2; off-by-one index errors |
+| haiku:medium (production) | 10 | 9 | 0 | $0.006 | placements 39/53 on valid, records 4/10, real job in Other 2/2; 1 invalid (12 of 15 entries) |
+| haiku:high | 10 | 10 | 0 | $0.009 | placements 66/68, records 9/10 (fits-none 2 misses) |
+| sonnet:medium | 10 | 10 | 0 | $0.074 | placements 68/68, records 10/10 |
+| flash:off | 10 | 10 | 0 | $0.001 | placements 68/68, records 10/10 |
+| flash:low | 10 | 10 | 0 | $0.002 | placements 68/68, records 10/10 |
+
+Recorded cost so far: $0.098.
+- Note: App chunk validator (inspectJobTaxonomyRoleIndexes) re-check + predeclared placements; 1 real + 4 planted chunks (8,5,5,15 jobs), 2 reps; placements = accepted-family items
+<!-- /ai-test-run:2026-11-20T21-54-19-789Z-small-sample-scoremjs-59f857 -->
+
+<!-- ai-test-run:2026-11-20T21-54-19-921Z-small-sample-scoremjs-b9e68b -->
+### 2026-11-20 21:54 UTC · small-sample-score.mjs · application-edit-recurrence
+
+- Status: **finished** (updated 2026-11-20 21:54:19 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| flash:off | 8 | 7 | 0 | $0.002 | verdicts right 6/7 valid; real 0/1 valid rep blocked; 1 schema-invalid (1-bundle patterns) |
+| flash:low | 8 | 8 | 0 | $0.004 | verdicts right 7/8; real 1/2 |
+| haiku:low | 8 | 8 | 0 | $0.014 | verdicts right 6/8; real 0/2 |
+| haiku:medium | 8 | 8 | 0 | $0.015 | verdicts right 8/8 |
+| haiku:high (production) | 8 | 8 | 0 | $0.020 | verdicts right 8/8 (control matches production on real 2/2) |
+| pro:low | 8 | 8 | 0 | $0.064 | verdicts right 6/8; real 0/2 |
+| sonnet:medium | 8 | 7 | 0 | $0.103 | verdicts right 7/7 valid; 1 schema-invalid (summary over 200 chars) |
+
+Recorded cost so far: $0.222.
+- Note: interpretEditRecurrence verdict vs predeclared truth; real 3-bundle record (truth blocked, as production) + plants recur-4 (blocked), different-kinds (not), recur-exactly-2 (not, pattern 1-2 listed); 2 reps
+<!-- /ai-test-run:2026-11-20T21-54-19-921Z-small-sample-scoremjs-b9e68b -->
+
+<!-- ai-test-run:2026-11-20T21-54-20-006Z-small-sample-scoremjs-92ee63 -->
+### 2026-11-20 21:54 UTC · small-sample-score.mjs · job-listing-liveness
+
+- Status: **finished** (updated 2026-11-20 21:54:20 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| flash:off | 26 | 25 | 0 | $0.013 | pages 27/27 on valid, closed 2/2; 1 answer failed the app quote gate |
+| flash:high | 26 | 26 | 0 | $0.013 | pages 30/30, closed 2/2 |
+| haiku:low | 26 | 26 | 0 | $0.054 | pages 30/30, closed 2/2 |
+| haiku:medium (production rerun) | 26 | 26 | 0 | $0.053 | pages 29/30 (one open page called unclear), closed 2/2 |
+| sonnet:medium | 26 | 26 | 0 | $0.523 | pages 30/30, closed 2/2 |
+
+Recorded cost so far: $0.655.
+- Note: App validateListingLivenessResponse re-check (members rebuilt from prompt rows, round-trip exact) + per-page agreement with production; 13 real post-11-12 prompts, 15 pages, 1 real closed (Indeed expired); 2 reps
+<!-- /ai-test-run:2026-11-20T21-54-20-006Z-small-sample-scoremjs-92ee63 -->
+
+<!-- ai-test-run:2026-11-20T21-54-29-469Z-claude-effort-ladderrun-01ae2c -->
+### 2026-11-20 21:54 UTC · claude-effort-ladder run · fact-check · sonnet:medium, haiku:medium
+
+- Status: **finished** (updated 2026-11-20 21:55:35 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fc-plants-r1`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-check-plants.jsonl --configs sonnet:medium,haiku:medium --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fc-plants-r1`
+- Records: 7 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-check-plants.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| fact-check haiku:medium | 7 | 7 | 0 | $0.109 |  |
+| fact-check sonnet:medium | 7 | 7 | 0 | $1.083 |  |
+
+Recorded cost so far: $1.193.
+<!-- /ai-test-run:2026-11-20T21-54-29-469Z-claude-effort-ladderrun-01ae2c -->
+
+<!-- ai-test-run:2026-11-20T21-55-04-253Z-claude-effort-ladderrun-fc1151 -->
+### 2026-11-20 21:55 UTC · claude-effort-ladder run · write · opus:medium, sonnet:high
+
+- Status: **finished** (updated 2026-11-20 22:07:25 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/b-both`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/write-both.jsonl --configs opus:medium,sonnet:high --reps 1 --concurrency 2 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/b-both`
+- Records: 6 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/write-both.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| write opus:low | 12 | 12 | 0 | $4.972 |  |
+| write opus:medium | 6 | 6 | 0 | $3.535 |  |
+| write sonnet:high | 6 | 6 | 0 | $2.038 |  |
+
+Recorded cost so far: $10.55.
+<!-- /ai-test-run:2026-11-20T21-55-04-253Z-claude-effort-ladderrun-fc1151 -->
+
+<!-- ai-test-run:2026-11-20T21-55-19-650Z-claude-effort-ladderrun-e66266 -->
+### 2026-11-20 21:55 UTC · claude-effort-ladder run · write · opus:medium
+
+- Status: **finished** (updated 2026-11-20 22:02:47 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/c2-swapped`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/write-cover-swapped.jsonl --configs opus:medium --reps 1 --concurrency 2 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/c2-swapped`
+- Records: 10 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/write-cover-swapped.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| write opus:medium | 10 | 10 | 0 | $5.074 |  |
+
+Recorded cost so far: $5.074.
+<!-- /ai-test-run:2026-11-20T21-55-19-650Z-claude-effort-ladderrun-e66266 -->
+
+<!-- ai-test-run:2026-11-20T21-55-41-973Z-claude-effort-ladderrun-21a3d0 -->
+### 2026-11-20 21:55 UTC · claude-effort-ladder run · fact-recheck · opus:high, sonnet:high, haiku:high
+
+- Status: **interrupted (SIGTERM) before finishing; rows above are complete up to that point** (updated 2026-11-20 21:57:36 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fr-plants-r2`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-recheck-plants.jsonl --configs opus:high,sonnet:high,haiku:high --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fr-plants-r2`
+- Records: 4 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-recheck-plants.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| fact-recheck haiku:high | 6 | 6 | 0 | $0.097 |  |
+| fact-recheck opus:high | 7 | 7 | 0 | $2.158 |  |
+| fact-recheck sonnet:high | 7 | 7 | 0 | $1.128 |  |
+
+Recorded cost so far: $3.384.
+<!-- /ai-test-run:2026-11-20T21-55-41-973Z-claude-effort-ladderrun-21a3d0 -->
+
+<!-- ai-test-run:2026-11-20T21-56-09-293Z-claude-effort-ladderrun-b8f401 -->
+### 2026-11-20 21:56 UTC · claude-effort-ladder run · convert · sonnet:medium, haiku:high
+
+- Status: **finished** (updated 2026-11-20 22:10:35 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/runs/rep2`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/records.jsonl --configs sonnet:medium,haiku:high --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/runs/rep2`
+- Records: 10 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/records.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| convert haiku:high | 20 | 20 | 0 | $0.589 |  |
+| convert sonnet:medium | 20 | 20 | 0 | $3.979 |  |
+
+Recorded cost so far: $4.568.
+<!-- /ai-test-run:2026-11-20T21-56-09-293Z-claude-effort-ladderrun-b8f401 -->
+
+<!-- ai-test-run:2026-11-20T21-56-31-201Z-claude-effort-ladderrun-cc011d -->
+### 2026-11-20 21:56 UTC · claude-effort-ladder run · application-edit-recurrence · haiku:medium, flash:low, haiku:high
+
+- Status: **finished** (updated 2026-11-20 21:57:45 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm/runs/recurrence`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm/records/recurrence.jsonl --configs haiku:medium,flash:low,haiku:high --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm/runs/recurrence`
+- Records: 4 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm/records/recurrence.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| application-edit-recurrence flash:low | 8 | 8 | 0 | $0.005 |  |
+| application-edit-recurrence haiku:high | 8 | 8 | 0 | $0.017 |  |
+| application-edit-recurrence haiku:medium | 8 | 8 | 0 | $0.014 |  |
+
+Recorded cost so far: $0.036.
+<!-- /ai-test-run:2026-11-20T21-56-31-201Z-claude-effort-ladderrun-cc011d -->
+
+<!-- ai-test-run:2026-11-20T21-56-31-211Z-claude-effort-ladderrun-dbb48f -->
+### 2026-11-20 21:56 UTC · claude-effort-ladder run · job-listing-liveness · flash:high, haiku:medium
+
+- Status: **finished** (updated 2026-11-20 21:58:27 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm/runs/liveness`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm/records/liveness.jsonl --configs flash:high,haiku:medium --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm/runs/liveness`
+- Records: 23 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm/records/liveness.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-listing-liveness flash:high | 46 | 46 | 0 | $0.009 |  |
+| job-listing-liveness haiku:medium | 46 | 46 | 0 | $0.099 |  |
+
+Recorded cost so far: $0.107.
+<!-- /ai-test-run:2026-11-20T21-56-31-211Z-claude-effort-ladderrun-dbb48f -->
+
+<!-- ai-test-run:2026-11-20T21-56-31-243Z-claude-effort-ladderrun-f8ad28 -->
+### 2026-11-20 21:56 UTC · claude-effort-ladder run · job-taxonomy-classify-batch · flash:off
+
+- Status: **finished** (updated 2026-11-20 21:56:38 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm/runs/taxonomy`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm/records/taxonomy.jsonl --configs flash:off --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm/runs/taxonomy`
+- Records: 5 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm/records/taxonomy.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-taxonomy-classify-batch flash:off | 10 | 10 | 0 | $0.000 |  |
+
+Recorded cost so far: $0.000.
+<!-- /ai-test-run:2026-11-20T21-56-31-243Z-claude-effort-ladderrun-f8ad28 -->
+
+<!-- ai-test-run:2026-11-20T21-56-46-670Z-planted-claimscorerscore-factsmjsappcareerFactFindingErrors-93ac12 -->
+### 2026-11-20 21:56 UTC · planted-claim scorer (score-facts.mjs, app careerFactFindingErrors) · fact-check · 2026-11-20 fact-check, 7 prompts x 3 blatant planted claims
+
+- Status: **finished** (updated 2026-11-20 21:56:46 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| opus:high (production rerun, 2 reps) | 14 | 14 | 0 | $0.302 | 42/42 planted caught; 0/118 false alarms; 1/8 production flags reproduced |
+| sonnet:high (2 reps) | 14 | 14 | 0 | $0.158 | 42/42 caught; 0/118 false alarms; 0/8 production flags |
+| sonnet:medium (1 rep) | 6 | 6 | 0 | $0.155 | 18/18 caught; 0/51 false alarms; 0/4 production flags; 1 cell missing |
+| haiku:high (2 reps) | 14 | 14 | 0 | $0.017 | 42/42 caught; 2/118 false alarms; 1/8 production flags |
+| haiku:medium (1 rep) | 5 | 5 | 0 | $0.016 | 15/15 caught; 1/42 false alarms; 0/4 production flags; 2 cells missing |
+
+Recorded cost so far: $0.647.
+- Note: Replay costs are uncached (DISABLE_PROMPT_CACHING); production Opus fact-check cost 0.05-0.12 USD with about 63k cached tokens. Blatant plants do not separate arms; a subtle set follows.
+<!-- /ai-test-run:2026-11-20T21-56-46-670Z-planted-claimscorerscore-factsmjsappcareerFactFindingErrors-93ac12 -->
+
+<!-- ai-test-run:2026-11-20T21-56-57-874Z-planted-claimscorerscore-factsmjsappcareerFactFindingErrors-25bc27 -->
+### 2026-11-20 21:56 UTC · planted-claim scorer (score-facts.mjs, app careerFactFindingErrors) · fact-check · 2026-11-20 fact-check blatant plants, complete (supersedes the partial row)
+
+- Status: **finished** (updated 2026-11-20 21:56:57 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| sonnet:medium (1 rep) | 7 | 7 | 0 | $0.155 | 21/21 caught; 0/59 false alarms; 0/4 production flags |
+| haiku:medium (1 rep) | 7 | 7 | 0 | $0.016 | 21/21 caught; 1/59 false alarms; 0/4 production flags |
+
+Recorded cost so far: $0.170.
+- Note: Opus high, Sonnet high, Haiku high rows of the previous record were complete (14 each); only the two medium arms were partial there.
+<!-- /ai-test-run:2026-11-20T21-56-57-874Z-planted-claimscorerscore-factsmjsappcareerFactFindingErrors-25bc27 -->
+
+<!-- ai-test-run:2026-11-20T21-58-41-773Z-claude-effort-ladderrun-9bcf24 -->
+### 2026-11-20 21:58 UTC · claude-effort-ladder run · fact-recheck · opus:high, sonnet:high, haiku:high
+
+- Status: **finished** (updated 2026-11-20 21:59:41 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fr-plants-r2`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-recheck-plants.jsonl --configs opus:high,sonnet:high,haiku:high --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fr-plants-r2`
+- Records: 4 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-recheck-plants.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| fact-recheck haiku:high | 8 | 8 | 0 | $0.136 |  |
+| fact-recheck opus:high | 8 | 8 | 0 | $2.473 |  |
+| fact-recheck sonnet:high | 8 | 8 | 0 | $1.292 |  |
+
+Recorded cost so far: $3.900.
+<!-- /ai-test-run:2026-11-20T21-58-41-773Z-claude-effort-ladderrun-9bcf24 -->
+
+<!-- ai-test-run:2026-11-20T21-58-41-780Z-claude-effort-ladderrun-31b3d0 -->
+### 2026-11-20 21:58 UTC · claude-effort-ladder run · fact-correction · haiku:high, sonnet:high
+
+- Status: **finished** (updated 2026-11-20 22:04:05 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fcorr-r2`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-correction-all.jsonl --configs haiku:high,sonnet:high --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fcorr-r2`
+- Records: 14 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-correction-all.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| fact-correction haiku:high | 28 | 28 | 0 | $0.522 |  |
+| fact-correction sonnet:high | 28 | 28 | 0 | $5.013 |  |
+
+Recorded cost so far: $5.536.
+<!-- /ai-test-run:2026-11-20T21-58-41-780Z-claude-effort-ladderrun-31b3d0 -->
+
+<!-- ai-test-run:2026-11-20T21-58-41-774Z-claude-effort-ladderrun-22b445 -->
+### 2026-11-20 21:58 UTC · claude-effort-ladder run · fact-check · haiku:medium, haiku:high, sonnet:high, opus:high
+
+- Status: **finished** (updated 2026-11-20 22:04:54 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fc-subtle-r2`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-check-subtle-plants.jsonl --configs haiku:medium,haiku:high,sonnet:high,opus:high --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fc-subtle-r2`
+- Records: 7 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-check-subtle-plants.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| fact-check haiku:high | 14 | 14 | 0 | $0.240 |  |
+| fact-check haiku:medium | 14 | 14 | 0 | $0.222 |  |
+| fact-check opus:high | 14 | 14 | 0 | $4.293 |  |
+| fact-check sonnet:high | 14 | 14 | 0 | $2.215 |  |
+
+Recorded cost so far: $6.971.
+<!-- /ai-test-run:2026-11-20T21-58-41-774Z-claude-effort-ladderrun-22b445 -->
+
+<!-- ai-test-run:2026-11-20T21-58-56-974Z-small-sample-confirm-scoremjs-88573d -->
+### 2026-11-20 21:58 UTC · small-sample-confirm-score.mjs · job-taxonomy-classify-batch
+
+- Status: **finished** (updated 2026-11-20 21:58:57 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| flash:off (confirmation run 2) | 10 | 10 | 0 | $0.000 | placements 68/68, records 10/10; app chunk validator re-check; cost lower than run 1 ($0.0009) from DeepSeek cache hits |
+
+Recorded cost so far: $0.000.
+- Note: Policy step 3 confirmation of the Flash off step-down on all 5 captured records (1 real + 4 planted), 2 reps; combined with run 1: 20/20 valid, 136/136 placements
+<!-- /ai-test-run:2026-11-20T21-58-56-974Z-small-sample-confirm-scoremjs-88573d -->
+
+<!-- ai-test-run:2026-11-20T21-58-57-211Z-small-sample-confirm-scoremjs-c74bc5 -->
+### 2026-11-20 21:58 UTC · small-sample-confirm-score.mjs · application-edit-recurrence
+
+- Status: **finished** (updated 2026-11-20 21:58:57 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:medium (confirmation run 2) | 8 | 8 | 0 | $0.014 | verdicts 8/8, real block 2/2, all 3 plants right |
+| haiku:high (production control, run 2) | 8 | 8 | 0 | $0.017 | verdicts 8/8, real block 2/2 |
+| flash:low (run 2) | 8 | 8 | 0 | $0.005 | verdicts 8/8, real block 2/2 (run 1 1/2) |
+
+Recorded cost so far: $0.036.
+- Note: Policy step 3 confirmation on all 4 captured records (1 real + 3 planted), 2 reps; schema check then interpretEditRecurrence, GATE_RECURRENCE_MIN=3
+<!-- /ai-test-run:2026-11-20T21-58-57-211Z-small-sample-confirm-scoremjs-c74bc5 -->
+
+<!-- ai-test-run:2026-11-20T21-58-57-522Z-small-sample-confirm-scoremjs-cd19d7 -->
+### 2026-11-20 21:58 UTC · small-sample-confirm-score.mjs · job-listing-liveness
+
+- Status: **finished** (updated 2026-11-20 21:58:57 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| flash:high (confirmation run 2) | 46 | 46 | 0 | $0.009 | real pages 30/30, real closed 2/2, plants 18/20 (both misses: JSON-LD-only closed page called open) |
+| haiku:medium (production control, run 2) | 46 | 45 | 0 | $0.099 | real pages 30/30, real closed 2/2, plants 16/19 valid (JSON-LD-only missed 3/3 valid + 1 quote-gate invalid) |
+
+Recorded cost so far: $0.108.
+- Note: Policy step 3 confirmation on all captured prompts: 13 real post-11-12 + the 10 planted pages of 2026-11-12 (prompt unchanged since 2026-11-04); validateListingLivenessResponse re-check; 2 reps
+<!-- /ai-test-run:2026-11-20T21-58-57-522Z-small-sample-confirm-scoremjs-cd19d7 -->
+
+<!-- ai-test-run:2026-11-20T21-59-32-113Z-claude-effort-ladderrun-5be16e -->
+### 2026-11-20 21:59 UTC · claude-effort-ladder run · job-listing-liveness · flash:high, haiku:medium
+
+- Status: **finished** (updated 2026-11-20 21:59:52 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm/runs/liveness-1112`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm/records/liveness-1112.jsonl --configs flash:high,haiku:medium --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm/runs/liveness-1112`
+- Records: 3 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm/records/liveness-1112.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-listing-liveness flash:high | 6 | 6 | 0 | $0.002 |  |
+| job-listing-liveness haiku:medium | 6 | 6 | 0 | $0.017 |  |
+
+Recorded cost so far: $0.019.
+<!-- /ai-test-run:2026-11-20T21-59-32-113Z-claude-effort-ladderrun-5be16e -->
+
+<!-- ai-test-run:2026-11-20T21-59-54-385Z-claude-effort-ladderrun-2836bf -->
+### 2026-11-20 21:59 UTC · claude-effort-ladder run · write · sonnet:high, haiku:high
+
+- Status: **finished** (updated 2026-11-20 22:11:02 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/a-cover`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/write-cover.jsonl --configs sonnet:high,haiku:high --reps 1 --concurrency 2 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/a-cover`
+- Records: 5 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/write-cover.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| write haiku:high | 5 | 5 | 0 | $0.192 |  |
+| write opus:low | 10 | 10 | 0 | $3.977 |  |
+| write opus:medium | 10 | 10 | 0 | $5.004 |  |
+| write sonnet:high | 5 | 5 | 0 | $1.321 |  |
+
+Recorded cost so far: $10.49.
+<!-- /ai-test-run:2026-11-20T21-59-54-385Z-claude-effort-ladderrun-2836bf -->
+
+<!-- ai-test-run:2026-11-20T22-00-28-599Z-claude-effort-ladderrun-9641e2 -->
+### 2026-11-20 22:00 UTC · claude-effort-ladder run · career-profile-compile · opus:high
+
+- Status: **finished** (updated 2026-11-20 22:02:39 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/runs/inc-corr-1-opus-high`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/records/inc-corr-1-opus-high.jsonl --configs opus:high --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/runs/inc-corr-1-opus-high`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/records/inc-corr-1-opus-high.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-compile opus:high | 2 | 2 | 0 | $1.069 |  |
+
+Recorded cost so far: $1.069.
+<!-- /ai-test-run:2026-11-20T22-00-28-599Z-claude-effort-ladderrun-9641e2 -->
+
+<!-- ai-test-run:2026-11-20T22-00-28-616Z-claude-effort-ladderrun-f9d815 -->
+### 2026-11-20 22:00 UTC · claude-effort-ladder run · career-profile-compile · sonnet:high
+
+- Status: **finished** (updated 2026-11-20 22:01:46 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/runs/inc-corr-1-sonnet-high`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/records/inc-corr-1-sonnet-high.jsonl --configs sonnet:high --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/runs/inc-corr-1-sonnet-high`
+- Records: 1 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/records/inc-corr-1-sonnet-high.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-compile sonnet:high | 1 | 1 | 0 | $0.242 |  |
+
+Recorded cost so far: $0.242.
+<!-- /ai-test-run:2026-11-20T22-00-28-616Z-claude-effort-ladderrun-f9d815 -->
+
+<!-- ai-test-run:2026-11-20T22-00-28-619Z-claude-effort-ladderrun-f8b02e -->
+### 2026-11-20 22:00 UTC · claude-effort-ladder run · career-profile-compile · opus:medium
+
+- Status: **finished** (updated 2026-11-20 22:02:30 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/runs/inc-corr-1-opus-medium`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/records/inc-corr-1-opus-medium.jsonl --configs opus:medium --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/runs/inc-corr-1-opus-medium`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/records/inc-corr-1-opus-medium.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-compile opus:medium | 2 | 2 | 0 | $1.012 |  |
+
+Recorded cost so far: $1.012.
+<!-- /ai-test-run:2026-11-20T22-00-28-619Z-claude-effort-ladderrun-f8b02e -->
+
+<!-- ai-test-run:2026-11-20T22-00-28-604Z-claude-effort-ladderrun-ba68f0 -->
+### 2026-11-20 22:00 UTC · claude-effort-ladder run · career-profile-compile · opus:xhigh
+
+- Status: **finished** (updated 2026-11-20 22:03:16 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/runs/inc-corr-1-opus-xhigh`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/records/inc-corr-1-opus-xhigh.jsonl --configs opus:xhigh --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/runs/inc-corr-1-opus-xhigh`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/records/inc-corr-1-opus-xhigh.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-compile opus:xhigh | 2 | 2 | 0 | $1.229 |  |
+
+Recorded cost so far: $1.229.
+<!-- /ai-test-run:2026-11-20T22-00-28-604Z-claude-effort-ladderrun-ba68f0 -->
+
+<!-- ai-test-run:2026-11-20T22-00-36-508Z-small-sample-confirm-scoremjs-8e1268 -->
+### 2026-11-20 22:00 UTC · small-sample-confirm-score.mjs · job-listing-liveness
+
+- Status: **finished** (updated 2026-11-20 22:00:36 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/small-sample-calls/confirm`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| flash:high (2026-11-12 real prompts) | 6 | 6 | 0 | $0.002 | pages 6/8 vs production; both misses the same LinkedIn page called open where production Haiku low said unclear (HTTP 200, title matches, no closed hits, no apply control in text); same miss as 2026-11-15 |
+| haiku:medium (2026-11-12 real prompts) | 6 | 6 | 0 | $0.017 | pages 8/8 |
+
+Recorded cost so far: $0.019.
+- Note: The 3 real 2026-11-12 prompts (4 pages) added so the confirmation covers every captured liveness prompt; app validator re-check; 2 reps
+<!-- /ai-test-run:2026-11-20T22-00-36-508Z-small-sample-confirm-scoremjs-8e1268 -->
+
+<!-- ai-test-run:2026-11-20T22-01-07-183Z-claude-effort-ladderrunrequirementswrapperrealvalidatorresumedcorrections-53c8bf -->
+### 2026-11-20 22:01 UTC · claude-effort-ladder run (requirements wrapper: real validator + resumed corrections) · requirements · haiku:high
+
+- Status: **finished** (updated 2026-11-20 22:05:05 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/requirements/runs/haiku-high`
+- Command: `node run-arms.mjs haiku:high 1 ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/requirements/runs/haiku-high`
+- Records: 10 newest accepted first-attempt prompts (capture-stage)
+- Reps: 1
+- Validator: validatePasteResponse (app) via expose-hook.mjs
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| requirements haiku:high | 10 | 7 | 0 | $0.093 |  |
+
+Recorded cost so far: $0.093.
+<!-- /ai-test-run:2026-11-20T22-01-07-183Z-claude-effort-ladderrunrequirementswrapperrealvalidatorresumedcorrections-53c8bf -->
+
+<!-- ai-test-run:2026-11-20T22-04-05-777Z-claude-effort-ladderrun-a57223 -->
+### 2026-11-20 22:04 UTC · claude-effort-ladder run · fact-correction · opus:high
+
+- Status: **finished** (updated 2026-11-20 22:05:18 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fcorr-opus-r1`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-correction-all.jsonl --configs opus:high --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fcorr-opus-r1`
+- Records: 14 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-correction-all.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| fact-correction opus:high | 14 | 14 | 0 | $4.917 |  |
+
+Recorded cost so far: $4.917.
+<!-- /ai-test-run:2026-11-20T22-04-05-777Z-claude-effort-ladderrun-a57223 -->
+
+<!-- ai-test-run:2026-11-20T22-05-37-184Z-claude-effort-ladderrun-da099a -->
+### 2026-11-20 22:05 UTC · claude-effort-ladder run · career-profile-audit-skills · sonnet:medium
+
+- Status: **finished** (updated 2026-11-20 22:06:48 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-audits/runs/plants-sonnet`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-audits/records/plants.jsonl --configs sonnet:medium --reps 1 --concurrency 2 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-audits/runs/plants-sonnet`
+- Records: 6 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-audits/records/plants.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-audit-skills sonnet:medium | 6 | 6 | 0 | $0.419 |  |
+
+Recorded cost so far: $0.419.
+<!-- /ai-test-run:2026-11-20T22-05-37-184Z-claude-effort-ladderrun-da099a -->
+
+<!-- ai-test-run:2026-11-20T22-05-37-532Z-ladderrunscoremjsappvalidatorre-check-12fe02 -->
+### 2026-11-20 22:05 UTC · ladder run, score.mjs (app validator re-check) · job-role-screen-batch · 2026-11-20 test-posting rule: 4 real + 3 planted title prompts
+
+- Status: **finished** (updated 2026-11-20 22:05:37 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens`
+- Records: 4 real title prompts (342-1546 rows) and 3 planted (338-566 rows + 3 test postings + 3 QA jobs each), samples after 2026-11-16T12:00Z, rule text checked
+- Models: claude-haiku-5-5, claude-sonnet-5-5, deepseek-flash
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:low | 14 | 14 | 0 | $0.223 | production rerun = noise floor; whole-batch agreement 85.6% (5756/6728); planted test postings removed 18/18 (all as test posting); real QA jobs removed 0/18 (4 to unsure) |
+| haiku:medium | 14 | 14 | 0 | $0.261 | agreement 89.6%; planted 18/18; QA removed 0/18; extra removals 234 vs 302 for the rerun |
+| sonnet:medium | 14 | 14 | 0 | $1.288 | agreement 84.8%; 501 extra removals; planted 18/18; QA removed 0/18 |
+| flash:off | 14 | 14 | 0 | $0.044 | agreement 37.9%; 2027 extra removals; planted 18/18; QA removed 12/18; 9 real QA/test jobs and 2 other real jobs given the reason test posting. Fails |
+
+Recorded cost so far: $1.816.
+- Note: One real ATS test posting in the data: production title pass sent it to unsure; every Claude arm removed it as test posting in at least one rep.
+<!-- /ai-test-run:2026-11-20T22-05-37-532Z-ladderrunscoremjsappvalidatorre-check-12fe02 -->
+
+<!-- ai-test-run:2026-11-20T22-05-37-576Z-ladderrunscoremjsappvalidatorre-check-5b5de0 -->
+### 2026-11-20 22:05 UTC · ladder run, score.mjs (app validator re-check) · job-role-snippet-screen-batch · 2026-11-20 test-posting rule: 4 real + 3 planted snippet prompts
+
+- Status: **finished** (updated 2026-11-20 22:05:37 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens`
+- Records: 4 real snippet prompts (46-50 rows) and 3 planted (22-33 rows + 6 each), samples after 2026-11-16T12:00Z
+- Models: claude-haiku-5-5, claude-sonnet-5-5, deepseek-flash
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:medium | 14 | 14 | 0 | $0.087 | production rerun = noise floor; agreement 86.5% (339/392; one rep at 30% on one prompt); planted 18/18; real QA jobs removed 3/18 (as QA work, not test posting) |
+| haiku:low | 14 | 14 | 0 | $0.082 | agreement 90.3%; extra removals 26 vs 50, missed removals 12 vs 3; planted 18/18; QA removed 3/18 (as QA work) |
+| sonnet:medium | 14 | 14 | 0 | $0.857 | agreement 65.1%; 136 extra removals; planted 18/18; QA 0/18 |
+| flash:low | 14 | 14 | 0 | $0.043 | agreement 52.0%; 186 extra removals; planted 18/18; QA removed 8/18. Fails |
+
+Recorded cost so far: $1.069.
+- Note: Blind judge packet of 120 disputed real rows (60 per pass) built in judge/; judge result pending.
+<!-- /ai-test-run:2026-11-20T22-05-37-576Z-ladderrunscoremjsappvalidatorre-check-5b5de0 -->
+
+<!-- ai-test-run:2026-11-20T22-05-54-539Z-requirements-real-validator-score-cf467d -->
+### 2026-11-20 22:05 UTC · requirements-real-validator-score · requirements
+
+- Status: **finished** (updated 2026-11-20 22:05:54 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/requirements`
+- Noise floor: sonnet rerun rep1 vs rep2: disposition 99.8% (583 units), priority 79.8%
+- Validator: app validatePasteResponse via loader re-export; prior-window store checks not replayed
+- Models: claude-sonnet-5-5, claude-haiku-5-5
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production archive (captured) | 10 | 10 | 0 | $0.141 | first-window calls; 0 ID-text items; 135/135 quotes exact |
+| sonnet:high rerun x2 (first try) | 20 | 18 | 0 | $0.112 | after 1 correction 20/20, cost to valid 0.1316; 1 cell 22/34 ID-text, 1 coverage; disposition vs prod 99.9%, priority 81.6%; 0.226 USD per 100 units advanced |
+| haiku:medium x2 (first try) | 20 | 8 | 0 | $0.009 | after 1 correction 19/20, after 2 19/20, cost to valid 0.0165; 11/20 first answers ID-text (107/419 items); disposition 98.9%, priority 70.5%; 0.034 USD per 100 units |
+| haiku:high x1 (first try) | 10 | 7 | 0 | $0.009 | after 1 correction 10/10, cost to valid 0.0136; 3/10 ID-text (27/211 items); disposition 99.1%, priority 70.5%; 0.029 USD per 100 units |
+
+Recorded cost so far: $0.271.
+- Note: Corrections: resumed session, rejection items appended as chooseText does, max 2. Blind judge packets in judge/ (pending).
+<!-- /ai-test-run:2026-11-20T22-05-54-539Z-requirements-real-validator-score-cf467d -->
+
+<!-- ai-test-run:2026-11-20T22-05-54-588Z-requirements-production-regression-0c8bbe -->
+### 2026-11-20 22:05 UTC · requirements-production-regression · requirements
+
+- Status: **finished** (updated 2026-11-20 22:05:54 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/requirements`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production sonnet:high since 2026-11-10, all submissions | 91 | 90 | 0 | $0.240 | 1 rejection 2026-11-19 = 18 ID-as-text items, accepted after correction; 0 safeguard refusals, 0 failed runs; 22 jobs; claude-sonnet-5-5 |
+| production sonnet:high since 2026-11-10, first-session calls | 37 | 36 | 0 | $0.137 | first try 97.3% |
+
+Recorded cost so far: $0.377.
+<!-- /ai-test-run:2026-11-20T22-05-54-588Z-requirements-production-regression-0c8bbe -->
+
+<!-- ai-test-run:2026-11-20T22-06-16-568Z-appvalidatorre-checkincremental-edit-a2faec -->
+### 2026-11-20 22:06 UTC · app validator re-check (incremental-edit) · career-profile-compile · incremental-edit prompt: opus xhigh/high/medium, sonnet high, haiku high
+
+- Status: **finished** (updated 2026-11-20 22:06:16 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts`
+- Records: 3 distinct incremental-edit prompts from 6 replay samples (one prompt answered 3 times in production)
+- Validator: careerSnapshot.js materialize + validateCareerProfilePage via validateNonApiAiSubmission, rebuilt from the prompt (crossPageMergeErrors not reproducible); reproduces production accept/reject on all 6 samples; correction prompt byte-equal to production
+- Coverage: technology labels in changed entities vs union of all answers: every arm 82-84/88 on the dense prompt and 14-16/16 on the other; one prompt gives an identical final shard for every arm
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| opus:xhigh | 6 | 4 | 0 | $3.474 | valid first try 4/6, after 1 correction 6/6; $0.374 a first call, $0.579 per accepted answer incl. corrections; its 2 reps differ in tech-reference detail on 2 of 3 prompts (noise floor) |
+| opus:high | 6 | 4 | 0 | $3.002 | first 4/6, after correction 6/6; $0.322 a call, $0.500 per accepted |
+| opus:medium | 6 | 4 | 0 | $2.836 | first 4/6, after correction 6/6; $0.304 a call, $0.473 per accepted |
+| sonnet:high | 6 | 5 | 0 | $1.205 | first 5/6, after correction 6/6; $0.161 a call, $0.201 per accepted |
+| haiku:high | 6 | 6 | 0 | $0.093 | first 6/6; $0.016 a call (SDK-reported) |
+| production opus:xhigh | 5 | 4 | 0 | $2.360 | 5 first attempts in the replay samples, 4 accepted; the rejected one (same grounding rule every Opus arm hit) accepted after 1 correction; cost of all 6 calls; 3 answers to one identical prompt all equal |
+
+Recorded cost so far: $12.97.
+- Note: Blind judge packets in judge/ (KEY.json separate) for the two prompts where answers differ.
+<!-- /ai-test-run:2026-11-20T22-06-16-568Z-appvalidatorre-checkincremental-edit-a2faec -->
+
+<!-- ai-test-run:2026-11-20T22-06-16-625Z-appvalidatorre-checkbandagreementrole-familyladder-a3b577 -->
+### 2026-11-20 22:06 UTC · app validator re-check + band agreement (role-family ladder) · job-compensation-assessment-batch · role-family ladder prompt: sonnet low rerun vs ladder
+
+- Status: **finished** (updated 2026-11-20 22:06:16 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts`
+- Records: 2 real ladder prompts (2026-11-14, 2026-11-19), 3 fresh identities + 3 cached
+- Disagreement: one off-by-one choice on overlapping source ranges (keep stated max vs keep stated min); the prompt gives no rule for it
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| sonnet:low | 4 | 4 | 0 | $0.109 | production setting rerun; valid 4/4; bands equal to production 1/6 fresh identities (noise floor), labels/sources 6/6; $0.0272 a call |
+| flash:low | 4 | 4 | 0 | $0.006 | valid 4/4; bands equal to production 5/6, sources 6/6, labels 4/6 (paraphrased on one identity); $0.0014 a call |
+| haiku:medium | 4 | 3 | 0 | $0.013 | valid 3/4; returned no ladder for 2 of 6 identities that have one; bands 1/6; $0.0031 a call |
+| haiku:high | 4 | 4 | 0 | $0.015 | valid 4/4 but no ladder for 2 of 6 identities; bands 0/6; $0.0039 a call |
+| sonnet:medium | 4 | 4 | 0 | $0.117 | valid 4/4; bands 3/6; $0.0291 a call |
+| opus:low | 4 | 4 | 0 | $0.183 | valid 4/4; bands 0/6 but identical across both reps (consistent start-year reading of overlapping source ranges); $0.0458 a call |
+
+Recorded cost so far: $0.442.
+- Note: Blind judge packet judge/ladders.md (KEY.json separate).
+<!-- /ai-test-run:2026-11-20T22-06-16-625Z-appvalidatorre-checkbandagreementrole-familyladder-a3b577 -->
+
+<!-- ai-test-run:2026-11-20T22-06-16-990Z-claude-effort-ladderrun-ee5588 -->
+### 2026-11-20 22:06 UTC · claude-effort-ladder run · career-profile-repair · haiku:medium
+
+- Status: **finished** (updated 2026-11-20 22:07:23 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r1-haiku-medium`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-haiku-medium-r1.jsonl --configs haiku:medium --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r1-haiku-medium`
+- Records: 4 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-haiku-medium-r1.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-repair haiku:medium | 4 | 4 | 0 | $0.045 |  |
+
+Recorded cost so far: $0.045.
+<!-- /ai-test-run:2026-11-20T22-06-16-990Z-claude-effort-ladderrun-ee5588 -->
+
+<!-- ai-test-run:2026-11-20T22-06-19-192Z-claude-effort-ladderrun-4cd31f -->
+### 2026-11-20 22:06 UTC · claude-effort-ladder run · fact-recheck · haiku:medium, haiku:high, opus:high
+
+- Status: **finished** (updated 2026-11-20 22:08:54 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fr-subtle-r2`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-recheck-subtle-plants.jsonl --configs haiku:medium,haiku:high,opus:high --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fr-subtle-r2`
+- Records: 3 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-recheck-subtle-plants.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| fact-recheck haiku:high | 6 | 6 | 0 | $0.106 |  |
+| fact-recheck haiku:medium | 6 | 6 | 0 | $0.098 |  |
+| fact-recheck opus:high | 6 | 6 | 0 | $1.833 |  |
+
+Recorded cost so far: $2.037.
+<!-- /ai-test-run:2026-11-20T22-06-19-192Z-claude-effort-ladderrun-4cd31f -->
+
+<!-- ai-test-run:2026-11-20T22-06-19-487Z-claude-effort-ladderrun-07d5e3 -->
+### 2026-11-20 22:06 UTC · claude-effort-ladder run · fact-recheck · opus:high
+
+- Status: **finished** (updated 2026-11-20 22:10:00 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fcorr-downstream`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-correction-downstream.jsonl --configs opus:high --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fcorr-downstream`
+- Records: 40 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-correction-downstream.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| fact-recheck opus:high | 40 | 40 | 0 | $11.89 |  |
+
+Recorded cost so far: $11.89.
+<!-- /ai-test-run:2026-11-20T22-06-19-487Z-claude-effort-ladderrun-07d5e3 -->
+
+<!-- ai-test-run:2026-11-20T22-06-50-554Z-claude-effort-laddercapture-career-61ed8b -->
+### 2026-11-20 22:06 UTC · claude-effort-ladder capture-career · career-profile-repair · haiku:medium
+
+- Status: **failed: Claude usage limit reached. Retry this application after your limit resets. (You've hit your weekly limit · resets 2pm (America/Toronto))** (updated 2026-11-20 22:13:27 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/converge-haiku-medium-1`
+- Command: `node scripts/claude-effort-ladder.mjs capture-career --source ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-09-career-capture/src/career data.md --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/converge-haiku-medium-1 --ladder-tasks career-profile-repair --configs haiku:medium --reps 1 --concurrency 3 --max-calls 0 --baseline-from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-09-career-capture/base2 --live-on-miss --profile-override career-profile-repair=haiku:medium`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production baseline | 27 | 23 |  | $0.125 | 2 repairs |
+| ladder cells | 5 | 3 | 0 | $0.026 | per-config rows: summarize --out |
+
+Recorded cost so far: $0.151.
+<!-- /ai-test-run:2026-11-20T22-06-50-554Z-claude-effort-laddercapture-career-61ed8b -->
+
+<!-- ai-test-run:2026-11-20T22-06-50-554Z-claude-effort-laddercapture-career-0939bf -->
+### 2026-11-20 22:06 UTC · claude-effort-ladder capture-career · career-profile-repair · haiku:medium
+
+- Status: **failed: Claude usage limit reached. Retry this application after your limit resets. (You've hit your weekly limit · resets 2pm (America/Toronto))** (updated 2026-11-20 22:12:37 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/converge-sonnet-low-control-1`
+- Command: `node scripts/claude-effort-ladder.mjs capture-career --source ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-09-career-capture/src/career data.md --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/converge-sonnet-low-control-1 --ladder-tasks career-profile-repair --configs haiku:medium --reps 1 --concurrency 3 --max-calls 0 --baseline-from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-09-career-capture/base2 --live-on-miss --profile-override career-profile-repair=sonnet:low`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production baseline | 30 | 20 |  | $0.465 | 1 repairs |
+| ladder cells | 8 | 7 | 1 | $0.033 | per-config rows: summarize --out |
+
+Recorded cost so far: $0.498.
+<!-- /ai-test-run:2026-11-20T22-06-50-554Z-claude-effort-laddercapture-career-0939bf -->
+
+<!-- ai-test-run:2026-11-20T22-07-23-502Z-claude-effort-ladderrun-b08292 -->
+### 2026-11-20 22:07 UTC · claude-effort-ladder run · career-profile-repair · haiku:high
+
+- Status: **finished** (updated 2026-11-20 22:09:06 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r1-haiku-high`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-haiku-high-r1.jsonl --configs haiku:high --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r1-haiku-high`
+- Records: 6 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-haiku-high-r1.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-repair haiku:high | 6 | 6 | 0 | $0.065 |  |
+
+Recorded cost so far: $0.065.
+<!-- /ai-test-run:2026-11-20T22-07-23-502Z-claude-effort-ladderrun-b08292 -->
+
+<!-- ai-test-run:2026-11-20T22-08-13-511Z-blindjudge-d6c40f -->
+### 2026-11-20 22:08 UTC · blind judge
+
+- Status: **finished** (updated 2026-11-20 22:08:13 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| title haiku:low | 120 | 95 | 25 | $0.000 | wrongRemovals 0 (right 72, acceptable 23); judge cost not metered |
+| title haiku:medium | 120 | 84 | 36 | $0.000 | wrongRemovals 0 (right 63, acceptable 21) |
+| snippet haiku:low | 120 | 51 | 69 | $0.000 | wrongRemovals 1 |
+| snippet haiku:medium | 120 | 60 | 60 | $0.000 | wrongRemovals 9 |
+| title sonnet:medium | 120 | 79 | 41 | $0.000 | wrongRemovals 0 |
+| snippet sonnet:medium | 120 | 95 | 25 | $0.000 | wrongRemovals 12 |
+| title flash:off | 120 | 85 | 35 | $0.000 | wrongRemovals 16 |
+| snippet flash:low | 120 | 93 | 27 | $0.000 | wrongRemovals 25 |
+
+Recorded cost so far: $0.000.
+<!-- /ai-test-run:2026-11-20T22-08-13-511Z-blindjudge-d6c40f -->
+
+<!-- ai-test-run:2026-11-20T22-08-54-970Z-claude-effort-ladderrun-354554 -->
+### 2026-11-20 22:08 UTC · claude-effort-ladder run · fact-check · haiku:medium, haiku:high
+
+- Status: **finished** (updated 2026-11-20 22:13:35 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fc-confirm`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-check-confirm.jsonl --configs haiku:medium,haiku:high --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fc-confirm`
+- Records: 40 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-check-confirm.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| fact-check haiku:high | 40 | 13 | 27 | $0.230 |  |
+| fact-check haiku:medium | 40 | 13 | 27 | $0.200 |  |
+
+Recorded cost so far: $0.430.
+<!-- /ai-test-run:2026-11-20T22-08-54-970Z-claude-effort-ladderrun-354554 -->
+
+<!-- ai-test-run:2026-11-20T22-09-06-183Z-claude-effort-ladderrun-9c74eb -->
+### 2026-11-20 22:09 UTC · claude-effort-ladder run · career-profile-repair · sonnet:low
+
+- Status: **finished** (updated 2026-11-20 22:09:45 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r1-sonnet-low`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-sonnet-low-r1.jsonl --configs sonnet:low --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r1-sonnet-low`
+- Records: 9 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-sonnet-low-r1.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-repair sonnet:low | 9 | 8 | 0 | $0.544 |  |
+
+Recorded cost so far: $0.544.
+<!-- /ai-test-run:2026-11-20T22-09-06-183Z-claude-effort-ladderrun-9c74eb -->
+
+<!-- ai-test-run:2026-11-20T22-09-45-115Z-claude-effort-ladderrun-5dace8 -->
+### 2026-11-20 22:09 UTC · claude-effort-ladder run · career-profile-repair · sonnet:medium
+
+- Status: **finished** (updated 2026-11-20 22:10:26 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r1-sonnet-medium`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-sonnet-medium-r1.jsonl --configs sonnet:medium --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r1-sonnet-medium`
+- Records: 9 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-sonnet-medium-r1.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-repair sonnet:medium | 9 | 9 | 0 | $0.441 |  |
+
+Recorded cost so far: $0.441.
+<!-- /ai-test-run:2026-11-20T22-09-45-115Z-claude-effort-ladderrun-5dace8 -->
+
+<!-- ai-test-run:2026-11-20T22-10-01-563Z-requirements-blind-judge-29e1af -->
+### 2026-11-20 22:10 UTC · requirements-blind-judge · requirements
+
+- Status: **finished** (updated 2026-11-20 22:10:01 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/requirements`
+- Judge: one blind judge per packet, 10 packets (one per job), sets cut to the shared unit range, all sets validator-passing (final valid answer)
+- Caveat: 3 packets (7793a90b, 67d57629, 61f4f06b) penalized merged production/Sonnet sets for quotes outside the cut range; excluding them: prod 7.14, sonnet 7.57, haiku:medium 7.00, haiku:high 7.14
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production (sonnet:high, archived answers) | 10 | 10 | 0 | $0.141 | judge mean 6.6/10; best 2, worst 3 |
+| sonnet:high rerun rep1 (claude-sonnet-5-5) | 10 | 10 | 0 | $0.137 | judge mean 7.0/10; best 2, worst 3;\|prod-rerun\|0.4 = judge noise floor |
+| haiku:medium rep1/rep2 (claude-haiku-5-5) | 10 | 10 | 0 | $0.009 | judge mean 7.2/10 (one packet used rep2); best 2, worst 3 |
+| haiku:high rep1 (claude-haiku-5-5) | 10 | 10 | 0 | $0.009 | judge mean 7.4/10; best 4, worst 1 |
+
+Recorded cost so far: $0.296.
+- Note: Unblinded by the concluder with judge/KEY.json; verdicts in judge/verdicts-*.json. Cost column = mean first-call cost of the judged arm.
+<!-- /ai-test-run:2026-11-20T22-10-01-563Z-requirements-blind-judge-29e1af -->
+
+<!-- ai-test-run:2026-11-20T22-10-10-864Z-requirements-blind-judge-213101 -->
+### 2026-11-20 22:10 UTC · requirements-blind-judge · requirements
+
+- Status: **finished** (updated 2026-11-20 22:10:10 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/requirements`
+- Supersedes: run 2026-11-20T22-10-01-563Z-requirements-blind-judge-29e1af (its best/worst counts were miscounted; means unchanged)
+- Judge: one blind judge per packet, 10 packets (one per job), sets cut to the shared unit range, all sets validator-passing
+- Caveat: 3 packets (7793a90b, 67d57629, 61f4f06b) penalized merged production/Sonnet sets for quotes outside the cut range; excluding them: prod 7.14, sonnet 7.57, haiku:medium 7.00, haiku:high 7.14
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production (sonnet:high, archived answers) | 10 | 10 | 0 | $0.141 | judge mean 6.6/10; best in 1 packet, worst in 4 |
+| sonnet:high rerun rep1 (claude-sonnet-5-5) | 10 | 10 | 0 | $0.137 | judge mean 7.0/10; best 2, worst 2;\|prod-rerun\|0.4 = judge noise floor |
+| haiku:medium rep1/rep2 (claude-haiku-5-5) | 10 | 10 | 0 | $0.009 | judge mean 7.2/10 (one packet used rep2); best 2, worst 2 |
+| haiku:high rep1 (claude-haiku-5-5) | 10 | 10 | 0 | $0.009 | judge mean 7.4/10; best 5, worst 2 |
+
+Recorded cost so far: $0.296.
+- Note: Unblinded by the concluder with judge/KEY.json; verdicts in judge/verdicts-*.json. Cost column = mean first-call cost of the judged arm.
+<!-- /ai-test-run:2026-11-20T22-10-10-864Z-requirements-blind-judge-213101 -->
+
+<!-- ai-test-run:2026-11-20T22-10-27-523Z-claude-effort-ladderrunrequirementswrapperrealvalidatorresumedcorrections-4ae825 -->
+### 2026-11-20 22:10 UTC · claude-effort-ladder run (requirements wrapper: real validator + resumed corrections) · requirements · haiku:high
+
+- Status: **finished** (updated 2026-11-20 22:13:30 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/requirements/confirm/runs/haiku-high-rep2`
+- Command: `node run-arms.mjs haiku:high 1 ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/requirements/confirm/runs/haiku-high-rep2`
+- Records: 10 newest accepted first-attempt prompts (capture-stage)
+- Reps: 1
+- Validator: validatePasteResponse (app) via expose-hook.mjs
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| requirements haiku:high | 10 | 4 | 2 | $0.074 |  |
+
+Recorded cost so far: $0.074.
+<!-- /ai-test-run:2026-11-20T22-10-27-523Z-claude-effort-ladderrunrequirementswrapperrealvalidatorresumedcorrections-4ae825 -->
+
+<!-- ai-test-run:2026-11-20T22-10-35-215Z-claude-effort-ladderrun-455c5a -->
+### 2026-11-20 22:10 UTC · claude-effort-ladder run · convert · haiku:medium, sonnet:low
+
+- Status: **finished** (updated 2026-11-20 22:14:27 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/runs/rep1`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/records.jsonl --configs haiku:medium,sonnet:low --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/runs/rep1`
+- Records: 10 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/records.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| convert haiku:medium | 10 | 5 | 5 | $0.135 |  |
+| convert sonnet:low | 10 | 5 | 5 | $0.994 |  |
+
+Recorded cost so far: $1.129.
+<!-- /ai-test-run:2026-11-20T22-10-35-215Z-claude-effort-ladderrun-455c5a -->
+
+<!-- ai-test-run:2026-11-20T22-10-49-410Z-claude-effort-ladderrun-958945 -->
+### 2026-11-20 22:10 UTC · claude-effort-ladder run · job-role-snippet-screen-batch · haiku:low, haiku:medium
+
+- Status: **finished** (updated 2026-11-20 22:13:02 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/confirm/runs/snippet`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/confirm/records/snippet.jsonl --configs haiku:low,haiku:medium --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/confirm/runs/snippet`
+- Records: 11 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/confirm/records/snippet.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-role-snippet-screen-batch haiku:low | 22 | 12 | 10 | $0.069 |  |
+| job-role-snippet-screen-batch haiku:medium | 22 | 12 | 10 | $0.076 |  |
+
+Recorded cost so far: $0.145.
+<!-- /ai-test-run:2026-11-20T22-10-49-410Z-claude-effort-ladderrun-958945 -->
+
+<!-- ai-test-run:2026-11-20T22-11-17-380Z-claude-effort-ladderrun-1362ce -->
+### 2026-11-20 22:11 UTC · claude-effort-ladder run · career-profile-repair · haiku:medium
+
+- Status: **finished** (updated 2026-11-20 22:11:58 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r2-haiku-medium`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-haiku-medium-r2.jsonl --configs haiku:medium --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r2-haiku-medium`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-haiku-medium-r2.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-repair haiku:medium | 2 | 2 | 0 | $0.019 |  |
+
+Recorded cost so far: $0.019.
+<!-- /ai-test-run:2026-11-20T22-11-17-380Z-claude-effort-ladderrun-1362ce -->
+
+<!-- ai-test-run:2026-11-20T22-11-58-982Z-claude-effort-ladderrun-6f6ea9 -->
+### 2026-11-20 22:11 UTC · claude-effort-ladder run · career-profile-repair · haiku:high
+
+- Status: **finished** (updated 2026-11-20 22:13:36 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r2-haiku-high`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-haiku-high-r2.jsonl --configs haiku:high --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r2-haiku-high`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-haiku-high-r2.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-repair haiku:high | 2 | 2 | 0 | $0.025 |  |
+
+Recorded cost so far: $0.025.
+<!-- /ai-test-run:2026-11-20T22-11-58-982Z-claude-effort-ladderrun-6f6ea9 -->
+
+<!-- ai-test-run:2026-11-20T22-12-18-797Z-claude-effort-ladderrun-1cf6b0 -->
+### 2026-11-20 22:12 UTC · claude-effort-ladder run · career-profile-compile · opus:high
+
+- Status: **finished** (updated 2026-11-20 22:14:17 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude/confirm/runs/incremental`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude/confirm/records/incremental.jsonl --configs opus:high --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude/confirm/runs/incremental`
+- Records: 3 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude/confirm/records/incremental.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-compile opus:high | 6 | 3 | 3 | $1.202 |  |
+
+Recorded cost so far: $1.202.
+<!-- /ai-test-run:2026-11-20T22-12-18-797Z-claude-effort-ladderrun-1cf6b0 -->
+
+<!-- ai-test-run:2026-11-20T22-12-23-220Z-writing-gate-rescore-29407d -->
+### 2026-11-20 22:12 UTC · writing-gate-rescore · write-cover-only
+
+- Status: **finished** (updated 2026-11-20 22:12:23 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing`
+- Validator: splitWriteVerifyWriterResponse + evaluateCoverLetterChecks/partitionCheckResults; convert-dependent gates not run
+- Models: claude-opus-5-5 claude-sonnet-5-5 claude-haiku-5-5
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| opus:medium (production rerun) | 10 | 10 | 0 | $0.500 | 10/10 write-accepted and letter-gate pass; 9/10 over letter capacity; mean 2571 chars |
+| opus:low | 10 | 10 | 0 | $0.398 | 10/10 accepted and gate pass; 8/10 over capacity; 2521 chars |
+| sonnet:high | 5 | 4 | 1 | $0.264 | 5 accepted; 1 target-company-binding gate; 1/5 over capacity; 2295 chars |
+| haiku:high | 5 | 4 | 1 | $0.039 | 5 accepted; 1 target-company-binding gate; 4/5 over capacity; 2471 chars |
+| archived production (old prompt; CLI) | 5 | 5 | 0 | $0.249 | 5/5 over capacity; mean about 3230 chars |
+
+Recorded cost so far: $1.450.
+- Note: 5 cover-only jobs; prompts rebuilt with current head incl. letter capacity; blind judge pending in judge/a-cover-*
+<!-- /ai-test-run:2026-11-20T22-12-23-220Z-writing-gate-rescore-29407d -->
+
+<!-- ai-test-run:2026-11-20T22-12-23-269Z-writing-gate-rescore-96b621 -->
+### 2026-11-20 22:12 UTC · writing-gate-rescore · write-two-document
+
+- Status: **finished** (updated 2026-11-20 22:12:23 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| opus:low (production rerun) | 12 | 10 | 2 | $0.414 | 12 accepted; 2 target-company-binding; 12/12 over letter capacity; 2855 chars |
+| opus:medium | 6 | 4 | 2 | $0.589 | 6 accepted; 2 target-company-binding; 4/6 over capacity |
+| sonnet:high | 6 | 5 | 1 | $0.340 | 6 accepted; 1 target-company-binding; 2/6 over capacity |
+| archived production opus:low (old prompt) | 6 | 2 | 4 | $0.234 | 4 prior-employer-short-form under current gates |
+
+Recorded cost so far: $1.577.
+- Note: 6 newest two-document jobs; résumé gates need convert, not run; blind judge pending in judge/b-both-*
+<!-- /ai-test-run:2026-11-20T22-12-23-269Z-writing-gate-rescore-96b621 -->
+
+<!-- ai-test-run:2026-11-20T22-12-23-380Z-writing-gate-rescore-ab98b9 -->
+### 2026-11-20 22:12 UTC · writing-gate-rescore · editorial-plan-downstream-cover
+
+- Status: **finished** (updated 2026-11-20 22:12:23 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| opus:xhigh outline (rerun) | 5 | 4 | 1 | $0.933 | plan 0.439 + letter 0.494; 5/5 outlines valid; 1 target-company-binding |
+| haiku:high outline | 5 | 5 | 0 | $0.541 | plan 0.020 + letter 0.521; 5/5 outlines valid |
+
+Recorded cost so far: $1.474.
+- Note: outline swapped with writerPromptWithEditorialPlan; letters by opus:medium; blind judge pending in judge/c-plan-*
+<!-- /ai-test-run:2026-11-20T22-12-23-380Z-writing-gate-rescore-ab98b9 -->
+
+<!-- ai-test-run:2026-11-20T22-13-35-088Z-claude-effort-ladderrun-c72338 -->
+### 2026-11-20 22:13 UTC · claude-effort-ladder run · fact-recheck · haiku:medium, opus:high
+
+- Status: **finished** (updated 2026-11-20 22:13:57 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fr-confirm`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-recheck-confirm.jsonl --configs haiku:medium,opus:high --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fr-confirm`
+- Records: 14 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-recheck-confirm.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| fact-recheck haiku:medium | 14 | 0 | 14 | $0.000 |  |
+| fact-recheck opus:high | 14 | 0 | 14 | $0.000 |  |
+
+Recorded cost so far: $0.000.
+<!-- /ai-test-run:2026-11-20T22-13-35-088Z-claude-effort-ladderrun-c72338 -->
+
+<!-- ai-test-run:2026-11-20T22-13-36-992Z-claude-effort-ladderrun-7b7f3a -->
+### 2026-11-20 22:13 UTC · claude-effort-ladder run · career-profile-repair · sonnet:low
+
+- Status: **finished** (updated 2026-11-20 22:13:40 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r2-sonnet-low`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-sonnet-low-r2.jsonl --configs sonnet:low --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r2-sonnet-low`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-sonnet-low-r2.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-repair sonnet:low | 2 | 0 | 2 | $0.000 |  |
+
+Recorded cost so far: $0.000.
+<!-- /ai-test-run:2026-11-20T22-13-36-992Z-claude-effort-ladderrun-7b7f3a -->
+
+<!-- ai-test-run:2026-11-20T22-13-40-731Z-claude-effort-ladderrun-0a1241 -->
+### 2026-11-20 22:13 UTC · claude-effort-ladder run · career-profile-repair · sonnet:medium
+
+- Status: **finished** (updated 2026-11-20 22:13:44 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r2-sonnet-medium`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-sonnet-medium-r2.jsonl --configs sonnet:medium --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r2-sonnet-medium`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-sonnet-medium-r2.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-repair sonnet:medium | 2 | 0 | 2 | $0.000 |  |
+
+Recorded cost so far: $0.000.
+<!-- /ai-test-run:2026-11-20T22-13-40-731Z-claude-effort-ladderrun-0a1241 -->
+
+<!-- ai-test-run:2026-11-21T01-17-23-596Z-claude-effort-ladderrun-2abbd0 -->
+### 2026-11-21 01:17 UTC · claude-effort-ladder run · convert · haiku:medium, sonnet:low
+
+- Status: **finished** (updated 2026-11-21 01:17:34 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/runs/rep1`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/records.jsonl --configs haiku:medium,sonnet:low --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/runs/rep1`
+- Records: 10 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/records.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| convert haiku:medium | 15 | 5 | 10 | $0.135 |  |
+| convert sonnet:low | 15 | 5 | 10 | $0.994 |  |
+
+Recorded cost so far: $1.129.
+<!-- /ai-test-run:2026-11-21T01-17-23-596Z-claude-effort-ladderrun-2abbd0 -->
+
+<!-- ai-test-run:2026-11-21T01-17-31-145Z-claude-effort-ladderrun-965715 -->
+### 2026-11-21 01:17 UTC · claude-effort-ladder run · career-profile-repair · sonnet:low
+
+- Status: **finished** (updated 2026-11-21 01:17:34 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r2-sonnet-low`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-sonnet-low-r2.jsonl --configs sonnet:low --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r2-sonnet-low`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-sonnet-low-r2.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-repair sonnet:low | 4 | 0 | 4 | $0.000 |  |
+
+Recorded cost so far: $0.000.
+<!-- /ai-test-run:2026-11-21T01-17-31-145Z-claude-effort-ladderrun-965715 -->
+
+<!-- ai-test-run:2026-11-21T01-17-44-494Z-claude-effort-ladderrun-1baa6f -->
+### 2026-11-21 01:17 UTC · claude-effort-ladder run · job-role-snippet-screen-batch · haiku:low, haiku:medium
+
+- Status: **finished** (updated 2026-11-21 01:18:00 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/confirm/runs/snippet`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/confirm/records/snippet.jsonl --configs haiku:low,haiku:medium --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/confirm/runs/snippet`
+- Records: 11 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/confirm/records/snippet.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-role-snippet-screen-batch haiku:low | 32 | 12 | 20 | $0.069 |  |
+| job-role-snippet-screen-batch haiku:medium | 32 | 12 | 20 | $0.076 |  |
+
+Recorded cost so far: $0.145.
+<!-- /ai-test-run:2026-11-21T01-17-44-494Z-claude-effort-ladderrun-1baa6f -->
+
+<!-- ai-test-run:2026-11-21T01-18-12-514Z-requirements-haiku-high-confirmation-72cee9 -->
+### 2026-11-21 01:18 UTC · requirements-haiku-high-confirmation · requirements
+
+- Status: **finished** (updated 2026-11-21 01:18:12 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/requirements/confirm`
+- Status: partial (usage limit), confirmation not complete
+- Decision: keep sonnet:high; haiku:high fails the first-try validity criterion
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:high rep2 (claude-haiku-5-5, real validator + resumed corrections) | 10 | 4 | 2 | $0.009 | PARTIAL: weekly Claude usage limit; 8 of 10 cells ran; first try 4/8; after 1 correction 6/8; 2 corrections and 2 cells blocked (CLAUDE_USAGE_LIMIT); ID-as-text was the rule on all 4 first-try rejections; spent $0.088 incl. corrections |
+| haiku:high rep1+rep2 combined | 18 | 11 | 0 | $0.009 | first try 11/18 (61%) vs production 36/37 (97%) and sonnet:high rerun 18/20 (90%); after 1 correction 16/18 with 2 unknown |
+
+Recorded cost so far: $0.019.
+- Note: Confirmation run dir: requirements/confirm/runs/haiku-high-rep2 (same 10 records as rep1). Recorded by the concluder from results.jsonl and corrections.jsonl.
+<!-- /ai-test-run:2026-11-21T01-18-12-514Z-requirements-haiku-high-confirmation-72cee9 -->
+
+<!-- ai-test-run:2026-11-21T01-18-12-531Z-career-audits-score-47b5f4 -->
+### 2026-11-21 01:18 UTC · career-audits-score · career-profile-audit-skills+5 audits (post-11-16 skillsHeldByOtherPages)
+
+- Status: **finished** (updated 2026-11-21 01:18:12 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-audits`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:medium (prod rerun) | 84 | 81 | 3 | $0.006 | app validator re-check; all 3 invalid on skills (EDIT_ENTITY_INVALID x2, schema/quote x1); verdict agreement with prod 75/84; rep-vs-rep 35/42; skills agree 13/14; held-skill violations 0 |
+| haiku:low | 84 | 83 | 1 | $0.005 | verdict agreement with prod 70/84; rep-vs-rep 32/42; skills agree 9/14, findings/call 0.86 vs 1.21; one skills prompt where prod found 3 and medium 1-2: low found 0 in both reps; held-skill violations 0 |
+| plants haiku:low | 6 | 6 | 0 | $0.009 | skills plants: held-skill-as-missing trap fails 0/6, rename-into-held caught 6/6, fabricated skill caught 6/6, unmatched findings 2; clean copies 6/6 valid |
+| plants haiku:medium | 6 | 6 | 0 | $0.013 | trap fails 0/6, rename caught 6/6, fabricated caught 6/6, unmatched findings 6 |
+| plants sonnet:medium | 3 | 3 | 0 | $0.070 | upper reference: trap fails 0/3, rename 3/3, fabricated 3/3, unmatched 0 |
+| corrections pass | 4 | 0 | 4 | $0.000 | PARTIAL: Claude weekly usage limit hit before the correction re-asks for the 4 invalid cells ran; validAfter not measured |
+
+Recorded cost so far: $0.103.
+<!-- /ai-test-run:2026-11-21T01-18-12-531Z-career-audits-score-47b5f4 -->
+
+<!-- ai-test-run:2026-11-21T01-18-31-571Z-claude-effort-ladderrun-0eac1f -->
+### 2026-11-21 01:18 UTC · claude-effort-ladder run · job-compensation-assessment-batch · opus:low, flash:off, flash:medium, flash:high, pro:off, pro:low, pro:medium, pro:high
+
+- Status: **finished** (updated 2026-11-21 01:26:20 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude/confirm-ladders/runs`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude/confirm-ladders/ladders.jsonl --configs opus:low,flash:off,flash:medium,flash:high,pro:off,pro:low,pro:medium,pro:high --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude/confirm-ladders/runs`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude/confirm-ladders/ladders.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-compensation-assessment-batch flash:high | 4 | 4 | 0 | $0.012 |  |
+| job-compensation-assessment-batch flash:medium | 4 | 4 | 0 | $0.014 |  |
+| job-compensation-assessment-batch flash:off | 4 | 4 | 0 | $0.002 |  |
+| job-compensation-assessment-batch opus:low | 4 | 0 | 4 | $0.000 |  |
+| job-compensation-assessment-batch pro:high | 4 | 3 | 1 | $0.088 |  |
+| job-compensation-assessment-batch pro:low | 4 | 4 | 0 | $0.049 |  |
+| job-compensation-assessment-batch pro:medium | 4 | 4 | 0 | $0.090 |  |
+| job-compensation-assessment-batch pro:off | 4 | 4 | 0 | $0.008 |  |
+
+Recorded cost so far: $0.264.
+<!-- /ai-test-run:2026-11-21T01-18-31-571Z-claude-effort-ladderrun-0eac1f -->
+
+<!-- ai-test-run:2026-11-21T01-18-36-003Z-repairhost-checkscorer-0861b9 -->
+### 2026-11-21 01:18 UTC · repair host-check scorer · career-profile-repair · attempt-0 replay re-validated with careerSnapshot.js edit-repair checks (PARTIAL: usage limit)
+
+- Status: **partial** (updated 2026-11-21 01:18:36 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair`
+- Noise floor: rep1 vs rep2 same decline-or-edit: sonnet:low 6/7, sonnet:medium 6/6, haiku:medium 7/9, haiku:high 5/8; cross-arm vs sonnet:low: haiku:medium 22/26, haiku:high 19/22, sonnet:medium 23/24
+- Step 3: capture-career convergence (haiku:medium arm + sonnet:low control) stopped by Claude weekly usage limit at 5 and 8 ladder cells; not concluded
+- Models: claude-haiku-5-5, claude-sonnet-5-5
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:medium | 24 | 20 | 1 | $0.007 | valid after corrections 23/24; declines 6 (2/2 where prod declined, 4 where prod edited); no-change edits 2; same decision as prod 15/19; same profile 6/19; cost/call with corrections $0.0101 |
+| haiku:high | 24 | 18 | 2 | $0.010 | after corrections 22/24; declines 5 (2/2, 3 where prod edited); no-progress 1; not-editable 2; same decision 15/18; same profile 7/18; with corrections $0.0137 |
+| sonnet:low (production rerun) | 24 | 15 | 0 | $0.067 | after corrections 22/24 + 2 pending (usage limit); not-editable 6; no-progress 2; no-change 1; declines 1 (1/2); same decision 14/15; same profile 10/15; with corrections $0.0899 |
+| sonnet:medium | 24 | 15 | 0 | $0.068 | after corrections 22/24 + 2 pending (usage limit); not-editable 6; no-change 2; parse 1; declines 1 (0/2); same decision 13/15; same profile 11/15; with corrections $0.0864 |
+| production samples (stored) | 22 | 11 | 11 |  | re-validated 22/22 reproduced; 10 rejections are one pre-decline 2026-11-16 record looping attempts 0-9 (no-progress 5, edited-page-invalid 4, settled-target 1); 1 post-decline EDIT_FIELD_NOT_EDITABLE fixed on attempt 1; 0 cross-page duplicate |
+
+Recorded cost so far: $0.153.
+<!-- /ai-test-run:2026-11-21T01-18-36-003Z-repairhost-checkscorer-0861b9 -->
+
+<!-- ai-test-run:2026-11-21T01-18-43-881Z-role-screenconfirmscorer-eb212a -->
+### 2026-11-21 01:18 UTC · role-screen confirm scorer · job-role-snippet-screen-batch
+
+- Status: **finished** (updated 2026-11-21 01:18:43 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/confirm`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:low | 22 | 12 | 10 | $0.069 | PARTIAL 6/11 prompts (weekly usage limit); agreement with prod 89.1% (408/458), extra removals 34, missed 16; app validator 12/12 |
+| haiku:medium | 22 | 12 | 10 | $0.076 | PARTIAL 6/11 prompts; production rerun; agreement 89.1% (408/458), extra 34, missed 16; app validator 12/12 |
+
+Recorded cost so far: $0.145.
+- Note: Step-down confirmation for haiku:low on every captured snippet prompt carrying the test-posting rule; 5 prompts unrun (20 cells failed on Claude weekly limit). Ladder run 2026-11-20T22-10-49-410Z-claude-effort-ladderrun-958945.
+<!-- /ai-test-run:2026-11-21T01-18-43-881Z-role-screenconfirmscorer-eb212a -->
+
+<!-- ai-test-run:2026-11-21T01-19-02-412Z-convert-gate-rescore-dd4056 -->
+### 2026-11-21 01:19 UTC · convert-gate-rescore · convert
+
+- Status: **finished** (updated 2026-11-21 01:19:02 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production archived (sonnet medium) | 10 | 8 | 2 | $0.093 | first-try content gate (fit unmeasured); gate rebuild agrees with production on 33/35 post-cut answers |
+| sonnet:medium rerun | 20 | 16 | 4 | $0.199 | production-setting noise-floor control; project-field 2, education-field 1, figure-discipline 1 |
+| haiku:high | 20 | 15 | 5 | $0.029 | project-field 2, unit-source-grounding 1, figure-discipline 1, target-company-binding 1; no evidenceId-cap breaks |
+| haiku:medium | 5 | 3 | 2 | $0.027 | PARTIAL 5 of 10 cells (weekly usage limit); unit-source-grounding 2 |
+| sonnet:low | 5 | 3 | 2 | $0.199 | PARTIAL 5 of 10 cells (weekly usage limit); education-field 2, project-field 1; same per-call cost as medium |
+| archive regression after 2026-11-16 | 35 | 17 | 18 | $0.123 | production first-try accepted 17/35 after cut vs 24/75 from 11-10 to cut; content pass 21/35 vs 35/75 |
+
+Recorded cost so far: $0.670.
+<!-- /ai-test-run:2026-11-21T01-19-02-412Z-convert-gate-rescore-dd4056 -->
+
+<!-- ai-test-run:2026-11-21T01-19-12-957Z-planted-claimscorerscore-factsmjs-bc4017 -->
+### 2026-11-21 01:19 UTC · planted-claim scorer (score-facts.mjs) · fact-check · 2026-11-20 fact-check subtle plants, 7 prompts x 3, 2 reps (fc-subtle-r2)
+
+- Status: **finished** (updated 2026-11-21 01:19:12 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:medium | 14 | 14 | 0 | $0.016 | unit 37/42 (per rep 19,18 of 21); omission 5/10; false alarms 1/118; prod flags 3/8 |
+| haiku:high | 14 | 14 | 0 | $0.017 | unit 37/42 (18,19); omission 5/10; false alarms 3/118; prod flags 4/8 |
+| sonnet:high | 14 | 14 | 0 | $0.158 | unit 26/42 (13,13); omission 0/10, ownership 0/4; false alarms 0/118; prod flags 0/8 |
+| opus:high (production control) | 14 | 14 | 0 | $0.307 | unit 33/42 (16,17); omission 5/10; false alarms 0/118; prod flags 4/8 |
+
+Recorded cost so far: $0.498.
+- Note: Uncached replay cost; production Opus with cache is about 0.05-0.12 a call.
+<!-- /ai-test-run:2026-11-21T01-19-12-957Z-planted-claimscorerscore-factsmjs-bc4017 -->
+
+<!-- ai-test-run:2026-11-21T01-19-13-001Z-planted-claimscorerscore-factsmjs-ccf44d -->
+### 2026-11-21 01:19 UTC · planted-claim scorer (score-facts.mjs) · fact-recheck · 2026-11-20 fact-recheck plants: blatant 4 prompts x 3 (fr-plants-r2) and subtle 3 prompts x 3 (fr-subtle-r2), 2 reps
+
+- Status: **finished** (updated 2026-11-21 01:19:13 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:medium | 6 | 6 | 0 | $0.016 | subtle unit 15/18 (8,7 of 9); false alarms 5/62; blatant not run |
+| haiku:high | 14 | 14 | 0 | $0.017 | blatant 24/24, FA 0/38; subtle unit 14/18 (6,8), FA 2/62 |
+| sonnet:high | 8 | 8 | 0 | $0.161 | blatant 24/24, FA 0/38; subtle not run |
+| opus:high (production control) | 14 | 14 | 0 | $0.307 | blatant 24/24, FA 0/38; subtle unit 14/18 (7,7), FA 0/62 |
+
+Recorded cost so far: $0.502.
+<!-- /ai-test-run:2026-11-21T01-19-13-001Z-planted-claimscorerscore-factsmjs-ccf44d -->
+
+<!-- ai-test-run:2026-11-21T01-19-13-047Z-correctionscorerdownstreamOpusrecheckscore-correctionsmjsscore-downstreammjs-8755bd -->
+### 2026-11-21 01:19 UTC · correction scorer + downstream Opus recheck (score-corrections.mjs, score-downstream.mjs) · fact-correction · 2026-11-20 fact-correction, 14 first-attempt prompts (fcorr-r2, fcorr-opus-r1, fcorr-downstream)
+
+- Status: **finished** (updated 2026-11-21 01:19:13 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:high | 28 | 28 | 0 | $0.019 | offline valid 28/28 (no page-fit/grounding gates); downstream Opus recheck residual findings 1 over 14 jobs (13/14 clean) |
+| sonnet:high | 28 | 26 | 2 | $0.179 | offline valid 26/28 (fact-check-unchanged 2); not rechecked downstream |
+| opus:high (rerun) | 14 | 14 | 0 | $0.351 | offline valid 14/14; downstream residual 1 over 14 (13/14 clean) |
+| production archived opus:high | 14 | 12 | 2 | $0.180 | offline 12/14, app accepted 9/14 (scorer agrees 11/14); downstream residual 2 over 12 (11/12 clean) |
+
+Recorded cost so far: $0.729.
+- Note: Downstream recheck cost about 0.30 a call (Opus high). Offline scorer cannot re-run page-fit and grounding gates.
+<!-- /ai-test-run:2026-11-21T01-19-13-047Z-correctionscorerdownstreamOpusrecheckscore-correctionsmjsscore-downstreammjs-8755bd -->
+
+<!-- ai-test-run:2026-11-21T01-19-13-092Z-claude-effort-ladderrunscore-factsmjs-2ebc90 -->
+### 2026-11-21 01:19 UTC · claude-effort-ladder run + score-facts.mjs · fact-check · 2026-11-20 fact-check confirmation on all 40 captured prompts (fc-confirm), PARTIAL: weekly Claude limit
+
+- Status: **finished** (updated 2026-11-21 01:19:13 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:medium | 13 | 13 | 27 | $0.015 | 27 calls failed on usage limit; prod flags kept 2/3; other flags 2/192 |
+| haiku:high | 13 | 13 | 27 | $0.018 | 27 calls failed on usage limit; prod flags kept 2/3; other flags 7/192 |
+
+Recorded cost so far: $0.033.
+- Note: fact-recheck confirmation (fr-confirm, haiku:medium vs opus:high, 14 prompts) got 0/28 calls: usage limit.
+<!-- /ai-test-run:2026-11-21T01-19-13-092Z-claude-effort-ladderrunscore-factsmjs-2ebc90 -->
+
+<!-- ai-test-run:2026-11-21T01-21-22-670Z-career-audits-conclude-27ccf9 -->
+### 2026-11-21 01:21 UTC · career-audits-conclude · career-profile-audit-skills+5 audits
+
+- Status: **finished** (updated 2026-11-21 01:21:22 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-audits/verify`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:medium (prod rerun) | 84 | 81 | 3 | $0.006 | concluder recheck from raw results.jsonl: validity, cost, agreement 75/84, rep-vs-rep 35/42 all reproduced; skills agree 13/14 |
+| haiku:low | 84 | 83 | 1 | $0.005 | reproduced: agreement 70/84, rep-vs-rep 32/42; skills agree 9/14 (one prompt 0 findings both reps vs prod 3); other five 61/70 vs medium 62/70 |
+
+Recorded cost so far: $0.012.
+- Note: No blind judge used (planted defects + production agreement). Decision: keep Haiku medium on all six; low fails on skills and the audits switch together. Valid-after-corrections not measured (usage limit).
+<!-- /ai-test-run:2026-11-21T01-21-22-670Z-career-audits-conclude-27ccf9 -->
+
+<!-- ai-test-run:2026-11-21T01-23-02-660Z-claude-effort-ladderrun-7441bc -->
+### 2026-11-21 01:23 UTC · claude-effort-ladder run · convert · haiku:high, sonnet:medium
+
+- Status: **finished** (updated 2026-11-21 01:23:39 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/confirm/run`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/confirm/records-rest.jsonl --configs haiku:high,sonnet:medium --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/confirm/run`
+- Records: 25 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/confirm/records-rest.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| convert haiku:high | 25 | 0 | 25 | $0.000 |  |
+| convert sonnet:medium | 25 | 0 | 25 | $0.000 |  |
+
+Recorded cost so far: $0.000.
+<!-- /ai-test-run:2026-11-21T01-23-02-660Z-claude-effort-ladderrun-7441bc -->
+
+<!-- ai-test-run:2026-11-21T01-23-14-364Z-convert-blind-judge-bae4a5 -->
+### 2026-11-21 01:23 UTC · convert-blind-judge · convert
+
+- Status: **finished** (updated 2026-11-21 01:23:14 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:high | 9 | 9 | 0 | $0.029 | blind pairwise judge vs sonnet medium: haiku preferred 3, sonnet 1, tie 5; 0 faithfulness errors; score sums F45 P44 R36 W36 |
+| sonnet:medium | 9 | 9 | 0 | $0.199 | 2 citation-gap faithfulness errors in 1 packet; score sums F44 P45 R36 W36; visible text identical to haiku in 7 of 9 packets |
+
+Recorded cost so far: $0.228.
+- Note: 9 gate-passing pairs from runs/rep1+rep2 (7793a90b skipped: no gate-passing answer in either arm). Deciding differences were citation metadata, a JSON code fence (sonnet x2) and one haiku answer that dropped three words from the writer text.
+<!-- /ai-test-run:2026-11-21T01-23-14-364Z-convert-blind-judge-bae4a5 -->
+
+<!-- ai-test-run:2026-11-21T01-23-50-068Z-convert-confirmation-637580 -->
+### 2026-11-21 01:23 UTC · convert-confirmation · convert
+
+- Status: **finished** (updated 2026-11-21 01:23:50 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:high | 25 | 0 | 25 | $0.000 | PARTIAL: confirmation on the other 25 post-cut captured prompts; every call stopped by the weekly Claude usage limit, $0 spent |
+| sonnet:medium | 25 | 0 | 25 | $0.000 | PARTIAL: control arm of the same run, all 25 stopped by the usage limit |
+
+Recorded cost so far: $0.000.
+- Note: Haiku high step-down remains unconfirmed; rerun confirm/records-rest.jsonl at haiku:high,sonnet:medium after the limit resets.
+<!-- /ai-test-run:2026-11-21T01-23-50-068Z-convert-confirmation-637580 -->
+
+<!-- ai-test-run:2026-11-21T01-24-13-650Z-writing-blind-judge-e8a658 -->
+### 2026-11-21 01:24 UTC · writing-blind-judge · write-cover-only
+
+- Status: **finished** (updated 2026-11-21 01:24:13 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/unblind`
+- Judge: blind-6-way-5-jobs
+- NoiseFloor: rep-mean gap rank 0.8-2.0, overall 0.4-0.8
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| opus:medium (production rerun) | 10 | 10 | 0 | $0.500 | mean rank 3.60 of 6, mean overall 7.20, 4 unsupported claims, 2 firsts 2 lasts; rep means rank 4.0 vs 3.2 |
+| opus:low | 10 | 10 | 0 | $0.398 | mean rank 2.80, overall 7.40, 5 unsupported, 2 firsts 0 lasts; rep means rank 3.8 vs 1.8 (noise floor 2.0) |
+| sonnet:high | 5 | 4 | 1 | $0.264 | mean rank 4.80, overall 6.40, 3 unsupported, 0 firsts 1 last |
+| haiku:high | 5 | 4 | 1 | $0.039 | mean rank 3.40, overall 6.80, 2 unsupported, 1 first 2 lasts |
+
+Recorded cost so far: $1.201.
+- Note: Unblinded with judge/KEY.json; valid = letter gate battery pass; scripts unblind/unblind.mjs
+<!-- /ai-test-run:2026-11-21T01-24-13-650Z-writing-blind-judge-e8a658 -->
+
+<!-- ai-test-run:2026-11-21T01-24-13-694Z-writing-blind-judge-913c29 -->
+### 2026-11-21 01:24 UTC · writing-blind-judge · write-two-document
+
+- Status: **finished** (updated 2026-11-21 01:24:13 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/unblind`
+- Judge: blind-4-way-6-jobs
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| opus:low (production rerun) | 12 | 10 | 2 | $0.414 | mean rank 2.92 of 4, overall 6.42, 17 unsupported, 0 firsts 4 lasts; rep means rank 3.33 vs 2.50, overall 6.17 vs 6.67; rep2 beat rep1 5/6 |
+| opus:medium | 6 | 4 | 2 | $0.589 | mean rank 1.67, overall 7.50, 5 unsupported, 4 firsts; beat each opus:low rep 5/6 (same as rep-vs-rep) |
+| sonnet:high | 6 | 5 | 1 | $0.340 | mean rank 2.50, overall 6.67, 3 unsupported, 2 firsts 1 last; beat opus:low rep1 4/6, rep2 3/6 |
+
+Recorded cost so far: $1.343.
+- Note: Letter and résumé judged as a set; valid = letter gate battery pass
+<!-- /ai-test-run:2026-11-21T01-24-13-694Z-writing-blind-judge-913c29 -->
+
+<!-- ai-test-run:2026-11-21T01-24-20-710Z-writing-blind-judge-f8e0c4 -->
+### 2026-11-21 01:24 UTC · writing-blind-judge · editorial-plan-downstream-cover
+
+- Status: **finished** (updated 2026-11-21 01:24:20 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/unblind`
+- Judge: blind-4-way-5-jobs
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| opus:xhigh outline rerun -> opus:medium letter | 5 | 4 | 1 | $0.933 | mean rank 2.20 of 4, overall 7.40, 3 unsupported, 2 firsts 1 last |
+| haiku:high outline -> opus:medium letter | 5 | 5 | 0 | $0.541 | mean rank 2.60, overall 6.80, 4 unsupported, 2 firsts 2 lasts |
+| archived production xhigh outline -> opus:medium letter (a-cover letters) | 10 | 10 | 0 | $0.500 | mean rank 2.60, overall 7.00; rep means rank 2.4 vs 2.8; per-job rep gap mean\|rank\|1.2,\|overall\|0.8 |
+
+Recorded cost so far: $1.974.
+- Note: Haiku-vs-control gap 0.40 rank / 0.60 overall, inside the archived-outline rep gap
+<!-- /ai-test-run:2026-11-21T01-24-20-710Z-writing-blind-judge-f8e0c4 -->
+
+<!-- ai-test-run:2026-11-21T01-24-29-469Z-claude-effort-ladderrun-18fc39 -->
+### 2026-11-21 01:24 UTC · claude-effort-ladder run · write · sonnet:high
+
+- Status: **finished** (updated 2026-11-21 01:24:36 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-b-both`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/write-both.jsonl --configs sonnet:high --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-b-both`
+- Records: 6 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/write-both.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| write sonnet:high | 6 | 0 | 6 | $0.000 |  |
+
+Recorded cost so far: $0.000.
+<!-- /ai-test-run:2026-11-21T01-24-29-469Z-claude-effort-ladderrun-18fc39 -->
+
+<!-- ai-test-run:2026-11-21T01-24-29-469Z-claude-effort-ladderrun-acb479 -->
+### 2026-11-21 01:24 UTC · claude-effort-ladder run · write · haiku:high
+
+- Status: **finished** (updated 2026-11-21 01:24:39 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-a-cover`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/write-cover.jsonl --configs haiku:high --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-a-cover`
+- Records: 5 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/write-cover.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| write haiku:high | 10 | 0 | 10 | $0.000 |  |
+
+Recorded cost so far: $0.000.
+<!-- /ai-test-run:2026-11-21T01-24-29-469Z-claude-effort-ladderrun-acb479 -->
+
+<!-- ai-test-run:2026-11-21T01-24-29-469Z-claude-effort-ladderrun-b0c364 -->
+### 2026-11-21 01:24 UTC · claude-effort-ladder run · editorial-plan · haiku:high
+
+- Status: **finished** (updated 2026-11-21 01:24:36 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-c1-editorial`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/editorial-cover.jsonl --configs haiku:high --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-c1-editorial`
+- Records: 5 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/editorial-cover.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| editorial-plan haiku:high | 5 | 0 | 5 | $0.000 |  |
+
+Recorded cost so far: $0.000.
+<!-- /ai-test-run:2026-11-21T01-24-29-469Z-claude-effort-ladderrun-b0c364 -->
+
+<!-- ai-test-run:2026-11-21T01-27-26-052Z-app-validatorre-checkconfirmationpartial-ff5354 -->
+### 2026-11-21 01:27 UTC · app-validator re-check (confirmation, partial) · career-profile-compile incremental-edit (borrowed id)
+
+- Status: **finished** (updated 2026-11-21 01:27:26 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude/confirm`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| opus:high confirm | 6 | 1 | 3 | $1.202 | PARTIAL: 3 calls hit Claude weekly limit; 37488b 0/2 valid first try (literal-grounding, same as run 1); 0f6dee 1/1; no corrections run |
+
+Recorded cost so far: $1.202.
+<!-- /ai-test-run:2026-11-21T01-27-26-052Z-app-validatorre-checkconfirmationpartial-ff5354 -->
+
+<!-- ai-test-run:2026-11-21T01-27-36-769Z-blind-judgeunblinded-bc6a20 -->
+### 2026-11-21 01:27 UTC · blind-judge (unblinded) · career-profile-compile incremental-edit (borrowed id)
+
+- Status: **finished** (updated 2026-11-21 01:27:36 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude`
+- Judge: Opus blind judge, 4 packets, unblinded with judge/KEY.json
+- Probe: defect-probe.mjs agrees with judge on every cell
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| opus:xhigh | 6 | 6 | 0 | $0.374 | 0.579 per accepted; judge 5/5/5 on all judged answers; adds required bounded 0044 skill 2/2 |
+| opus:high | 6 | 6 | 0 | $0.322 | 0.500 per accepted; judge 5/5/5 on all; bounded skill 2/2; AI non-skill 2/2 |
+| opus:medium | 6 | 6 | 0 | $0.304 | 0.473 per accepted; bounded skill 2/2; misses AI negated non-skill label on 1/2 small-prompt reps (complete 4) |
+| sonnet:high | 6 | 6 | 0 | $0.161 | 0.201 per accepted; omits required bounded 0044 skill 2/2 (complete 4) |
+| haiku:high | 6 | 6 | 0 | $0.016 | omits bounded 0044 skill 2/2 (complete 4 and 3); misses AI label 1/2 |
+| production opus:xhigh | 4 | 4 | 0 | $0.000 | replay answers; judge 5/5/5 on both judged answers |
+
+Recorded cost so far: $1.177.
+<!-- /ai-test-run:2026-11-21T01-27-36-769Z-blind-judgeunblinded-bc6a20 -->
+
+<!-- ai-test-run:2026-11-21T01-27-36-812Z-blind-judgeunblindedbandscorer-5eb0b0 -->
+### 2026-11-21 01:27 UTC · blind-judge (unblinded) + band scorer · job-compensation-assessment-batch role-family ladder (borrowed id)
+
+- Status: **finished** (updated 2026-11-21 01:27:36 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude/confirm-ladders`
+- Reference: start-at-stated-minimum bands the judge scored 5 (opus:low answers); DeepSeek arms scored mechanically against it
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| opus:low | 4 | 4 | 0 | $0.046 | judge bands 5 on 6/6 identity answers; reps identical; confirmation rerun 0/4 (Claude weekly limit) |
+| sonnet:low (prod setting) | 4 | 4 | 0 | $0.027 | judge bands 5 on 4/6, 3 and 2 on the others |
+| sonnet:medium | 4 | 4 | 0 | $0.029 | judge bands 5 on 3/6 |
+| haiku:high | 4 | 4 | 0 | $0.004 | empty ladder 2/6 |
+| haiku:medium | 4 | 3 | 0 | $0.003 | empty ladder 2/6; one quote not verbatim |
+| flash:low | 4 | 4 | 0 | $0.001 | judge bands 3,3,3,3,3,2 (end-year reading on 6/6) |
+| flash:off | 4 | 4 | 0 | $0.001 | ref bands 0/6 |
+| flash:medium | 4 | 4 | 0 | $0.004 | ref bands 0/6 |
+| flash:high | 4 | 4 | 0 | $0.003 | ref bands 0/6 |
+| pro:off | 4 | 4 | 0 | $0.002 | ref bands 0/6 |
+| pro:low | 4 | 3 | 0 | $0.012 | ref bands 1/6 |
+| pro:medium | 4 | 4 | 0 | $0.022 | ref bands 0/6 |
+| pro:high | 4 | 3 | 1 | $0.029 | ref bands 1/4; 1 stream error |
+| production answers | 3 | 3 | 0 | $0.000 | replay; judge bands 3 on 3/3 (end-year reading) |
+
+Recorded cost so far: $0.184.
+<!-- /ai-test-run:2026-11-21T01-27-36-812Z-blind-judgeunblindedbandscorer-5eb0b0 -->
+
+<!-- ai-test-run:2026-11-21T01-58-11-787Z-claude-effort-ladderrun-73fac1 -->
+### 2026-11-21 01:58 UTC · claude-effort-ladder run · job-compensation-assessment-batch · flash:off, flash:low, flash:medium, flash:high, pro:off, pro:low
+
+- Status: **finished** (updated 2026-11-21 02:01:13 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/runs/rule-deepseek`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/records/ladders-rule.jsonl --configs flash:off,flash:low,flash:medium,flash:high,pro:off,pro:low --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/runs/rule-deepseek`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/records/ladders-rule.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-compensation-assessment-batch flash:high | 4 | 4 | 0 | $0.009 |  |
+| job-compensation-assessment-batch flash:low | 4 | 4 | 0 | $0.006 |  |
+| job-compensation-assessment-batch flash:medium | 4 | 4 | 0 | $0.011 |  |
+| job-compensation-assessment-batch flash:off | 4 | 4 | 0 | $0.002 |  |
+| job-compensation-assessment-batch pro:low | 4 | 4 | 0 | $0.041 |  |
+| job-compensation-assessment-batch pro:off | 4 | 4 | 0 | $0.008 |  |
+
+Recorded cost so far: $0.076.
+<!-- /ai-test-run:2026-11-21T01-58-11-787Z-claude-effort-ladderrun-73fac1 -->
+
+<!-- ai-test-run:2026-11-21T02-02-07-410Z-ladder-rule-retest-4dcda5 -->
+### 2026-11-21 02:02 UTC · ladder-rule-retest · job-compensation-assessment-batch-ladder
+
+- Status: **finished** (updated 2026-11-21 02:02:07 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/runs/rule-deepseek`
+- Records: records/ladders-rule.jsonl (2 prompts, 3 fresh identities; old LADDER CHECK suffix replaced by current ROLE_FAMILY_LADDER_SUFFIX)
+- Scorer: conclude/score-rule.mjs (app validator + same judge-endorsed identity truths as confirm-ladders/score.mjs)
+- Valid: app validator, single call, no retries (first try)
+- Claude arms: pending until 2026-11-21 14:00 America/Toronto (PENDING-CONFIRMATIONS row 11)
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| flash:off | 4 | 4 | 0 | $0.002 | judge-endorsed bands 6/6 (rep1 3/3, rep2 3/3); $0.0004/call; was 0/6 before the rule |
+| flash:low | 4 | 4 | 0 | $0.006 | bands 6/6 (3/3, 3/3); $0.0014/call; was 0/6 |
+| flash:medium | 4 | 4 | 0 | $0.011 | bands 6/6 (3/3, 3/3); $0.0027/call; was 0/6 |
+| flash:high | 4 | 4 | 0 | $0.009 | bands 4/6 (2/3, 2/3); $0.0022/call; one identity 0-2 start both reps |
+| pro:off | 4 | 4 | 0 | $0.008 | bands 5/6 (2/3, 3/3); $0.0021/call |
+| pro:low | 4 | 4 | 0 | $0.041 | bands 4/6 (2/3, 2/3); $0.0102/call; same identity miss as flash:high |
+
+Recorded cost so far: $0.076.
+- Note: Total spend $0.0761 over 24 calls. flash:off, flash:low and flash:medium pass 6/6 on both reps.
+<!-- /ai-test-run:2026-11-21T02-02-07-410Z-ladder-rule-retest-4dcda5 -->
+
+<!-- ai-test-run:2026-11-21T02-21-10-345Z-claude-effort-ladderrun-08127a -->
+### 2026-11-21 02:21 UTC · claude-effort-ladder run · job-role-snippet-screen-batch · haiku:low, haiku:medium
+
+- Status: **finished** (updated 2026-11-21 02:22:23 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/confirm/runs/snippet`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/confirm/records/snippet.jsonl --configs haiku:low,haiku:medium --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/confirm/runs/snippet`
+- Records: 11 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/confirm/records/snippet.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-role-snippet-screen-batch haiku:low | 42 | 22 | 20 | $0.108 |  |
+| job-role-snippet-screen-batch haiku:medium | 42 | 22 | 20 | $0.116 |  |
+
+Recorded cost so far: $0.224.
+<!-- /ai-test-run:2026-11-21T02-21-10-345Z-claude-effort-ladderrun-08127a -->
+
+<!-- ai-test-run:2026-11-21T02-21-14-676Z-claude-effort-ladderrun-4b0ffa -->
+### 2026-11-21 02:21 UTC · claude-effort-ladder run · convert · haiku:high, sonnet:medium
+
+- Status: **finished** (updated 2026-11-21 02:38:48 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/confirm/run2`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/confirm/records-rest.jsonl --configs haiku:high,sonnet:medium --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/confirm/run2`
+- Records: 25 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/confirm/records-rest.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| convert haiku:high | 25 | 25 | 0 | $0.734 |  |
+| convert sonnet:medium | 25 | 25 | 0 | $4.989 |  |
+
+Recorded cost so far: $5.723.
+<!-- /ai-test-run:2026-11-21T02-21-14-676Z-claude-effort-ladderrun-4b0ffa -->
+
+<!-- ai-test-run:2026-11-21T02-21-21-906Z-claude-effort-ladderrun-eed9d2 -->
+### 2026-11-21 02:21 UTC · claude-effort-ladder run · fact-recheck · haiku:high, opus:high
+
+- Status: **finished** (updated 2026-11-21 02:25:15 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fr-confirm2`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-recheck-confirm.jsonl --configs haiku:high,opus:high --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fr-confirm2`
+- Records: 14 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-recheck-confirm.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| fact-recheck haiku:high | 14 | 14 | 0 | $0.240 |  |
+| fact-recheck opus:high | 14 | 14 | 0 | $4.136 |  |
+
+Recorded cost so far: $4.376.
+<!-- /ai-test-run:2026-11-21T02-21-21-906Z-claude-effort-ladderrun-eed9d2 -->
+
+<!-- ai-test-run:2026-11-21T02-21-21-924Z-claude-effort-ladderrun-67aaed -->
+### 2026-11-21 02:21 UTC · claude-effort-ladder run · fact-check · haiku:medium, haiku:high
+
+- Status: **finished** (updated 2026-11-21 02:28:09 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fc-confirm`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-check-confirm.jsonl --configs haiku:medium,haiku:high --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fc-confirm`
+- Records: 40 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-check-confirm.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| fact-check haiku:high | 67 | 40 | 27 | $0.687 |  |
+| fact-check haiku:medium | 67 | 40 | 27 | $0.614 |  |
+
+Recorded cost so far: $1.301.
+<!-- /ai-test-run:2026-11-21T02-21-21-924Z-claude-effort-ladderrun-67aaed -->
+
+<!-- ai-test-run:2026-11-21T02-21-29-838Z-claude-effort-ladderrun-54c639 -->
+### 2026-11-21 02:21 UTC · claude-effort-ladder run · career-profile-compile · opus:high
+
+- Status: **finished** (updated 2026-11-21 02:21:58 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude/confirm/runs/incremental`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude/confirm/records/incremental.jsonl --configs opus:high --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude/confirm/runs/incremental`
+- Records: 3 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude/confirm/records/incremental.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-compile opus:high | 9 | 6 | 3 | $1.889 |  |
+
+Recorded cost so far: $1.889.
+<!-- /ai-test-run:2026-11-21T02-21-29-838Z-claude-effort-ladderrun-54c639 -->
+
+<!-- ai-test-run:2026-11-21T02-21-29-890Z-claude-effort-ladderrun-438c62 -->
+### 2026-11-21 02:21 UTC · claude-effort-ladder run · job-compensation-assessment-batch · sonnet:low, haiku:medium, haiku:high, opus:low
+
+- Status: **finished** (updated 2026-11-21 02:22:48 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/runs/rule-claude`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/records/ladders-rule.jsonl --configs sonnet:low,haiku:medium,haiku:high,opus:low --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/runs/rule-claude`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/records/ladders-rule.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-compensation-assessment-batch haiku:high | 4 | 4 | 0 | $0.015 |  |
+| job-compensation-assessment-batch haiku:medium | 4 | 4 | 0 | $0.013 |  |
+| job-compensation-assessment-batch opus:low | 4 | 4 | 0 | $0.181 |  |
+| job-compensation-assessment-batch sonnet:low | 4 | 4 | 0 | $0.105 |  |
+
+Recorded cost so far: $0.314.
+<!-- /ai-test-run:2026-11-21T02-21-29-890Z-claude-effort-ladderrun-438c62 -->
+
+<!-- ai-test-run:2026-11-21T02-21-32-647Z-claude-effort-ladderrun-97f728 -->
+### 2026-11-21 02:21 UTC · claude-effort-ladder run · career-profile-repair · haiku:medium
+
+- Status: **finished** (updated 2026-11-21 02:21:33 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r2-haiku-medium`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-haiku-medium-r2.jsonl --configs haiku:medium --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r2-haiku-medium`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-haiku-medium-r2.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-repair haiku:medium | 2 | 2 | 0 | $0.019 |  |
+
+Recorded cost so far: $0.019.
+<!-- /ai-test-run:2026-11-21T02-21-32-647Z-claude-effort-ladderrun-97f728 -->
+
+<!-- ai-test-run:2026-11-21T02-21-32-650Z-claude-effort-laddercapture-career-c6ad9a -->
+### 2026-11-21 02:21 UTC · claude-effort-ladder capture-career · career-profile-repair · haiku:medium
+
+- Status: **finished** (updated 2026-11-21 02:52:39 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/converge-sonnet-low-control-2`
+- Command: `node scripts/claude-effort-ladder.mjs capture-career --source ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-09-career-capture/src/career data.md --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/converge-sonnet-low-control-2 --ladder-tasks career-profile-repair --configs haiku:medium --reps 1 --concurrency 3 --max-calls 0 --baseline-from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-09-career-capture/base2 --live-on-miss --profile-override career-profile-repair=sonnet:low`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production baseline | 142 | 97 |  | $1.706 | 14 repairs |
+| ladder cells | 13 | 10 | 0 | $0.088 | per-config rows: summarize --out |
+
+Recorded cost so far: $1.795.
+<!-- /ai-test-run:2026-11-21T02-21-32-650Z-claude-effort-laddercapture-career-c6ad9a -->
+
+<!-- ai-test-run:2026-11-21T02-21-32-695Z-claude-effort-laddercapture-career-ac6b8b -->
+### 2026-11-21 02:21 UTC · claude-effort-ladder capture-career · career-profile-repair · haiku:medium
+
+- Status: **failed: Career profile page-0003 is invalid: edit 0 (set projects/p0003-project-infinite-canvas/technologies): edit to projects/p0003-project-infinite-canvas/technologies proposes no change** (updated 2026-11-21 02:50:20 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/converge-haiku-medium-2`
+- Command: `node scripts/claude-effort-ladder.mjs capture-career --source ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-09-career-capture/src/career data.md --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/converge-haiku-medium-2 --ladder-tasks career-profile-repair --configs haiku:medium --reps 1 --concurrency 3 --max-calls 0 --baseline-from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-09-career-capture/base2 --live-on-miss --profile-override career-profile-repair=haiku:medium`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production baseline | 109 | 105 |  | $0.729 | 13 repairs |
+| ladder cells | 16 | 9 | 0 | $0.109 | per-config rows: summarize --out |
+
+Recorded cost so far: $0.838.
+<!-- /ai-test-run:2026-11-21T02-21-32-695Z-claude-effort-laddercapture-career-ac6b8b -->
+
+<!-- ai-test-run:2026-11-21T02-21-33-693Z-claude-effort-ladderrun-4b1fc2 -->
+### 2026-11-21 02:21 UTC · claude-effort-ladder run · career-profile-repair · haiku:high
+
+- Status: **finished** (updated 2026-11-21 02:21:34 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r2-haiku-high`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-haiku-high-r2.jsonl --configs haiku:high --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r2-haiku-high`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-haiku-high-r2.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-repair haiku:high | 2 | 2 | 0 | $0.025 |  |
+
+Recorded cost so far: $0.025.
+<!-- /ai-test-run:2026-11-21T02-21-33-693Z-claude-effort-ladderrun-4b1fc2 -->
+
+<!-- ai-test-run:2026-11-21T02-21-34-202Z-claude-effort-ladderrun-52e871 -->
+### 2026-11-21 02:21 UTC · claude-effort-ladder run · career-profile-repair · sonnet:low
+
+- Status: **finished** (updated 2026-11-21 02:21:53 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r2-sonnet-low`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-sonnet-low-r2.jsonl --configs sonnet:low --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r2-sonnet-low`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-sonnet-low-r2.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-repair sonnet:low | 6 | 2 | 4 | $0.113 |  |
+
+Recorded cost so far: $0.113.
+<!-- /ai-test-run:2026-11-21T02-21-34-202Z-claude-effort-ladderrun-52e871 -->
+
+<!-- ai-test-run:2026-11-21T02-21-53-698Z-claude-effort-ladderrun-7fe4d1 -->
+### 2026-11-21 02:21 UTC · claude-effort-ladder run · career-profile-repair · sonnet:medium
+
+- Status: **finished** (updated 2026-11-21 02:22:07 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r2-sonnet-medium`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-sonnet-medium-r2.jsonl --configs sonnet:medium --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/corr-r2-sonnet-medium`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/records/corr-attempt0-sonnet-medium-r2.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-repair sonnet:medium | 4 | 2 | 2 | $0.108 |  |
+
+Recorded cost so far: $0.108.
+<!-- /ai-test-run:2026-11-21T02-21-53-698Z-claude-effort-ladderrun-7fe4d1 -->
+
+<!-- ai-test-run:2026-11-21T02-22-11-849Z-claude-effort-ladderrun-e8b40c -->
+### 2026-11-21 02:22 UTC · claude-effort-ladder run · write · haiku:high
+
+- Status: **finished** (updated 2026-11-21 02:38:52 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-a-cover`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/write-cover.jsonl --configs haiku:high --reps 2 --concurrency 2 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-a-cover`
+- Records: 5 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/write-cover.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| write haiku:high | 20 | 10 | 10 | $0.392 |  |
+
+Recorded cost so far: $0.392.
+<!-- /ai-test-run:2026-11-21T02-22-11-849Z-claude-effort-ladderrun-e8b40c -->
+
+<!-- ai-test-run:2026-11-21T02-22-11-849Z-claude-effort-ladderrun-354f2f -->
+### 2026-11-21 02:22 UTC · claude-effort-ladder run · write · opus:low
+
+- Status: **finished** (updated 2026-11-21 02:25:03 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-d-cover-newcap`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/newcap/write-cover.jsonl --configs opus:low --reps 2 --concurrency 2 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-d-cover-newcap`
+- Records: 5 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/newcap/write-cover.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| write opus:low | 10 | 10 | 0 | $4.015 |  |
+
+Recorded cost so far: $4.015.
+<!-- /ai-test-run:2026-11-21T02-22-11-849Z-claude-effort-ladderrun-354f2f -->
+
+<!-- ai-test-run:2026-11-21T02-22-11-850Z-claude-effort-ladderrun-c611e9 -->
+### 2026-11-21 02:22 UTC · claude-effort-ladder run · write · opus:low
+
+- Status: **finished** (updated 2026-11-21 02:27:25 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-d-both-newcap`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/newcap/write-both.jsonl --configs opus:low --reps 2 --concurrency 2 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-d-both-newcap`
+- Records: 6 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/newcap/write-both.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| write opus:low | 12 | 12 | 0 | $5.127 |  |
+
+Recorded cost so far: $5.127.
+<!-- /ai-test-run:2026-11-21T02-22-11-850Z-claude-effort-ladderrun-c611e9 -->
+
+<!-- ai-test-run:2026-11-21T02-22-11-849Z-claude-effort-ladderrun-8c792c -->
+### 2026-11-21 02:22 UTC · claude-effort-ladder run · write · sonnet:high
+
+- Status: **finished** (updated 2026-11-21 02:27:37 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-b-both`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/write-both.jsonl --configs sonnet:high --reps 1 --concurrency 2 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-b-both`
+- Records: 6 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/write-both.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| write sonnet:high | 12 | 6 | 6 | $1.903 |  |
+
+Recorded cost so far: $1.903.
+<!-- /ai-test-run:2026-11-21T02-22-11-849Z-claude-effort-ladderrun-8c792c -->
+
+<!-- ai-test-run:2026-11-21T02-22-53-672Z-role-screensscoremjsappvalidator-b80f26 -->
+### 2026-11-21 02:22 UTC · role-screens score.mjs (app validator) · job-role-snippet-screen-batch · confirm all 11 prompts: haiku:low vs haiku:medium
+
+- Status: **finished** (updated 2026-11-21 02:22:53 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/role-screens/confirm`
+- Prompts: 11 x 2 reps per arm (6 from the first run, 5 rerun 2026-11-21 after the usage limit)
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:low | 22 | 22 | 0 | $0.108 | agreement with production 90.0% (614/682); extra removals 48, missed 20; cost/call $0.0049 |
+| haiku:medium | 22 | 22 | 0 | $0.117 | agreement 89.9% (613/682); extra removals 47, missed 22; cost/call $0.0053 |
+
+Recorded cost so far: $0.224.
+- Note: Totals tie. Per prompt the arm gap is no larger than the rep-to-rep spread within an arm; largest gap is one 50-row prompt (extra removals low 24 vs medium 14 over 2 reps, while medium's own reps there were 72% vs 92%). Pass on the runbook criterion; Haiku low about 7% cheaper. The 20 usage-limit failure rows from the stopped run stay in results.jsonl and are excluded.
+<!-- /ai-test-run:2026-11-21T02-22-53-672Z-role-screensscoremjsappvalidator-b80f26 -->
+
+<!-- ai-test-run:2026-11-21T02-23-08-915Z-claude-effort-ladderrun-ccb3e4 -->
+### 2026-11-21 02:23 UTC · claude-effort-ladder run · career-profile-compile · opus:high
+
+- Status: **finished** (updated 2026-11-21 02:25:17 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude/confirm/runs/inc-corr-1-opus-high`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude/confirm/records/inc-corr-1-opus-high.jsonl --configs opus:high --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude/confirm/runs/inc-corr-1-opus-high`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude/confirm/records/inc-corr-1-opus-high.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| career-profile-compile opus:high | 2 | 2 | 0 | $1.071 |  |
+
+Recorded cost so far: $1.071.
+<!-- /ai-test-run:2026-11-21T02-23-08-915Z-claude-effort-ladderrun-ccb3e4 -->
+
+<!-- ai-test-run:2026-11-21T02-25-37-031Z-app-validatorre-checkconfirmationcorrectionround1-c4cf0f -->
+### 2026-11-21 02:25 UTC · app-validator re-check (confirmation + correction round 1) · career-profile-compile incremental-edit (borrowed id) · opus:high confirm
+
+- Status: **finished** (updated 2026-11-21 02:25:37 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/conclude/confirm`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| opus:high confirm first try | 6 | 4 | 0 | $1.889 | 3 prompts x 2 reps (3 cells rerun after weekly limit); both 37488b misses literal-grounding, as run 1; first-try cost $0.315/call |
+| opus:high correction round 1 | 2 | 2 | 0 | $1.071 | 6/6 valid after 1 correction; $0.493 per accepted answer incl. retries; defect probe: new bounded segment-0044 skill kept and role-linked 2/2 dense reps, AI ref on 8f6c73 2/2 |
+
+Recorded cost so far: $2.960.
+- Note: Pass criterion met (6/6 after corrections, bounded skill kept). Adoption still needs its own task id.
+<!-- /ai-test-run:2026-11-21T02-25-37-031Z-app-validatorre-checkconfirmationcorrectionround1-c4cf0f -->
+
+<!-- ai-test-run:2026-11-21T02-25-37-077Z-score-rulemjsappvalidatorjudge-endorsedidentities-0a5b55 -->
+### 2026-11-21 02:25 UTC · score-rule.mjs (app validator + judge-endorsed identities) · job-compensation-assessment-batch role-family ladder (overlapping-range rule) · Claude arms
+
+- Status: **finished** (updated 2026-11-21 02:25:37 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/borrowed-prompts/runs/rule-claude`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| sonnet:low | 4 | 4 | 0 | $0.105 | 6/6 identities (3/3 each rep), $0.0262/call |
+| opus:low | 4 | 4 | 0 | $0.181 | 6/6 identities (3/3 each rep), $0.0452/call |
+| haiku:medium | 4 | 4 | 0 | $0.013 | 5/6 (rep2 2/3) fail, $0.0032/call |
+| haiku:high | 4 | 4 | 0 | $0.015 | 5/6 (rep1 2/3) fail, $0.0038/call |
+
+Recorded cost so far: $0.314.
+- Note: All answers valid first try. Passing Claude arms: Sonnet low (production setting) and Opus low. Cheapest passing arm overall remains DeepSeek Flash off at $0.0004/call; routing it needs its own task id.
+<!-- /ai-test-run:2026-11-21T02-25-37-077Z-score-rulemjsappvalidatorjudge-endorsedidentities-0a5b55 -->
+
+<!-- ai-test-run:2026-11-21T02-26-10-181Z-career-audits-corrections-bdff69 -->
+### 2026-11-21 02:26 UTC · career-audits-corrections · career-profile-audit-skills+5 audits correction pass (row 13 completion)
+
+- Status: **finished** (updated 2026-11-21 02:26:10 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-audits/corrections-journal`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:medium (prod) | 84 | 84 | 0 | $0.006 | valid first try 81/84, valid after corrections 84/84; 3 invalid all skills, fixed in 1,1,2 repairs; correction cost total $0.0505 (+$0.0006/call averaged over 84); skills validAfter 14/14 |
+| haiku:low | 84 | 84 | 0 | $0.005 | valid first try 83/84, valid after corrections 84/84; 1 invalid (skills) fixed in 1 repair, $0.0081 |
+
+Recorded cost so far: $0.012.
+- Note: Completes the 2026-11-20 career-audit re-proof record; pick unchanged (Haiku medium). Scored with the app's audit validator via corrections.mjs + score.mjs.
+<!-- /ai-test-run:2026-11-21T02-26-10-181Z-career-audits-corrections-bdff69 -->
+
+<!-- ai-test-run:2026-11-21T02-28-43-095Z-claude-effort-ladderrun-37ea45 -->
+### 2026-11-21 02:28 UTC · claude-effort-ladder run · fact-check · opus:high
+
+- Status: **finished** (updated 2026-11-21 02:31:23 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fc-confirm-opus`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-check-confirm.jsonl --configs opus:high --reps 1 --concurrency 4 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/runs/fc-confirm-opus`
+- Records: 40 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/records/fact-check-confirm.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| fact-check opus:high | 40 | 40 | 0 | $12.05 |  |
+
+Recorded cost so far: $12.05.
+<!-- /ai-test-run:2026-11-21T02-28-43-095Z-claude-effort-ladderrun-37ea45 -->
+
+<!-- ai-test-run:2026-11-21T02-31-55-866Z-claude-effort-ladderrunscore-factsmjs-40e3c5 -->
+### 2026-11-21 02:31 UTC · claude-effort-ladder run + score-facts.mjs · fact-check · 2026-11-20 fact-check confirmation, 40 captured prompts, Opus high rerun as control (fc-confirm + fc-confirm-opus)
+
+- Status: **finished** (updated 2026-11-21 02:31:55 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:medium | 40 | 39 | 0 | $0.015 | prod flags kept 7/17; non-prod flags 11/519; FAILS vs Opus control 11/17 |
+| haiku:high | 40 | 40 | 0 | $0.017 | prod flags kept 10/17; non-prod flags 16/519; within noise of control |
+| opus:high | 40 | 40 | 0 | $0.301 | control: prod flags kept 11/17; non-prod flags 8/519 |
+
+Recorded cost so far: $0.334.
+- Note: Unit overlap with Opus rerun: haiku:medium 8 shared, 11 only-Haiku, 11 only-Opus; haiku:high 10 shared, 16 only-Haiku, 9 only-Opus. Spend this session: $1.30 Haiku cells + $12.05 Opus control.
+<!-- /ai-test-run:2026-11-21T02-31-55-866Z-claude-effort-ladderrunscore-factsmjs-40e3c5 -->
+
+<!-- ai-test-run:2026-11-21T02-31-55-912Z-claude-effort-ladderrunscore-factsmjs-3432d2 -->
+### 2026-11-21 02:31 UTC · claude-effort-ladder run + score-facts.mjs · fact-recheck · 2026-11-20 fact-recheck confirmation, 14 captured prompts, haiku:high vs opus:high (fr-confirm2)
+
+- Status: **finished** (updated 2026-11-21 02:31:55 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:high | 14 | 14 | 0 | $0.017 | non-prod flags 5/195 (3 of 14 docs sent back); production flagged none |
+| opus:high | 14 | 14 | 0 | $0.295 | control: non-prod flags 2/195 (2 of 14 docs sent back) |
+
+Recorded cost so far: $0.313.
+- Note: 1 unit flagged by both; catches measured only on the subtle plants (14/18 both). Passes: within the Opus control.
+<!-- /ai-test-run:2026-11-21T02-31-55-912Z-claude-effort-ladderrunscore-factsmjs-3432d2 -->
+
+<!-- ai-test-run:2026-11-21T02-38-52-345Z-claude-effort-ladderrun-c9d7a2 -->
+### 2026-11-21 02:38 UTC · claude-effort-ladder run · editorial-plan · haiku:high
+
+- Status: **finished** (updated 2026-11-21 02:41:26 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-c1-editorial`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/editorial-cover.jsonl --configs haiku:high --reps 1 --concurrency 2 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-c1-editorial`
+- Records: 5 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/editorial-cover.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| editorial-plan haiku:high | 10 | 4 | 5 | $0.107 |  |
+
+Recorded cost so far: $0.107.
+<!-- /ai-test-run:2026-11-21T02-38-52-345Z-claude-effort-ladderrun-c9d7a2 -->
+
+<!-- ai-test-run:2026-11-21T02-42-07-574Z-claude-effort-ladderrun-240308 -->
+### 2026-11-21 02:42 UTC · claude-effort-ladder run · write · opus:low
+
+- Status: **finished** (updated 2026-11-21 02:45:09 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-c2-swapped`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/confirm-write-cover-swapped.jsonl --configs opus:low --reps 1 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-c2-swapped`
+- Records: 14 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/confirm-write-cover-swapped.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| write opus:low | 14 | 14 | 0 | $5.709 |  |
+
+Recorded cost so far: $5.709.
+<!-- /ai-test-run:2026-11-21T02-42-07-574Z-claude-effort-ladderrun-240308 -->
+
+<!-- ai-test-run:2026-11-21T02-42-12-955Z-convertgatescorerscore-armsmjs-f9d1de -->
+### 2026-11-21 02:42 UTC · convert gate scorer (score-arms.mjs) · convert · confirmation: haiku:high vs sonnet:medium, 25 remaining prompts
+
+- Status: **finished** (updated 2026-11-21 02:42:12 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/confirm`
+- Gate breaks per 20 scorable: haiku:high 1.2, sonnet:medium 5.9 (pass criterion within +/-2)
+- Combined with first run (10 prompts): haiku:high 31/37 pass, sonnet:medium 28/37
+- Blind judge: 12 packets built (both arms gate-passing), judge/packet-confirm-*.json, key KEY-confirm.json; not yet judged
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| convert haiku:high | 25 | 16 | 1 | $0.734 | 16/17 scorable pass first try (1 structured-resume); 8 unscorable (record-side rebuild, same 8 prompts/2 jobs in every arm); $0.029/call |
+| convert sonnet:medium | 25 | 12 | 5 | $4.989 | 12/17 scorable pass (4 project-field, 2 education-field evidence); 8 unscorable; $0.200/call |
+| production-archived | 25 | 9 | 8 | $3.372 | 9/17 scorable pass (7 project-field, 1 envelope); 8 unscorable |
+
+Recorded cost so far: $9.095.
+- Note: Offline confirmation PASSES. Live 4-job bundle arm convert=haiku:high NOT run: dist-electron/main.cjs (built 15:13) is older than 11 changed electron sources incl. careerWritingCore.js and applicationV2LengthBudget.js; a rebuild (npm run build:compile) writes inside the repo, outside this run's permitted writes. Profile unchanged (Sonnet medium) until the live arm passes.
+<!-- /ai-test-run:2026-11-21T02-42-12-955Z-convertgatescorerscore-armsmjs-f9d1de -->
+
+<!-- ai-test-run:2026-11-21T02-45-17-467Z-convertblindjudgeconfirmrun2-5e4008 -->
+### 2026-11-21 02:45 UTC · convert blind judge (confirm run2) · convert · convert confirm: blind pairwise judge, Haiku high vs Sonnet medium, unblinded
+
+- Status: **complete** (updated 2026-11-21 02:45:17 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/judge`
+- Unblinded: Haiku high preferred on confirm-06 and confirm-10, Sonnet medium on confirm-04, 9 ties
+- Pooled judge: 21 pairs over both runs: Haiku high 5, Sonnet medium 2, tie 14
+- Pooled gate: Haiku high 31/37, Sonnet medium 28/37; Sonnet run-to-run 4.0 vs 5.9 breaks per 20 (noise about 2)
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:high preferred | 12 | 2 | 0 | $0.029 | run2 gate 16/17 scorable (1.18 breaks per 20) |
+| sonnet:medium preferred | 12 | 1 | 0 | $0.200 | run2 gate 12/17 scorable (5.88 breaks per 20) |
+| tie | 12 | 9 | 0 | $0.000 | answers near-identical text; differences only in IDs and citation breadth |
+
+Recorded cost so far: $0.229.
+- Note: Rows: valid column = judge preferences out of 12 pairs. Offline confirmation passes the runbook gate criterion (within +/-2 breaks per 20; Haiku 4.7 fewer). Live criterion (correction rounds, one-page fit, bundle cost) not measured: built app stale, rebuild writes in repo. Convert stays Sonnet medium.
+<!-- /ai-test-run:2026-11-21T02-45-17-467Z-convertblindjudgeconfirmrun2-5e4008 -->
+
+<!-- ai-test-run:2026-11-21T02-45-39-142Z-writing-gate-rescore-35a8dd -->
+### 2026-11-21 02:45 UTC · writing-gate-rescore · write-confirmations-2026-11-20
+
+- Status: **finished** (updated 2026-11-21 02:45:39 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/scores/confirm`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| row7 cover-only haiku:high confirm (old wording) | 10 | 8 | 2 | $0.392 | accepted 10/10; gates 8/10 (2 target-company-binding); over 2400 2/10; mean 2311 chars; $0.039/call |
+| row6 two-doc sonnet:high confirm (old wording) | 6 | 6 | 0 | $1.903 | accepted 6/6; gates 6/6; over limit 5/6 (paragraph-adjusted); mean 2551 chars; $0.317/call |
+| row14 cover-only opus:low new capacity wording | 10 | 9 | 1 | $4.015 | accepted 10/10; gates 9/10 (1 target-company-binding); over 7/10 vs 8/10 old; mean 2419 vs 2521 chars |
+| row14 two-doc opus:low new capacity wording | 12 | 11 | 1 | $5.127 | accepted 12/12; gates 11/12 vs 10/12 old; over 5/12 (3/12 flat 2400) vs 12/12 old; mean 2345 vs 2855 chars |
+| row8 haiku:high outlines confirm | 5 | 4 | 1 | $0.107 | validator 4/5 first try (1 catalog-ID copy error; production has one correction turn) |
+| row8 letters opus:low on swapped outlines (new wording) | 14 | 14 | 0 | $5.709 | xhigh-rerun outline 5/5 gates, over 1/5, 2296 chars; haiku first-run outlines 5/5, over 2/5, 2433; haiku confirm outlines 4/4, over 1/4, 2281 |
+
+Recorded cost so far: $17.25.
+- Note: Over-limit counts use 2400 minus 100 per paragraph beyond 5 (score.mjs adds 100, which is looser than the prompt). Blind judges pending: judge/cc-cover-*, cb-both-*, cp-plan-*; key judge/KEY-confirm.json.
+<!-- /ai-test-run:2026-11-21T02-45-39-142Z-writing-gate-rescore-35a8dd -->
+
+<!-- ai-test-run:2026-11-21T02-50-20-535Z-claude-effort-laddercapture-career-057dd6 -->
+### 2026-11-21 02:50 UTC · claude-effort-ladder capture-career · career-profile-repair · haiku:medium
+
+- Status: **failed: Career snapshot convergence failed at round 5: the round left a canonical-identical profile d180f7c70cc09ec5acdf29cc63355f778af8240212bd64344ed46c7524c4a49b and an unchanged decision log while 1 unresolved finding(s) remain (digest d66e4a01d399e6aff5117c8a41132ebd9d3649e812e8047120503b31dd5b14d5); 1 page repair(s) declined because the error could not be fixed from that page alone.** (updated 2026-11-21 03:04:17 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/converge-haiku-medium-3`
+- Command: `node scripts/claude-effort-ladder.mjs capture-career --source ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-09-career-capture/src/career data.md --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/converge-haiku-medium-3 --ladder-tasks career-profile-repair --configs haiku:medium --reps 1 --concurrency 3 --max-calls 0 --baseline-from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-09-career-capture/base2 --live-on-miss --profile-override career-profile-repair=haiku:medium`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production baseline | 50 | 47 |  | $0.288 | 4 repairs |
+| ladder cells | 11 | 8 | 0 | $0.071 | per-config rows: summarize --out |
+
+Recorded cost so far: $0.359.
+<!-- /ai-test-run:2026-11-21T02-50-20-535Z-claude-effort-laddercapture-career-057dd6 -->
+
+<!-- ai-test-run:2026-11-21T02-51-03-664Z-blind-judge-confirm-8b5c5e -->
+### 2026-11-21 02:51 UTC · blind-judge-confirm · write-cover-only · cc-cover unblinded (rows 7, 14)
+
+- Status: **finished** (updated 2026-11-21 02:51:03 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing`
+- Judge: one blind pass per job, 5 packets, 7 sets each
+- Unblind: writing/unblind/unblind-confirm.mjs -> unblind-confirm.json
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| newcap-opus:low (production prompt) | 10 |  |  | $0.401 | mean rank 2.60 of 7, overall 7.65, unsupported 2, firsts 2, lasts 0; reps 2.8 vs 2.4 (mean gap 0.40, per-pair 1.60) |
+| oldcap-opus:low | 10 |  |  | $0.398 | mean rank 4.60, overall 6.60, unsupported 1, lasts 1; reps 6.0 vs 3.2 (gap 2.80) |
+| haiku:high-confirm (old wording) | 10 |  |  | $0.039 | mean rank 4.60, overall 6.15, unsupported 7, firsts 0, lasts 3; reps gap 1.20 (per-pair 3.20) |
+| haiku:high-first (old wording) | 5 |  |  | $0.038 | mean rank 4.40, overall 6.50, unsupported 1 |
+
+Recorded cost so far: $0.876.
+- Note: Row 7 fails: Haiku high trails the production prompt's Opus low by 2.0 rank and 1.5 overall with 7 vs 2 unsupported claims; like-for-like (old wording) it ties Opus low on rank but has 7 vs 1 unsupported and gates 8/10 vs 10/10.
+- Note: Row 14 passes: new capacity wording ranks 2.0 places above the old wording (overall +1.05), over-limit 8/10 -> 7/10, mean 2521 -> 2419 chars; unsupported 1 -> 2.
+<!-- /ai-test-run:2026-11-21T02-51-03-664Z-blind-judge-confirm-8b5c5e -->
+
+<!-- ai-test-run:2026-11-21T02-51-03-707Z-blind-judge-confirm-6b8311 -->
+### 2026-11-21 02:51 UTC · blind-judge-confirm · write-two-document · cb-both unblinded (rows 6, 14)
+
+- Status: **finished** (updated 2026-11-21 02:51:03 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| newcap-opus:low (production prompt) | 12 |  |  | $0.427 | mean rank 2.25 of 6, overall 7.58, unsupported 6, firsts 4, lasts 0, resume truth 9.00; reps gap 0.17 (per-pair 1.50) |
+| oldcap-opus:low | 12 |  |  | $0.414 | mean rank 4.92, overall 5.67, unsupported 3, lasts 5, resume truth 9.33; reps gap 0.17 (per-pair 1.50) |
+| sonnet:high-confirm (old wording) | 6 |  |  | $0.317 | mean rank 4.00, overall 6.33, unsupported 2, firsts 0, lasts 1, resume truth 9.33 |
+| sonnet:high-first (old wording) | 6 |  |  | $0.340 | mean rank 2.67, overall 6.83, unsupported 1, firsts 2 |
+
+Recorded cost so far: $1.498.
+- Note: Row 6 not confirmed: like-for-like Sonnet high beats old-wording Opus low (4.00 vs 4.92), but it trails the production prompt's Opus low by 1.75 rank and 1.25 overall, beyond its 0.17 rep gap; Sonnet was never run on the new wording. Live arm not run.
+- Note: Row 14 passes: new wording 2.25 vs 4.92 rank, overall 7.58 vs 5.67, over-limit 12/12 -> 5/12 (strict), mean 2855 -> 2345 chars; unsupported 3 -> 6 of 12.
+<!-- /ai-test-run:2026-11-21T02-51-03-707Z-blind-judge-confirm-6b8311 -->
+
+<!-- ai-test-run:2026-11-21T02-51-03-746Z-blind-judge-confirm-810a1a -->
+### 2026-11-21 02:51 UTC · blind-judge-confirm · editorial-plan · cp-plan unblinded (row 8, Opus low writer)
+
+- Status: **finished** (updated 2026-11-21 02:51:03 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| plan=opus:xhigh-rerun control | 5 |  |  | $0.405 | mean rank 2.20, overall 7.40, unsupported 3, firsts 3, lasts 0 |
+| plan=archived-production-xhigh (2 reps) | 10 |  |  | $0.401 | mean rank 2.40, overall 7.30, unsupported 6; reps gap 0.40 (per-pair 1.20) |
+| plan=haiku:high-first | 5 |  |  | $0.416 | mean rank 4.00, overall 6.00, unsupported 7, firsts 0, lasts 3 |
+| plan=haiku:high-confirm | 4 |  |  | $0.400 | mean rank 3.75, overall 6.50, unsupported 1, firsts 0, lasts 1; one outline invalid, job left out |
+
+Recorded cost so far: $1.622.
+- Note: Per job, Haiku letters trail the xhigh rerun by +1.5 rank (se 0.85) and the archived-xhigh pair by +1.3 (se 0.72), above the 1.2 per-pair and 0.40 arm floor; Haiku letters never ranked first in 9. Row 8 rule: trails beyond noise, return to Opus xhigh.
+<!-- /ai-test-run:2026-11-21T02-51-03-746Z-blind-judge-confirm-810a1a -->
+
+<!-- ai-test-run:2026-11-21T02-52-39-753Z-claude-effort-laddercapture-career-19dd22 -->
+### 2026-11-21 02:52 UTC · claude-effort-ladder capture-career · career-profile-repair · haiku:medium
+
+- Status: **finished** (updated 2026-11-21 03:12:11 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/converge-sonnet-low-control-3`
+- Command: `node scripts/claude-effort-ladder.mjs capture-career --source ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-09-career-capture/src/career data.md --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/converge-sonnet-low-control-3 --ladder-tasks career-profile-repair --configs haiku:medium --reps 1 --concurrency 3 --max-calls 0 --baseline-from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-09-career-capture/base2 --live-on-miss --profile-override career-profile-repair=sonnet:low`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production baseline | 138 | 81 |  | $1.180 | 3 repairs |
+| ladder cells | 9 | 6 | 0 | $0.072 | per-config rows: summarize --out |
+
+Recorded cost so far: $1.252.
+<!-- /ai-test-run:2026-11-21T02-52-39-753Z-claude-effort-laddercapture-career-19dd22 -->
+
+<!-- ai-test-run:2026-11-21T03-04-17-245Z-claude-effort-laddercapture-career-2d2717 -->
+### 2026-11-21 03:04 UTC · claude-effort-ladder capture-career · career-profile-repair · haiku:medium
+
+- Status: **failed: Career snapshot convergence failed at round 4: the round left a canonical-identical profile d0800dcf776450d05d5d26bc5e8630116de79bbfe4f73dfcd60ccf2b0034b89c and an unchanged decision log while 1 unresolved finding(s) remain (digest 631b4845b763c19600df5b213691fa8c6a5c8aeac9f63294724a643c60cb4207); 1 page repair(s) declined because the error could not be fixed from that page alone.** (updated 2026-11-21 03:15:39 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/converge-haiku-medium-4`
+- Command: `node scripts/claude-effort-ladder.mjs capture-career --source ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-09-career-capture/src/career data.md --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/converge-haiku-medium-4 --ladder-tasks career-profile-repair --configs haiku:medium --reps 1 --concurrency 3 --max-calls 0 --baseline-from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-09-career-capture/base2 --live-on-miss --profile-override career-profile-repair=haiku:medium`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production baseline | 32 | 29 |  | $0.189 | 4 repairs |
+| ladder cells | 11 | 8 | 0 | $0.068 | per-config rows: summarize --out |
+
+Recorded cost so far: $0.257.
+<!-- /ai-test-run:2026-11-21T03-04-17-245Z-claude-effort-laddercapture-career-2d2717 -->
+
+<!-- ai-test-run:2026-11-21T03-12-11-431Z-claude-effort-laddercapture-career-50fefc -->
+### 2026-11-21 03:12 UTC · claude-effort-ladder capture-career · career-profile-repair · haiku:medium
+
+- Status: **interrupted (SIGTERM) before finishing; rows above are complete up to that point** (updated 2026-11-21 03:12:51 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/converge-sonnet-low-control-4`
+- Command: `node scripts/claude-effort-ladder.mjs capture-career --source ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-09-career-capture/src/career data.md --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair/runs/converge-sonnet-low-control-4 --ladder-tasks career-profile-repair --configs haiku:medium --reps 1 --concurrency 3 --max-calls 0 --baseline-from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-09-career-capture/base2 --live-on-miss --profile-override career-profile-repair=sonnet:low`
+
+No results yet.
+<!-- /ai-test-run:2026-11-21T03-12-11-431Z-claude-effort-laddercapture-career-50fefc -->
+
+<!-- ai-test-run:2026-11-21T03-16-19-395Z-career-repairconfirmationrow9-3b6ead -->
+### 2026-11-21 03:16 UTC · career-repair confirmation (row 9) · career-profile-repair · haiku:medium vs sonnet:low compile-to-convergence + correction round r2
+
+- Status: **finished** (updated 2026-11-21 03:16:19 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/career-repair`
+- Verdict: FAIL: Haiku medium does not converge as often as Sonnet low (0/3 vs 2/2); keep Sonnet low
+- Spend: about $4.8 (converge $4.59, r2 corrections $0.22)
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:medium converge (compiles 2-4) | 3 | 0 | 3 | $1.454 | approved 0/3: 1 CAREER_SNAPSHOT_PAGE_INVALID (repair edit proposes no change), 2 CAREER_SNAPSHOT_NONCONVERGENT; repair calls 16/11/11, cost/repair call ~$0.015-0.019 |
+| sonnet:low control converge (compiles 2-3) | 2 | 2 | 0 | $3.047 | approved 2/2; repair calls 13/9, cost/repair call ~$0.08-0.09; 4th compile stopped by hand after the verdict was decided ($0.09) |
+| attempt-0 re-score after r2: haiku:medium | 24 | 20 | 0 | $0.010 | after corrections 23/24; declines where prod edited 4 |
+| attempt-0 re-score after r2: sonnet:low | 24 | 15 | 0 | $0.095 | after corrections 22/24, pending 0 (was 2); declines where prod edited 0 |
+| attempt-0 re-score after r2: sonnet:medium | 24 | 15 | 0 | $0.091 | after corrections 22/24 |
+| attempt-0 re-score after r2: haiku:high | 24 | 18 | 0 | $0.014 | after corrections 22/24 |
+
+Recorded cost so far: $4.710.
+- Note: Converge arm cost column is total compile cost; attempt-0 rows' cost column is mean cost per call with corrections.
+<!-- /ai-test-run:2026-11-21T03-16-19-395Z-career-repairconfirmationrow9-3b6ead -->
+
+<!-- ai-test-run:2026-11-21T03-19-18-328Z-claude-effort-ladderrun-3eed88 -->
+### 2026-11-21 03:19 UTC · claude-effort-ladder run · write · sonnet:high
+
+- Status: **finished** (updated 2026-11-21 03:28:55 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-e-both-sonnet-newcap`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/newcap/write-both.jsonl --configs sonnet:high --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/runs/confirm-e-both-sonnet-newcap`
+- Records: 6 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/records/newcap/write-both.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| write sonnet:high | 12 | 12 | 0 | $4.483 |  |
+
+Recorded cost so far: $4.483.
+<!-- /ai-test-run:2026-11-21T03-19-18-328Z-claude-effort-ladderrun-3eed88 -->
+
+<!-- ai-test-run:2026-11-21T03-19-18-811Z-livebundleharness-8e991b -->
+### 2026-11-21 03:19 UTC · live bundle harness · application bundles · production (no stage overrides)
+
+- Status: **finished** (updated 2026-11-21 03:38:07 UTC)
+- Out dir: `~/Desktop/My Apps/infinite-canvas/tmp/claude-e2e/runs/2026-11-21-production`
+- Command: `INFINITE_CANVAS_STAGE_PROFILES= node scripts/live-bundle-harness.mjs --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/b751c4cd-d624-427c-bf96-8e24fc543ca3/input.json --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/2e98b0b7-105c-4928-abdc-374e0fe8603a/input.json --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/97d7410f-df35-42b1-bd32-14d0d46505de/input.json --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/9781acec-1ea9-4189-9972-b829e535b827/input.json --max-minutes 150 --out tmp/claude-e2e/runs/2026-11-21-production`
+- Jobs: 4
+- Candidates: default
+- Bundles finished: 3 of 3 queued
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| Exelixis | 1 | 1 | 0 | $8.028 | bundle finished; accepted/calls: requirements 6/6 sonnet-5-5; convert 0/5 sonnet-5-5; fit-correction 2/3 sonnet-5-5; verify-correction 2/7 haiku-5-5; pick 1/1 opus-5-5 |
+| Freed | 1 | 1 | 0 | $5.715 | bundle finished; accepted/calls: requirements 2/2 sonnet-5-5; convert 2/5 sonnet-5-5; verify-correction 2/6 haiku-5-5; pick 1/1 opus-5-5 |
+| Affirm | 1 | 1 | 0 | $4.556 | bundle finished; accepted/calls: requirements 2/2 sonnet-5-5; convert 0/5 sonnet-5-5; verify-correction 4/9 haiku-5-5; pick 1/1 opus-5-5 |
+
+Recorded cost so far: $18.30.
+<!-- /ai-test-run:2026-11-21T03-19-18-811Z-livebundleharness-8e991b -->
+
+<!-- ai-test-run:2026-11-21T03-19-38-841Z-livebundleharness-e41ac1 -->
+### 2026-11-21 03:19 UTC · live bundle harness · application bundles · convert=haiku:high
+
+- Status: **finished** (updated 2026-11-21 03:58:59 UTC)
+- Out dir: `~/Desktop/My Apps/infinite-canvas/tmp/claude-e2e/runs/2026-11-21-convert-haiku-high`
+- Command: `INFINITE_CANVAS_STAGE_PROFILES=convert=haiku:high node scripts/live-bundle-harness.mjs --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/b751c4cd-d624-427c-bf96-8e24fc543ca3/input.json --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/2e98b0b7-105c-4928-abdc-374e0fe8603a/input.json --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/97d7410f-df35-42b1-bd32-14d0d46505de/input.json --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/9781acec-1ea9-4189-9972-b829e535b827/input.json --max-minutes 150 --out tmp/claude-e2e/runs/2026-11-21-convert-haiku-high`
+- Jobs: 4
+- Candidates: default
+- Bundles finished: 3 of 3 queued
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| Exelixis | 1 | 1 | 0 | $8.981 | bundle finished; accepted/calls: requirements 9/9 sonnet-5-5; convert 0/5 haiku-5-5; verify-correction 3/7 haiku-5-5; fit-correction 2/2 sonnet-5-5; pick 1/1 opus-5-5 |
+| Freed | 1 | 1 | 0 | $5.929 | bundle finished; accepted/calls: requirements 4/4 sonnet-5-5; convert 0/5 haiku-5-5; verify-correction 2/3 haiku-5-5; fit-correction 3/3 sonnet-5-5; pick 1/1 opus-5-5 |
+| Affirm | 1 | 1 | 0 | $3.671 | bundle finished; accepted/calls: requirements 2/2 sonnet-5-5; convert 0/5 haiku-5-5; verify-correction 5/7 haiku-5-5; pick 1/1 opus-5-5 |
+
+Recorded cost so far: $18.58.
+<!-- /ai-test-run:2026-11-21T03-19-38-841Z-livebundleharness-e41ac1 -->
+
+<!-- ai-test-run:2026-11-21T03-23-12-017Z-blindjudgeOpus3packetsscore-confirm-judgemjs-8098ce -->
+### 2026-11-21 03:23 UTC · blind judge (Opus, 3 packets) + score-confirm-judge.mjs · fact-check · 2026-11-20 fact-check confirmation: Haiku high vs Opus high control, blind judge of 40 disputed flags on 31 units
+
+- Status: **finished** (updated 2026-11-21 03:23:12 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/judge`
+- Haiku high real misses: 6 production + 5 Opus-found = 11
+- Opus rerun real misses: 5 production + 0 Haiku-found = 5
+- Verdict: FAILS: extra-flag false alarms 7/18 vs 0/8 control, and misses 11 vs 5
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:high extra flags (vs production) | 18 | 18 | 0 | $0.017 | real 2, defensible 9, false_alarm 7 (39%); both real ones are on units Opus also flagged; 14 Haiku-only units: 0 real |
+| opus:high extra flags (control) | 8 | 8 | 0 | $0.301 | real 7, defensible 1, false_alarm 0 |
+| production flags dropped by haiku:high only | 3 | 3 | 0 | $0.000 | real 3 (misses for Haiku high); cost n/a |
+| production flags dropped by opus:high only | 2 | 2 | 0 | $0.000 | real 2 (misses for Opus control); cost n/a |
+| production flags dropped by both | 4 | 4 | 0 | $0.000 | real 3, defensible 1 (misses for both); cost n/a |
+| flags on production-flagged units (not prod's own) | 5 | 5 | 0 | $0.000 | haiku:high 2 real; opus:high 3 real; cost n/a |
+
+Recorded cost so far: $0.318.
+- Note: Raw counts recomputed from runs/fc-confirm-final and runs/fc-confirm-opus (disputed-counts.mjs): Haiku high 16 non-prod units/18 findings, Opus 8/8, prod 17, dropped by Haiku 7, by Opus 6, by both 4. All 40 flags have verdicts. fact-check stays Opus high; Haiku medium already failed the same confirmation (prod kept 7/17).
+<!-- /ai-test-run:2026-11-21T03-23-12-017Z-blindjudgeOpus3packetsscore-confirm-judgemjs-8098ce -->
+
+<!-- ai-test-run:2026-11-21T03-29-32-712Z-writing-gate-rescore-099776 -->
+### 2026-11-21 03:29 UTC · writing-gate-rescore · write-two-document
+
+- Status: **finished** (updated 2026-11-21 03:29:32 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing/scores`
+- Runs: runs/confirm-e-both-sonnet-newcap vs runs/confirm-d-both-newcap
+- Models: claude-sonnet-5-5, claude-opus-5-5
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| row6 two-doc sonnet:high new capacity wording (2 reps) | 12 | 10 | 2 | $4.483 | accepted 12/12; gates 10/12 (2 target-company-binding, different jobs and reps); over limit 0/12 strict, 0/12 flat 2400; mean 2220 chars; $0.374/call |
+| row6 control: opus:low new capacity wording (confirm-d-both-newcap, same scorer) | 12 | 11 | 1 | $5.127 | accepted 12/12; gates 11/12 (1 target-company-binding); over 5/12 strict, 3/12 flat; mean 2345 chars; $0.427/call |
+
+Recorded cost so far: $9.610.
+- Note: Over-limit uses 2400 minus 100 per paragraph beyond 5 (score.mjs's +100 is looser than the prompt). Blind judge pending: judge/ce-both-* (4 sets each: 2 Sonnet high, 2 Opus low reps), key judge/KEY-confirm2.json, unblind with unblind/unblind-confirm2.mjs (verdicts-confirm2-N.json).
+<!-- /ai-test-run:2026-11-21T03-29-32-712Z-writing-gate-rescore-099776 -->
+
+<!-- ai-test-run:2026-11-21T03-32-50-964Z-blind-judge-confirm-9ec49c -->
+### 2026-11-21 03:32 UTC · blind-judge-confirm · write-two-document · ce-both unblinded (row 6, Sonnet high on the new letter-capacity wording)
+
+- Status: **finished** (updated 2026-11-21 03:32:50 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| newcap-sonnet:high (2 reps) | 12 | 12 | 0 | $0.374 | mean rank 2.58 of 4, overall 7.00, unsupported 1, firsts 3, lasts 3; letter gates 10/12 (2 target-company-binding, 1 per rep); over strict cap 0/12; mean letter 2220 chars; reps gap 0.83 rank (per-pair 1.17 rank, 1.00 overall) |
+| newcap-opus:low control (confirm-d-both-newcap, 2 reps) | 12 | 12 | 0 | $0.427 | mean rank 2.42, overall 6.92, unsupported 6, firsts 3, lasts 3; letter gates 11/12 (1 target-company-binding, rep 1); over strict cap 5/12; mean letter 2345 chars; reps gap 0.50 rank, 0.50 overall (per-pair 1.17 rank, 1.17 overall) |
+
+Recorded cost so far: $0.801.
+- Note: Row 6 offline half passes: arm gap 0.17 rank and +0.08 overall (Sonnet ahead) are inside Opus low's rep gap (0.50 arm-level, 1.17 per pair); unsupported 1 vs 6; letter gates 10/12 vs 11/12, a 1-letter gap equal to Opus low's own rep gap (1 vs 0) and below the production rerun's 2/12 for the same gate, so not a difference under Policy step 5. Profile unchanged: Opus low stays until the live 4-job bundle arm write=sonnet:high runs.
+- Note: Two judges wrote only verdicts-p2-2/3.json; copied unchanged to verdicts-confirm2-1.json before unblinding. Judge-measured letter lengths agree with the scorer (sums 26643 and 28142 chars). Judges made no paid calls.
+<!-- /ai-test-run:2026-11-21T03-32-50-964Z-blind-judge-confirm-9ec49c -->
+
+<!-- ai-test-run:2026-11-21T04-02-16-959Z-armcomparisonscore-livemjs-61ab99 -->
+### 2026-11-21 04:02 UTC · arm comparison (score-live.mjs) · convert · haiku:high vs production, live 3 jobs (Freed, Exelixis, Affirm; Leap Tools skipped in both arms by the official-posting gate)
+
+- Status: **finished** (updated 2026-11-21 04:02:16 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/live`
+- Verdict: FAIL on runbook row 5: fit-correction rounds 3->5, one-page-fit rejections 3->6, bundle cost +1.5% (convert saved $1.48, fit-correction added $1.51); total correction rounds fell 29->25
+- Runs: tmp/claude-e2e/runs/2026-11-21-production, tmp/claude-e2e/runs/2026-11-21-convert-haiku-high
+- JudgePacket: convert/judge/live (KEY-live.json), not yet judged
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| convert production (sonnet:medium) | 15 | 2 |  | $2.030 | 13% first-try accepted |
+| convert haiku:high | 15 | 0 |  | $0.550 | 0% first-try accepted; 2 measured-one-page-fit rejections |
+| correction rounds production | 29 |  |  | $5.640 | verify 22 (6/7/9), fit 3 (0/3/0), fact 4 (3/0/1) for Freed/Exelixis/Affirm |
+| correction rounds haiku:high | 25 |  |  | $6.440 | verify 17 (3/7/7), fit 5 (3/2/0), fact 3 (0/3/0); fact-correction 0/3 accepted on Exelixis |
+| page-fit rejections |  |  |  |  | production 3, haiku:high 6 (measured-one-page-fit across all stages) |
+| bundles production | 3 | 3 |  | $18.30 | 18.8 min wall |
+| bundles convert haiku:high | 3 | 3 |  | $18.58 | 39.3 min wall (arms ran concurrently); +1.5% cost |
+
+Recorded cost so far: $51.54.
+- Note: Scored with ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/live/score-live.mjs; output score-2026-11-21.json. n=3, small. Convert stays Sonnet medium.
+<!-- /ai-test-run:2026-11-21T04-02-16-959Z-armcomparisonscore-livemjs-61ab99 -->
+
+<!-- ai-test-run:2026-11-21T04-03-24-266Z-convert-live-conclusion-e675ff -->
+### 2026-11-21 04:03 UTC · convert-live-conclusion · convert
+
+- Status: **finished** (updated 2026-11-21 04:03:24 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/convert/live`
+- Verdict: FAIL on PENDING row 5 (one-page fit 3->6 and fit-correction 3->5 grew); convert stays sonnet:medium
+- BlindJudge: not run (no judges assigned); 3 packets unjudged, key left sealed
+- Recomputed: score-live.mjs rerun on both run dirs; every stage figure matches the tester; models per stage verified (convert haiku-5-5 in arm 2, sonnet-5-5 in production)
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production sonnet:medium | 3 | 3 | 0 | $18.30 | bundles finished 3/3; convert 2/15 first try; corrections 29 (verify 22, fit 3, fact 4); one-page fit rejections 3; convert-and-after stages $8.96 |
+| convert=haiku:high | 3 | 3 | 0 | $18.58 | bundles finished 3/3; convert 0/15 first try; corrections 25 (verify 17, fit 5, fact 3); one-page fit rejections 6; convert-and-after stages $8.55; requirements (upstream, unaffected) +$1.22 |
+
+Recorded cost so far: $36.88.
+- Note: Leap Tools skipped in both arms (official posting match uncertain). Arms ran concurrently; wall time not comparable.
+<!-- /ai-test-run:2026-11-21T04-03-24-266Z-convert-live-conclusion-e675ff -->
+
+<!-- ai-test-run:2026-11-21T04-04-37-586Z-livebundleharness-86c603 -->
+### 2026-11-21 04:04 UTC · live bundle harness · application bundles · fact-correction=haiku:high
+
+- Status: **finished** (updated 2026-11-21 04:24:55 UTC)
+- Out dir: `~/Desktop/My Apps/infinite-canvas/tmp/claude-e2e/runs/2026-11-21-fact-correction-haiku-high`
+- Command: `INFINITE_CANVAS_STAGE_PROFILES=fact-correction=haiku:high node scripts/live-bundle-harness.mjs --job tmp/claude-e2e/runs/2026-11-21-production/inputs/01-input.json --job tmp/claude-e2e/runs/2026-11-21-production/inputs/02-input.json --job tmp/claude-e2e/runs/2026-11-21-production/inputs/03-input.json --job tmp/claude-e2e/runs/2026-11-21-production/inputs/04-input.json --out tmp/claude-e2e/runs/2026-11-21-fact-correction-haiku-high`
+- Jobs: 4
+- Candidates: default
+- Bundles finished: 3 of 3 queued
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| Exelixis | 1 | 1 | 0 | $6.498 | bundle finished; accepted/calls: requirements 5/5 sonnet-5-5; convert 0/5 sonnet-5-5; verify-correction 3/9 haiku-5-5; fit-correction 2/2 sonnet-5-5; pick 1/1 opus-5-5 |
+| Freed | 1 | 1 | 0 | $5.694 | bundle finished; accepted/calls: requirements 4/4 sonnet-5-5; convert 1/5 sonnet-5-5; verify-correction 2/6 haiku-5-5; fit-correction 2/2 sonnet-5-5; pick 1/1 opus-5-5 |
+| Affirm | 1 | 1 | 0 | $4.043 | bundle finished; accepted/calls: requirements 2/2 sonnet-5-5; convert 0/5 sonnet-5-5; verify-correction 5/7 haiku-5-5; pick 1/1 opus-5-5 |
+
+Recorded cost so far: $16.23.
+<!-- /ai-test-run:2026-11-21T04-04-37-586Z-livebundleharness-86c603 -->
+
+<!-- ai-test-run:2026-11-21T04-05-06-809Z-livebundleharness-16e981 -->
+### 2026-11-21 04:05 UTC · live bundle harness · application bundles · write=sonnet:high
+
+- Status: **finished** (updated 2026-11-21 04:32:26 UTC)
+- Out dir: `~/Desktop/My Apps/infinite-canvas/tmp/claude-e2e/runs/2026-11-21-write-sonnet-high`
+- Command: `INFINITE_CANVAS_STAGE_PROFILES=write=sonnet:high node scripts/live-bundle-harness.mjs --job tmp/claude-e2e/runs/2026-11-21-production/inputs/01-input.json --job tmp/claude-e2e/runs/2026-11-21-production/inputs/02-input.json --job tmp/claude-e2e/runs/2026-11-21-production/inputs/03-input.json --job tmp/claude-e2e/runs/2026-11-21-production/inputs/04-input.json --max-minutes 150 --out tmp/claude-e2e/runs/2026-11-21-write-sonnet-high`
+- Jobs: 4
+- Candidates: default
+- Bundles finished: 3 of 3 queued
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| Exelixis | 1 | 1 | 0 | $6.412 | bundle finished; accepted/calls: requirements 6/6 sonnet-5-5; convert 1/5 sonnet-5-5; verify-correction 3/8 haiku-5-5; pick 1/1 opus-5-5 |
+| Freed | 1 | 1 | 0 | $5.375 | bundle finished; accepted/calls: requirements 2/2 sonnet-5-5; convert 1/5 sonnet-5-5; verify-correction 3/6 haiku-5-5; fit-correction 1/1 sonnet-5-5; pick 1/1 opus-5-5 |
+| Affirm | 1 | 1 | 0 | $3.949 | bundle finished; accepted/calls: requirements 2/2 sonnet-5-5; convert 1/5 sonnet-5-5; verify-correction 4/5 haiku-5-5; pick 1/1 opus-5-5 |
+
+Recorded cost so far: $15.74.
+<!-- /ai-test-run:2026-11-21T04-05-06-809Z-livebundleharness-16e981 -->
+
+<!-- ai-test-run:2026-11-21T04-06-30-133Z-blindjudgeOpushigh2passesoffact-recheckflags-080f2f -->
+### 2026-11-21 04:06 UTC · blind judge (Opus high, 2 passes) of fact-recheck flags · fact-recheck · 2026-11-21 fact-recheck confirmation: blind judge of every flag in fr-confirm2 (Haiku high vs Opus high; production 0) and every false-alarm-class flag in fr-subtle-r2
+
+- Status: **finished** (updated 2026-11-21 04:06:30 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/judge`
+- Judge agreement: 11/11 flags identical across 2 passes
+- Judge cost: $1.80 (2 passes)
+- Verdict: FAILS: Haiku high real flags 0 vs Opus 1 (one real Opus catch missed); false alarms 2 vs 0; 7 defensible extras would each send a correct document back for a correction round
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:high flags, fr-confirm2 (14 prompts) | 7 | 7 | 0 | $0.017 | real 0, defensible 5, false_alarm 2 (5 units); 1 unit shared with Opus |
+| opus:high flags, fr-confirm2 (control) | 2 | 2 | 0 | $0.295 | real 1, defensible 1, false_alarm 0; the real one is on a unit Haiku high did not flag |
+| haiku:high false-alarm-class flags, fr-subtle-r2 | 2 | 2 | 0 | $0.018 | real 0, defensible 2 (1 unit, both reps) |
+| opus:high false-alarm-class flags, fr-subtle-r2 | 0 | 0 | 0 | $0.305 | none raised |
+
+Recorded cost so far: $0.636.
+- Note: Packet: judge/packet-recheck-1.json, key judge/KEY-recheck.json, verdicts judge/verdicts-recheck-1.json and -2.json; builder judge/build-recheck-judge.mjs. Planted subtle catches were 14/18 both arms (not re-judged). fr-subtle per-call costs are run-journal costs / 6.
+<!-- /ai-test-run:2026-11-21T04-06-30-133Z-blindjudgeOpushigh2passesoffact-recheckflags-080f2f -->
+
+<!-- ai-test-run:2026-11-21T04-07-45-185Z-blindjudgepass3unblindedoffact-recheckflags-94adb0 -->
+### 2026-11-21 04:07 UTC · blind judge pass 3 (unblinded) of fact-recheck flags · fact-recheck
+
+- Status: **finished** (updated 2026-11-21 04:07:45 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/judge/p3`
+- Judge agreement: pass 3 matches passes 1 and 2 on 11/11 flags
+- Verdict: FAILS: real flags 0 vs 1 (missed), false alarms 2 vs 0; revert fact-recheck to Opus high
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:high flags, fr-confirm2 (14 prompts) | 7 | 7 | 0 | $0.017 | real 0, defensible 5, false_alarm 2 (5 units) |
+| opus:high flags, fr-confirm2 (control) | 2 | 2 | 0 | $0.295 | real 1, defensible 1, false_alarm 0 (2 units); real one on a unit Haiku high did not flag |
+| haiku:high false-alarm-class flags, fr-subtle-r2 | 2 | 2 | 0 | $0.018 | real 0, defensible 2, false_alarm 0 (1 unit) |
+| opus:high false-alarm-class flags, fr-subtle-r2 | 0 | 0 | 0 | $0.305 | none raised |
+
+Recorded cost so far: $0.636.
+- Note: Verdicts judge/verdicts-p3-0.json scored against judge/KEY-recheck.json; same packet packet-recheck-1.json. Third independent blind pass confirming run 2026-11-21T04-06-30-133Z-blindjudgeOpushigh2passesoffact-recheckflags-080f2f.
+<!-- /ai-test-run:2026-11-21T04-07-45-185Z-blindjudgepass3unblindedoffact-recheckflags-94adb0 -->
+
+<!-- ai-test-run:2026-11-21T04-25-48-889Z-livefact-stagescorerscore-fact-livemjs-dcc3b1 -->
+### 2026-11-21 04:25 UTC · live fact-stage scorer (score-fact-live.mjs) · fact-correction · fact-correction haiku:high live arm vs 2026-11-21 production
+
+- Status: **finished** (updated 2026-11-21 04:25:48 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/live`
+- Verdict: inconclusive
+- Exposure: fact-check flagged 3, 2 and 0 findings across the three 2026-11-21 runs on the same 3 jobs
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production 2026-11-21 control (fact-correction opus:high) | 4 | 4 | 0 | $0.990 | n = correction calls; 3 jobs done, 3 fact-check findings in 2 jobs, 4 rechecks with 2 findings mid-loop, 0 residual at end, one job took 3 rounds; bundles 18.30 USD; cost = all fact stages |
+| fact-correction=haiku:high | 0 | 0 | 0 | $0.260 | 3 jobs done; fact-check (Opus high) found 0 findings in all 3 jobs so fact-correction never ran; 0 residual; bundles 16.23 USD; NO evidence on fact-correction (zero exposure) |
+| convert=haiku:high 2026-11-21 (fact-correction opus:high, noise reference) | 3 | 0 | 3 | $1.610 | 1 job with 2 findings: rejections unit-source-grounding 1, measured-one-page-fit 1, fact-check-unchanged 1; bundle finished with 2 findings uncorrected |
+| ladder-control-a2+b2 2026-11-09 (earlier production; recheck on Opus then) | 12 | 12 | 0 | $4.840 | 24 jobs, 19 done; 2 recheck findings mid-loop, 0 residual at end |
+
+Recorded cost so far: $7.700.
+- Note: Input 02 was skipped by the official-posting gate in every 2026-11-21 run, so 3 of 4 jobs ran. Haiku high stays unadopted; rerun the arm (or add jobs that fact-check flags) to get exposure.
+<!-- /ai-test-run:2026-11-21T04-25-48-889Z-livefact-stagescorerscore-fact-livemjs-dcc3b1 -->
+
+<!-- ai-test-run:2026-11-21T04-32-56-034Z-livebundlescorescore-livemjs-13c791 -->
+### 2026-11-21 04:32 UTC · live bundle score (score-live.mjs) · write (two-document) live arm, runbook row 6
+
+- Status: **finished** (updated 2026-11-21 04:32:56 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing`
+- Jobs: 4 queued per arm; Leap Tools skipped by the official-posting gate in both arms; all 3 finished jobs produced résumé + letter (two-document writer)
+- Bundle cost: -14% (15.74 vs 18.30); per job Affirm 3.95 vs 4.56, Freed 5.38 vs 5.72, Exelixis 6.41 vs 8.03
+- Final letter chars: Sonnet 1976/2227/2360 vs production 2258/2375/2598 (one production letter over 2,400)
+- Production noise (2026-11-10 noise-floor runs A vs B, older stage settings, same 3 jobs): job cost 4.3-9.0 with A/B gaps up to 3.30 (Freed 5.72 vs 9.02); verify-correction calls 4-8 per job; fit-correction 2-4 calls per job
+- Blind judge: packets built (lw-both-*, key KEY-live.json); verdicts pending
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production (2026-11-21, write Opus low) | 3 | 3 | 0 | $18.30 | write 15/15 $3.47; verify-correction 8/22 $3.37; fit-correction 2/3 $1.58; fact-correction 4/4; page-fit rejections 3; editorial-plan 15 calls; wall 18.8 min |
+| write=sonnet:high | 3 | 3 | 0 | $15.74 | write 15/15 $3.99 (+15% vs Opus low live); verify-correction 10/19 $2.94; fit-correction 1/1 $0.29; fact-correction 1/1; page-fit rejections 1; editorial-plan 16 calls; wall 27.3 min (ran beside another arm) |
+
+Recorded cost so far: $34.04.
+- Note: Scorer: ai-test-runs/2026-11-20-policy-audit/convert/live/score-live.mjs; output writing/score-live-write-sonnet-high.json. Write stage live cost rose 15% on Sonnet high, unlike the offline 12% saving; bundle cost fell because fewer correction rounds ran.
+<!-- /ai-test-run:2026-11-21T04-32-56-034Z-livebundlescorescore-livemjs-13c791 -->
+
+<!-- ai-test-run:2026-11-21T04-34-51-120Z-blindjudge-7eb130 -->
+### 2026-11-21 04:34 UTC · blind judge · write (two-document) live arm, runbook row 6 · write=sonnet:high vs 2026-11-21 production, unblinded
+
+- Status: **finished** (updated 2026-11-21 04:34:51 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing`
+- Packets: lw-both-f1a7eaf3, lw-both-f4663098, lw-both-fe96f1b8 (2 sets each, unblinded with KEY-live.json)
+- Overall per packet (prod vs sonnet): 6 vs 7 (Sonnet ranked first? no: judge ranked Sonnet YQ first), 8 vs 6, 8 vs 7
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production (write Opus low) | 3 | 3 | 0 | $18.30 | ranked first 3/3; mean rank 1.00; mean overall 7.33; unsupported claims 0; résumé truth mean 9.00; one letter over 2,400 chars |
+| write=sonnet:high | 3 | 3 | 0 | $15.74 | ranked first 0/3; mean rank 2.00; mean overall 6.67; unsupported claims 0; résumé truth mean 9.33 |
+
+Recorded cost so far: $34.04.
+- Note: Correction: packet f1a7eaf3 ranked the Sonnet set first (YQ=sonnet-high). Firsts: production 2/3, Sonnet 1/3; mean rank production 1.33, Sonnet 1.67.
+- Note: Verdict: Sonnet won 1 of 3 with no worse truth or unsupported-claim scores (both 0 unsupported, truth 9 everywhere), meeting the 2-way floor; mean overall gap 0.67 within the n=3 noise. Live write stage cost +15%; bundle cost -14% from fewer correction rounds, within production noise.
+<!-- /ai-test-run:2026-11-21T04-34-51-120Z-blindjudge-7eb130 -->
+
+<!-- ai-test-run:2026-11-21T04-35-22-500Z-blindjudge-34e7aa -->
+### 2026-11-21 04:35 UTC · blind judge · write (two-document) live arm, runbook row 6 · CORRECTED unblind: write=sonnet:high vs 2026-11-21 production (supersedes 2026-11-21T04-34-51-120Z-blindjudge-7eb130)
+
+- Status: **finished** (updated 2026-11-21 04:35:22 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/writing`
+- Packets: lw-both-f1a7eaf3 (Sonnet first, 7 vs 6), lw-both-f4663098 (production first, 8 vs 6), lw-both-fe96f1b8 (production first, 8 vs 7)
+- Truth: 9 for every set in both arms; unsupported claims 0 in both arms
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production (write Opus low) | 3 | 3 | 0 | $18.30 | firsts 2/3; mean rank 1.33; mean overall 7.33 (6/8/8); unsupported claims 0; résumé truth mean 9.00; one letter 2598 chars, over 2,400 |
+| write=sonnet:high | 3 | 3 | 0 | $15.74 | firsts 1/3; mean rank 1.67; mean overall 6.67 (7/6/7); unsupported claims 0; résumé truth mean 9.33; letters all under 2,400 |
+
+Recorded cost so far: $34.04.
+- Note: The earlier section 7eb130 misread the key for packet f1a7eaf3 (rows said production 3/3); these figures replace it.
+- Note: Decision: not adopted, write stays Opus low. The live arm meets the 2-way floor (1 of 3 won, no worse truth or unsupported claims), but production leads 2/3 on rank and 0.67 on overall, the offline confirmation (cb-both) had Sonnet 1.75 rank behind the production prompt, and Sonnet high is not cheaper: live write stage +15% (.99 vs .47 for 15 calls); the -14% bundle cost came from fewer correction rounds and is inside production noise (same-job gaps up to .30 in 2026-11-10 runs A/B).
+<!-- /ai-test-run:2026-11-21T04-35-22-500Z-blindjudge-34e7aa -->
+
+<!-- ai-test-run:2026-11-21T04-50-18-839Z-livebundleharness-e22675 -->
+### 2026-11-21 04:50 UTC · live bundle harness · application bundles · production (no stage overrides)
+
+- Status: **finished** (updated 2026-11-21 05:23:01 UTC)
+- Out dir: `~/Desktop/My Apps/infinite-canvas/tmp/claude-e2e/runs/2026-11-21-fc2-production`
+- Command: `INFINITE_CANVAS_STAGE_PROFILES= node scripts/live-bundle-harness.mjs --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/13bee2d0-1d07-4689-8508-7fbbe6a500f8/input.json --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/416f322b-a97e-4853-b374-a90bd92cec87/input.json --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/ccd36492-d78c-42f8-b87f-ecc5ad86579f/input.json --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/9781acec-1ea9-4189-9972-b829e535b827/input.json --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/97d7410f-df35-42b1-bd32-14d0d46505de/input.json --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/b751c4cd-d624-427c-bf96-8e24fc543ca3/input.json --out tmp/claude-e2e/runs/2026-11-21-fc2-production`
+- Jobs: 6
+- Candidates: default
+- Bundles finished: 6 of 6 queued
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| ServiceNow, Inc. | 1 | 1 | 0 | $5.743 | bundle finished; accepted/calls: requirements 4/4 sonnet-5-5; convert 1/5 sonnet-5-5; verify-correction 2/8 haiku-5-5; fit-correction 2/2 sonnet-5-5; pick 1/1 opus-5-5 |
+| Decoda Health | 1 | 1 | 0 | $6.170 | bundle finished; accepted/calls: requirements 3/3 sonnet-5-5; convert 0/5 sonnet-5-5; verify-correction 3/12 haiku-5-5; pick 1/1 opus-5-5 |
+| Remitly | 1 | 1 | 0 | $4.045 | bundle finished; accepted/calls: requirements 1/1 sonnet-5-5; convert 1/5 sonnet-5-5; verify-correction 3/6 haiku-5-5; pick 1/1 opus-5-5 |
+| Affirm | 1 | 1 | 0 | $5.009 | bundle finished; accepted/calls: requirements 2/2 sonnet-5-5; convert 1/5 sonnet-5-5; verify-correction 2/10 haiku-5-5; pick 1/1 opus-5-5 |
+| Freed | 1 | 1 | 0 | $5.313 | bundle finished; accepted/calls: requirements 3/3 sonnet-5-5; convert 1/5 sonnet-5-5; verify-correction 3/5 haiku-5-5; fit-correction 1/1 sonnet-5-5; pick 1/1 opus-5-5 |
+| Exelixis | 1 | 1 | 0 | $5.454 | bundle finished; accepted/calls: requirements 3/3 sonnet-5-5; convert 0/5 sonnet-5-5; verify-correction 4/6 haiku-5-5; fit-correction 1/1 sonnet-5-5; pick 1/1 opus-5-5 |
+
+Recorded cost so far: $31.74.
+<!-- /ai-test-run:2026-11-21T04-50-18-839Z-livebundleharness-e22675 -->
+
+<!-- ai-test-run:2026-11-21T04-50-38-777Z-livebundleharness-def87f -->
+### 2026-11-21 04:50 UTC · live bundle harness · application bundles · fact-correction=haiku:high
+
+- Status: **finished** (updated 2026-11-21 05:25:48 UTC)
+- Out dir: `~/Desktop/My Apps/infinite-canvas/tmp/claude-e2e/runs/2026-11-21-fc2-haiku-high`
+- Command: `INFINITE_CANVAS_STAGE_PROFILES=fact-correction=haiku:high node scripts/live-bundle-harness.mjs --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/13bee2d0-1d07-4689-8508-7fbbe6a500f8/input.json --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/416f322b-a97e-4853-b374-a90bd92cec87/input.json --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/ccd36492-d78c-42f8-b87f-ecc5ad86579f/input.json --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/9781acec-1ea9-4189-9972-b829e535b827/input.json --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/97d7410f-df35-42b1-bd32-14d0d46505de/input.json --job tmp/claude-e2e/runs/ladder-control-a2/canvas/.local-ai/jobs/b751c4cd-d624-427c-bf96-8e24fc543ca3/input.json --out tmp/claude-e2e/runs/2026-11-21-fc2-haiku-high`
+- Jobs: 6
+- Candidates: default
+- Bundles finished: 6 of 6 queued
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| ServiceNow, Inc. | 1 | 1 | 0 | $4.664 | bundle finished; accepted/calls: requirements 4/4 sonnet-5-5; convert 2/5 sonnet-5-5; verify-correction 2/5 haiku-5-5; pick 1/1 opus-5-5 |
+| Decoda Health | 1 | 1 | 0 | $5.044 | bundle finished; accepted/calls: requirements 5/5 sonnet-5-5; convert 3/5 sonnet-5-5; verify-correction 2/3 haiku-5-5; pick 1/1 opus-5-5 |
+| Remitly | 1 | 1 | 0 | $3.900 | bundle finished; accepted/calls: requirements 2/2 sonnet-5-5; convert 2/5 sonnet-5-5; verify-correction 3/4 haiku-5-5; pick 1/1 opus-5-5 |
+| Affirm | 1 | 1 | 0 | $4.573 | bundle finished; accepted/calls: requirements 2/2 sonnet-5-5; convert 1/5 sonnet-5-5; verify-correction 4/8 haiku-5-5; pick 1/1 opus-5-5 |
+| Freed | 1 | 1 | 0 | $5.364 | bundle finished; accepted/calls: requirements 3/3 sonnet-5-5; convert 0/5 sonnet-5-5; verify-correction 3/6 haiku-5-5; fit-correction 2/2 sonnet-5-5; pick 1/1 opus-5-5 |
+| Exelixis | 1 | 1 | 0 | $5.806 | bundle finished; accepted/calls: requirements 3/3 sonnet-5-5; convert 1/5 sonnet-5-5; verify-correction 1/6 haiku-5-5; fit-correction 3/3 sonnet-5-5; pick 1/1 opus-5-5 |
+
+Recorded cost so far: $29.35.
+<!-- /ai-test-run:2026-11-21T04-50-38-777Z-livebundleharness-def87f -->
+
+<!-- ai-test-run:2026-11-21T05-26-36-770Z-score-fact-live-266548 -->
+### 2026-11-21 05:26 UTC · score-fact-live · fact-correction
+
+- Status: **finished** (updated 2026-11-21 05:26:36 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-20-policy-audit/fact-and-corrections/live`
+- Run dirs: tmp/claude-e2e/runs/2026-11-21-fc2-production and 2026-11-21-fc2-haiku-high
+- Jobs: ServiceNow, Decoda Health, Remitly, Affirm, Freed, Exelixis (inputs from ladder-control-a2)
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production (Opus high) | 4 | 4 | 0 | $0.711 | 6/6 jobs done; 4 rounds all accepted first try; check findings 6 (per job 0,2,0,2,0,2); recheck findings 2 over 4 rechecks; residual 1 (Freed); all fact stages 1.70 USD; bundles 31.74 USD |
+| fact-correction=haiku:high | 9 | 6 | 3 | $0.210 | 6/6 jobs done; 6 rounds, 5 accepted first try, 6/6 overall; rejections unit-source-grounding 2, fact-check-unchanged 1 (all one job, 3 retries); check findings 11 (per job 3,2,2,3,1,0); recheck findings 1 over 6 rechecks; residual 0; all fact stages 1.40 USD; bundles 29.35 USD |
+
+Recorded cost so far: $0.921.
+- Note: Columns: n = fact-correction calls, valid = accepted, failed = rejected, cost = fact-correction stage cost. Same inputs, concurrent arms, same day. Both arms had at least 3 correction calls. Fact-check findings differ between arms (6 vs 11) on the same inputs, so exposure is not matched job by job.
+<!-- /ai-test-run:2026-11-21T05-26-36-770Z-score-fact-live-266548 -->

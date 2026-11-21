@@ -69,7 +69,7 @@ export const AI_CALL_PROVIDERS = Object.freeze({
     'Live 14/14 accepted (Claude 9/9); replay agreement with Claude 98.4% vs Claude-Claude 99.2%; $0.001 vs $0.058 per call, p50 4.9 s vs 17.4 s. Reasoning adds cost and latency with no gain.'),
   // Measured 2026-11-15 (docs/ai-model-selection.md): Flash and Pro at reasoning off to high on the stored prompts of
   // the worker tasks never measured with DeepSeek. The gap review, role audit and location consolidation matched Claude; the role screens,
-  // liveness, taxonomy plan, preference interpretation and preference-research assessment stay on Claude (see that file).
+  // taxonomy plan, preference interpretation and preference-research assessment stay on Claude (see that file). Liveness moved on 2026-11-20 (below).
   'task:job-gap-review': taskEntry('job-gap-review', 'deepseek-flash', 'low',
     'Real prompts 18/18 rows agreeing with production (Haiku high 18/18), 4/4 valid; planted softer-wording, overlooked-evidence, duplicate and near-miss rows 8/8 caught with 0 false alarms in 18 clean rows, 8/8 valid; $0.001-0.003 vs $0.010 per call. Reasoning off missed one planted duplicate; high had one invalid answer.',
     { decided: '2026-11-15' }),
@@ -79,6 +79,17 @@ export const AI_CALL_PROVIDERS = Object.freeze({
   'task:job-location-consolidation-confirmation': taskEntry('job-location-consolidation-confirmation', 'deepseek-flash', 'low',
     'Planted pairs built from real listings (changed seniority, employment type, team, stack, level or requisition must split; location-only or boilerplate-only copies must merge): 40/40 decisions right across 2 runs, the same as Haiku low; reasoning off and Pro off split a boilerplate-only copy; $0.001-0.002 vs $0.004 per call.',
     { decided: '2026-11-15' }),
+  // Measured 2026-11-20 (docs/ai-model-selection.md): the taxonomy classify batch (never tested before; Haiku medium by analogy)
+  // and the listing liveness check, each confirmed by a second run on every captured prompt.
+  'task:job-taxonomy-classify-batch': taskEntry('job-taxonomy-classify-batch', 'deepseek-flash', 'off',
+    'One real chunk plus 4 planted chunks (clear, two-family, no-family and mixed jobs) x 2 runs, then a confirmation run: 20/20 valid, 136/136 placements right, level with Sonnet medium; Haiku medium (the analogy pick) 9/10 valid and 39/53 right, putting the real job in Other both times; about $0.0001 vs $0.0007 per call.',
+    { decided: '2026-11-20' }),
+  'task:job-listing-liveness': taskEntry('job-listing-liveness', 'deepseek-flash', 'high',
+    'All 16 real prompts since 2026-11-12 plus the 10 planted pages, 2 runs, confirmed: real pages 66/68 vs Haiku medium 67/68 (the miss is one ambiguous LinkedIn page with no apply control), planted closed pages 18/20 vs 16/20, 78/78 valid; reasoning off cost the same but failed the quote gate once; $0.0002-0.0005 vs $0.002 per call.',
+    { decided: '2026-11-20' }),
+  'task:job-experience-band-assessment': taskEntry('job-experience-band-assessment', 'deepseek-flash', 'off',
+    'Role-family ladder prompt with the overlapping-range rule (2026-11-20): 2 real prompts x 2 runs, judge-endorsed bands on 6/6 identities with every answer valid first try (before the rule 0-1/6); Sonnet low and Opus low also 6/6, Haiku medium and high 5/6, Flash high and Pro low 4/6; $0.0004 vs $0.026 per call.',
+    { decided: '2026-11-21' }),
 });
 
 /** True when INFINITE_CANVAS_OFFLOAD_STAGES=off turns every routed call back to Claude. */

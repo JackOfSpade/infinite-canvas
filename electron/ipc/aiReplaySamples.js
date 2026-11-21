@@ -93,6 +93,8 @@ export function recordAiReplaySample(sample) {
       model: stringOrNull(sample.model),
       requestedModel: stringOrNull(sample.requestedModel),
       effort: stringOrNull(sample.effort),
+      // 'offload' for a DeepSeek-routed call; absent for Claude, as in every older sample.
+      ...(sample.provider === 'offload' ? { provider: 'offload' } : {}),
       tools: stringOrNull(sample.tools),
       costUsd: numberOrNull(sample.costUsd),
       usage: sample.usage && typeof sample.usage === 'object' ? sample.usage : null,

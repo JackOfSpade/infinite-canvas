@@ -82,6 +82,6 @@ export function careerCompilationProgressForRequest(request, progressByRun) {
   const phase = task.includes('-audit-') ? 'auditing'
     : task.includes('-repair') ? 'repairing'
     : task === 'career-profile-clean' ? 'cleaning'
-    : task === 'career-profile-compile' ? 'compiling' : 'reading';
+    : task === 'career-profile-compile' || task === 'career-profile-compile-edit' ? 'compiling' : 'reading';
   return { phase };
 }

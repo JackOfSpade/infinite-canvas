@@ -53,8 +53,10 @@ function recordingTransport({ shardForPage = notesShard, incrementalMode = 'edit
     callText: async (prompt, options) => {
       calls.push({ prompt, task: options.task, pageIndex: options.hints?.pageIndex });
       let response;
-      if (options.task === 'career-profile-compile') {
+      if (options.task === 'career-profile-compile' || options.task === 'career-profile-compile-edit') {
         const payload = sourcePayload(prompt);
+        // The incremental-edit prompt runs under its own task id (2026-11-21), never under the page compile's.
+        assert.equal(options.task === 'career-profile-compile-edit', options.hints?.phase === 'incremental-edit');
         if (options.hints?.phase === 'incremental-edit') {
           response = { mode: incrementalMode, edits: [], notes: 'Apply the literal source change.' };
           if (incrementalMode === 'edits') {

@@ -494,9 +494,11 @@ export function createClaudeTaskWorker({
       try { shadowValidate = shadowValidator({ requestId: entry.requestId, handoffCode: entry.handoffCode, allowTasks }); } catch { shadowValidate = null; }
     }
     const outcome = await seam.submit({ requestId: entry.requestId, handoffCode: entry.handoffCode, response: reply.text, allowTasks });
-    if (provider === 'claude') {
+    {
       // The exact request that produced this answer, so a future model can
-      // re-answer it offline. Recording never changes what the task does.
+      // re-answer it offline. Recording never changes what the task does. A
+      // DeepSeek-routed task is recorded too: without its prompts, a re-test on
+      // the next Flash release would have nothing newer than its proof to replay.
       try {
         recordAiReplaySample({
           at: new Date(now()).toISOString(),
@@ -506,8 +508,9 @@ export function createClaudeTaskWorker({
           text: cached.text,
           systemAppend: cached.systemAppend,
           model: reply.model ?? null,
-          requestedModel: profile.model ?? null,
-          effort: profile.effort ?? null,
+          requestedModel: provider === 'offload' ? route.route : (profile.model ?? null),
+          effort: provider === 'offload' ? route.reasoning : (profile.effort ?? null),
+          ...(provider === 'offload' ? { provider } : {}),
           tools: profile.tools ?? null,
           costUsd: reply.costUsd ?? null,
           usage: reply.usage ?? null,

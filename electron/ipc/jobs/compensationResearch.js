@@ -42,7 +42,7 @@ const COMPENSATION_RESEARCH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 // durable slice, not as model context for neighbouring roles.
 export const COMPENSATION_SECTION_FORMAT_SUFFIX = "--- RESPONSE FORMAT CHECK ---\nReturn nothing outside the sections: no preface, conclusion, Markdown fence or heading. Put each BEGIN and END marker on its own line exactly as shown, with no trailing spaces, and write one END marker for every BEGIN marker.";
 
-export const ROLE_FAMILY_LADDER_SUFFIX = "--- LADDER CHECK ---\nBands must be whole numbers: the first band starts at minYears 0, every later band minYears is the previous band maxYears plus 1 (no gaps or overlaps), the last band ends at maxYears 99, and every band has a non-empty label. For a fresh ladder also return evidenceQuote (at least 8 characters) and sourceDate (at least 3 characters), each copied exactly from that same identity research section (not stated only if that section says so); for an unavailable ladder return both as empty strings. When an identity's research holds more than one source set (SOURCE SET A, SOURCE SET B) and they give different ladders, use the ladder backed by a verbatim quote from an official or dated source and copy its quote, URL and date; never blend bands from different sources; if neither ladder is better supported, return the unavailable ladder.";
+export const ROLE_FAMILY_LADDER_SUFFIX = "--- LADDER CHECK ---\nBands must be whole numbers: the first band starts at minYears 0, every later band minYears is the previous band maxYears plus 1 (no gaps or overlaps), the last band ends at maxYears 99, and every band has a non-empty label. When the source's ranges share an endpoint or overlap (for example 0-2, 2-5 and 5+ years), each level starts at its own stated minimum and the level below ends one year before it (0-1, 2-4, 5-99); never move a level's stated minimum up or down to make the bands fit. For a fresh ladder also return evidenceQuote (at least 8 characters) and sourceDate (at least 3 characters), each copied exactly from that same identity research section (not stated only if that section says so); for an unavailable ladder return both as empty strings. When an identity's research holds more than one source set (SOURCE SET A, SOURCE SET B) and they give different ladders, use the ladder backed by a verbatim quote from an official or dated source and copy its quote, URL and date; never blend bands from different sources; if neither ladder is better supported, return the unavailable ladder.";
 
 export const COHORT_PROVENANCE_SUFFIX = "--- PROVENANCE CHECK ---\nsourceName is the publisher or site name and must not be blank; evidenceQuote must be at least 8 characters and sourceDate at least 3 characters, both copied exactly from that same cohort section.";
 
@@ -680,7 +680,7 @@ async function runFreshRoleFamilyPipeline(prepared, results, { signal } = {}) {
             value = await callLLMText(buildRoleFamilyBatchAssessmentPrompt(batch, sections), {
               displayOnlyPromptSuffix: ROLE_FAMILY_LADDER_SUFFIX,
               signal: workerSignal,
-              task: 'job-compensation-assessment-batch',
+              task: 'job-experience-band-assessment',
               hints: { itemCount: batch.length, roleFamilyCount: batch.length, batch: batchNumber, batchTotal },
               responseSchema: ROLE_FAMILY_EXPERIENCE_BANDS_BATCH_SCHEMA,
               responseValidator: raw => validateRoleFamilyExperienceBandsBatchSubmission(raw, batch, sections),
@@ -830,7 +830,7 @@ async function getExperienceBandsForRoleFamilies(roleFamilies, { signal } = {}) 
             value = await callLLMText(buildRoleFamilyBatchAssessmentPrompt(batch, sections), {
               displayOnlyPromptSuffix: ROLE_FAMILY_LADDER_SUFFIX,
               signal,
-              task: 'job-compensation-assessment-batch',
+              task: 'job-experience-band-assessment',
               hints: { itemCount: batch.length, roleFamilyCount: batch.length, batch: batchNumber, batchTotal },
               responseSchema: ROLE_FAMILY_EXPERIENCE_BANDS_BATCH_SCHEMA,
               responseValidator: (raw) => validateRoleFamilyExperienceBandsBatchSubmission(raw, batch, sections),

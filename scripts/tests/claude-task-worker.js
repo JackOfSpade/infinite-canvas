@@ -11,6 +11,7 @@ import {
 import { cachedPromptParts, claudeTaskStatusView, CLAUDE_TASK_PAUSE_CODES, createClaudeTaskWorker } from '../../electron/ipc/claudeTaskWorker.js';
 import { noteParallelLimit, PARALLEL_LIMIT_NOTICE, parallelBlocked, parallelExhaustedError, parallelPlainLeads, resetParallelLimit } from '../../electron/ipc/parallelSearch.js';
 import { createShadowMeasure } from '../../electron/ipc/aiShadowMeasure.js';
+import { configureAiRecording } from '../../electron/ipc/aiReplaySamples.js';
 import { WORKER_ENABLED_ATTACHMENT_TASKS, WORKER_RELEASE_ONE_TASKS } from '../../electron/ipc/nonApiAi.js';
 import { answeringModel, buildClaudeInputMessage } from '../../electron/ipc/claudeApplicationRunner.js';
 import { buildCompensationResearchPrompt, buildRoleFamilyBatchResearchPrompt, compensationCohortResearchIds, compensationRoleFamilyResearchIds } from '../../electron/ipc/jobs.js';
@@ -78,7 +79,7 @@ export default [
     run() {
       const expected = [...WORKER_RELEASE_ONE_TASKS, ...WORKER_ENABLED_ATTACHMENT_TASKS].sort();
       assert.deepEqual([...CLAUDE_TASK_IDS].sort(), expected);
-      assert.deepEqual(CLAUDE_TASK_PROFILES['job-role-snippet-screen-batch'], profile('haiku', 'medium'), 'the snippet screen keeps the measured Haiku medium profile');
+      assert.deepEqual(CLAUDE_TASK_PROFILES['job-role-snippet-screen-batch'], profile('haiku', 'low'), 'the snippet screen keeps the measured Haiku low profile (confirmed 2026-11-21)');
       assert.deepEqual(CLAUDE_TASK_PROFILES['job-listing-liveness'], profile('haiku', 'medium'), 'liveness keeps the measured Haiku medium profile');
       assert.deepEqual(CLAUDE_TASK_PROFILES['job-gap-review'], profile('haiku', 'high'), 'the gap review keeps the measured Haiku high profile');
       assert.deepEqual(CLAUDE_TASK_PROFILES['job-compensation-assessment-batch'], profile('sonnet', 'low'), 'compensation assessment keeps the measured Sonnet low profile');
@@ -632,6 +633,37 @@ export default [
       assert.equal(rows[0].reasoning, 'high');
       assert.equal(rows[0].model, 'deepseek-v4-flash');
       assert.equal(rows[0].costUsd, 0.01);
+    },
+  },
+  {
+    name: 'claude task worker offload: a routed task leaves a replay sample naming its route and reasoning',
+    async run() {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-offload-sample-'));
+      configureAiRecording({ userData: root });
+      try {
+        const { worker } = harness({
+          entries: [entry('a')],
+          runStage: () => { throw new Error('Claude must not run'); },
+          recordUsage: () => {},
+          routeFor: task => (task === 'job-scoring' ? OFFLOAD_ROUTE : null),
+          offloadCall: async () => ({ text: 'ds answer', model: 'deepseek-v4-flash', usage: { input_tokens: 3 }, costUsd: 0.01 }),
+        });
+        worker.start();
+        await settle();
+        const dir = path.join(root, 'ai-replay-samples', 'job-scoring');
+        const files = fs.readdirSync(dir);
+        assert.equal(files.length, 1);
+        const sample = JSON.parse(fs.readFileSync(path.join(dir, files[0]), 'utf8'));
+        assert.equal(sample.provider, 'offload');
+        assert.equal(sample.requestedModel, 'deepseek-flash');
+        assert.equal(sample.effort, 'high');
+        assert.equal(sample.model, 'deepseek-v4-flash');
+        assert.equal(sample.answer, 'ds answer');
+        assert.equal(sample.text, 'prompt a');
+      } finally {
+        configureAiRecording({ userData: null });
+        fs.rmSync(root, { recursive: true, force: true });
+      }
     },
   },
   {

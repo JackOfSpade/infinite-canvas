@@ -34,5 +34,11 @@ export function writeVerifyLengthBudgets(profile, sourceRoles) {
  */
 export const WRITE_VERIFY_LETTER_CAPACITY = Object.freeze({ paragraphs: 5, maxCharacters: 2400, perExtraParagraphCharacters: 100 });
 export function writeVerifyLetterCapacityLine({ paragraphs, maxCharacters, perExtraParagraphCharacters } = WRITE_VERIFY_LETTER_CAPACITY) {
-  return `MEASURED LETTER CAPACITY: The letter must fit one page together with its letterhead, date, salutation and closing. At ${paragraphs} paragraphs the page holds about ${maxCharacters} characters of paragraph text, spaces included; each paragraph beyond that costs about ${perExtraParagraphCharacters} characters. This is an upper estimate to help avoid overflow, not an amount to reach. Actual one-page fit is checked after conversion.`;
+  // 2026-11-20: the earlier wording ("about N characters ... an upper estimate, not an amount to reach") left Opus
+  // letters over N in 20 of 22 replayed runs (two-document mean 2,855), so the line now gives a target below the
+  // measured page and a hard ceiling with an instruction to count (docs/ai-model-selection.md, write row).
+  const group = value => value.toLocaleString('en-US');
+  const targetHigh = maxCharacters - 200;
+  const targetLow = targetHigh - 200;
+  return `MEASURED LETTER CAPACITY: The letter must fit one page together with its letterhead, date, salutation and closing. At ${paragraphs} paragraphs the page holds at most ${group(maxCharacters)} characters of paragraph text, spaces included, and ${perExtraParagraphCharacters} fewer for each paragraph beyond ${paragraphs}. Aim for ${group(targetLow)} to ${group(targetHigh)} characters and never exceed the limit: before answering, count the characters of your paragraphs, and if the total is over, cut the weakest sentence or example until it fits. A letter over the limit fails the one-page check after conversion and costs a shortening round.`;
 }

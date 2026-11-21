@@ -867,7 +867,7 @@ export default [
       assert.deepEqual(claudeStageProfile('requirements-audit'), { model: 'sonnet', effort: 'high' });
       assert.deepEqual(claudeCliArgs(claudeStageProfile('write')).slice(0, 5), ['-p', '--model', 'opus', '--effort', 'low']);
       // A cover-letter-only writer runs on Opus medium; a résumé-only or two-document writer and every other stage do not change.
-      assert.deepEqual(claudeStageProfile('write', { documentScope: 'cover' }), { model: 'opus', effort: 'medium' });
+      assert.deepEqual(claudeStageProfile('write', { documentScope: 'cover' }), { model: 'opus', effort: 'low' });
       assert.deepEqual(claudeStageProfile('write', { documentScope: 'resume' }), { model: 'opus', effort: 'low' });
       assert.deepEqual(claudeStageProfile('pick', { documentScope: 'cover' }), { model: 'opus', effort: 'high' });
     },
@@ -1963,7 +1963,7 @@ export default [
     },
   },
   {
-    name: 'claude runner: a cover-letter-only writer runs on Opus medium and its retry names that setting',
+    name: 'claude runner: a cover-letter-only writer runs on its own profile (Opus low) and its retry names that setting',
     async run() {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-cover-only-'));
       const logFile = path.join(dir, 'runs.jsonl');
@@ -1978,9 +1978,9 @@ export default [
       const state = runner.status(['job-cover-only'])['job-cover-only'];
       await runner.shutdown();
       const rows = readRunLog(logFile);
-      assert.deepEqual(calls, [['opus', 'medium']]);
-      assert.deepEqual([rows[0].stage, rows[0].requestedModel, rows[0].requestedEffort], ['write', 'opus', 'medium']);
-      if ('retryEffort' in state) assert.equal(state.retryEffort, 'medium');
+      assert.deepEqual(calls, [['opus', 'low']]);
+      assert.deepEqual([rows[0].stage, rows[0].requestedModel, rows[0].requestedEffort], ['write', 'opus', 'low']);
+      if ('retryEffort' in state) assert.equal(state.retryEffort, 'low');
     },
   },
   {

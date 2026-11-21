@@ -23,6 +23,9 @@ export const CAREER_WRITING_DEFAULT_PROFILE = Object.freeze({ model: CLAUDE_SONN
 // Writing at Opus low cost a quarter of xhigh with no measurable loss in blind
 // panels; Opus high fact-checks catch ownership overstatements Sonnet passes.
 export const APPLICATION_STAGE_PROFILES = Object.freeze({
+  // editorial-plan, 2026-11-21: Opus xhigh. Moved to Haiku high on 2026-11-20 on pooled panels judged with older writers; confirmed with the
+  // current Opus low writer, Haiku high outlines' letters trailed the xhigh control by 1.3-1.5 mean rank (floor 1.2) and never ranked
+  // first in 9, so it returned to xhigh (docs/ai-model-selection.md).
   'editorial-plan': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'xhigh' }),
   write: Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
   pick: Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
@@ -34,13 +37,16 @@ export const APPLICATION_STAGE_PROFILES = Object.freeze({
   'fit-correction': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' }),
   'fact-check': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
   'fact-correction': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
+  // fact-recheck, 2026-11-21: Opus high. Haiku high matched it on planted claims (14/18) and passed on flag counts, but three blind judges
+  // found none of its 7 extra flags on real prompts real (5 defensible, 2 false alarms) and it missed the one real flag Opus raised, at
+  // $0.017 vs $0.30 a call; every extra flag sends a correct document back for another round (docs/ai-model-selection.md).
   'fact-recheck': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
 });
-// The writer on a cover-letter-only run (it also reads the saved résumé). 2026-11-15: on the one real cover-only
-// prompt, 3 runs per setting, two blind judges ranked Opus medium first both times (7.67 vs 6.50 for Opus low and
-// 6.17 for Sonnet high) at $0.44 vs $0.38 a call. One job only; the owner chose medium on that evidence. Re-test when
-// 3 or more cover-only jobs exist (docs/ai-model-selection.md).
-export const COVER_ONLY_WRITE_PROFILE = Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' });
+// The writer on a cover-letter-only run (it also reads the saved résumé), measured on its own prompt. 2026-11-20: on all
+// 5 cover-only jobs, 2 runs each, a blind 6-way judge ranked Opus low 2.80 against Opus medium's 3.60 (within the
+// rep-to-rep floor), at $0.40 against $0.50 a call, so it runs on Opus low like the other writers; the 2026-11-15
+// Opus medium choice rested on one job (docs/ai-model-selection.md).
+export const COVER_ONLY_WRITE_PROFILE = Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' });
 /**
  * The inflation taxonomy a fact checker applies to first-person career claims.
  * `target` is the already-quoted employer name (or a descriptive phrase) the

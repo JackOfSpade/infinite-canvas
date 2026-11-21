@@ -74,6 +74,7 @@ const TASK_MAX_TOKENS = {
   // independent audit passes return discrepancy rows rather than copies of the
   // corpus, while repair returns the complete corrected candidate snapshot.
   'career-profile-compile': CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS['career-profile-compile'],
+  'career-profile-compile-edit': CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS['career-profile-compile-edit'],
   'career-profile-clean': CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS['career-profile-clean'],
   'career-profile-audit-completeness': CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS['career-profile-audit-completeness'],
   'career-profile-audit-grounding': CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS['career-profile-audit-grounding'],
@@ -87,6 +88,8 @@ const TASK_MAX_TOKENS = {
   // mid-output. 4096 gives ~3000 headroom over
   // typical use (3 short query arrays ≈ 500 tokens visible + ~1000 thinking).
   'job-query-generation':      4096,  // 3 query arrays — small JSON, thinking-heavy
+  // One canonicalLocation object; sized like query generation, whose prompt it was split from.
+  'job-search-location':       4096,
   // Whole-record scoring needs room for the complete professional-gap audit.
   // Four fresh jobs reserve 1,600 + 4*2,800 = 12,800 tokens. A one-job evidence
   // phase can separately name its requirement workload for output guidance.
@@ -131,6 +134,9 @@ const TASK_MAX_TOKENS = {
     return Math.min(BATCH_OUTPUT_TOKEN_BUDGET,
       roles > 0 ? roleFamilyAssessmentMaxTokens(roles) : compensationCohortAssessmentMaxTokens(Math.max(1, cohorts), rows));
   },
+  // The role-family experience-band ladder assessment (split from job-compensation-assessment-batch 2026-11-21).
+  'job-experience-band-assessment': ({ roleFamilyCount = 0, itemCount = 1 } = {}) =>
+    Math.min(BATCH_OUTPUT_TOKEN_BUDGET, roleFamilyAssessmentMaxTokens(Math.max(1, Number(roleFamilyCount) || Number(itemCount) || 1))),
   'job-preference-interpretation': 4096,
   // Output volume here is listings × preference-plan items — the model writes
   // one match object per pair — so the cap is keyed on that PRODUCT, not on the
