@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import nodeAssert from 'node:assert';
 import { resolveCompensationCareerInput, resolveCompensationCareerInputs } from '../../electron/ipc/jobs.js';
 import { __careerPageValidationDiagnosticForTests, __crossPageRulingForTests } from '../test-dependencies.js';
+import { __editRepairPageForTests } from '../../electron/ipc/careerSnapshot.js';
 import { assert } from './testHelpers.js';
 import { MAX_SOURCE_GROUNDING_QUOTE_CHARS } from '../../electron/ipc/applicationSourceLimits.js';
 import { careerDataProjectProvenanceHeadingForName, resumeRoleLocationFailures } from '../../electron/ipc/jobApplication.js';
@@ -1237,6 +1238,47 @@ const w6ReproTests = [
     assert(!('skillsHeldByOtherPages' in auditPayload(prompts.get(2))) && !prompts.get(2).includes('skillsHeldByOtherPages'), 'pages that hold their own row keep the unchanged prompt');
     assert(validateCurrentCareerSnapshot(result.snapshot).valid && result.profile.skills.filter(skill => skill.name === 'Python').length === 1, 'the compile approves with one skill row');
     assert(!log.calls.some(call => call.phase === 'edit-repair'), 'no deterministic repair round is spent');
+  } },
+  { name: 'W6 audit: a finding whose edits break a page rule on their own is refused at the auditor, not left for repair', run: async () => {
+    // 2026-11-22: an attribution finding dropped two labels from an
+    // achievement's technologies but kept their technologyReferences records.
+    // It was admitted, failed only once every finding was applied together,
+    // and the repair worker (shown the pre-edit shard) could only restate the
+    // current value until the handoff was returned to the person.
+    const technologiesEdit = { op: 'set', group: 'achievements', entityId: 'p0001-achievement-service', field: 'technologies', valueJson: '[]' };
+    const { result, log } = await runEditProtocol({
+      audit: ({ lane, round, corpus: source }) => (lane === 'attribution' && round === 0
+        ? [{ findings: [editFinding({ id: 'drop-stack-label', category: 'attribution', segmentIds: [source.segments[3].id], entityIds: ['p0001-achievement-service'], edits: [technologiesEdit] })] }, { findings: [] }]
+        : [{ findings: [] }]),
+    });
+    const rejected = log.rejected.filter(item => (item.ruleIds || []).includes('AUDIT_EDIT_PAGE_INVALID'));
+    nodeAssert.strictEqual(rejected.length, 1);
+    nodeAssert.ok(rejected[0].correctionDetails.some(line => line.includes('drop-stack-label') && line.includes('technologyReferences') && line.includes('drop the finding')), rejected[0].correctionDetails.join(' | '));
+    nodeAssert.ok(!log.calls.some(call => call.phase === 'edit-repair'), 'no repair round is spent on the auditor\'s own invalid edit');
+    nodeAssert.ok(validateCurrentCareerSnapshot(result.snapshot).valid);
+    nodeAssert.deepStrictEqual(result.profile.achievements[0].technologies, ['Python']);
+  } },
+  { name: 'W6 repair: errors found after applying edits are explained to the worker without changing the saved step identity', run: async () => {
+    // validationErrors name indexes in the edited page, which the worker never
+    // sees; without the note it restated current values (EDIT_NO_CHANGE) until
+    // the handoff was returned to the person.
+    const corpus = buildCareerSourceCorpus(pagedSourceFiles(['Synthetic page']));
+    const pages = partitionCareerSourcePages(corpus, { maxSegments: 1 });
+    const requests = [];
+    const callText = async (prompt, options) => {
+      requests.push({ prompt, options });
+      throw Object.assign(new Error('stop after inspecting the request'), { code: 'TEST_STOP' });
+    };
+    for (const validationErrors of [['achievements[p0001-a].technologyReferences[2].technology does not identify one of achievements[p0001-a].technologies.'], []]) {
+      await __editRepairPageForTests({ corpus, page: pages[0], pages, pageProfiles: [emptyPageShard(pages[0].segmentIds[0])], ledger: createDecisionLedger(), round: 0,
+        validationErrors, deterministicErrors: validationErrors.length ? [] : ['synthetic deterministic error'], callText, maxPromptChars: 200_000,
+        stats: { editsApplied: 0, findingsRejected: 0, editRepairs: 0 } }).catch(error => { if (error.code !== 'TEST_STOP') throw error; });
+    }
+    const [combined, deterministic] = requests;
+    const note = combined.options.displayOnlyPromptSuffix;
+    nodeAssert.ok(note.includes('NOT present in currentPageProfile') && note.includes('Never return an edit that sets a field to the value it already has'), note);
+    nodeAssert.ok(!combined.prompt.includes('NOT present in currentPageProfile'), 'the note stays out of the hashed prompt so saved repair steps still replay');
+    nodeAssert.strictEqual(deterministic.options.displayOnlyPromptSuffix, '', 'a deterministic-only repair carries no note');
   } },
   { name: 'W6 deterministic decline requires explanatory notes in the answer validator', run: async () => {
     const { log } = await runEditProtocol({ files: pagedSourceFiles(['Synthetic page']), pageMaxSegments: 1,

@@ -2844,6 +2844,13 @@ const SKILLS_HELD_BY_OTHER_PAGES_INSTRUCTION = 'skillsHeldByOtherPages lists ski
 
 const EDIT_REPAIR_DECLINE_INSTRUCTION = 'If a listed deterministic error cannot be fixed by editing this page\'s own entities (it concerns another page, or needs an id this input does not give you), return an empty edits array with notes that say why, instead of an edit that changes nothing or references an id outside this page.';
 
+// validationErrors always come from applying the findings' edits to
+// currentPageProfile, so they name indexes in a page the worker never sees.
+// Without this a worker that finds currentPageProfile already consistent can
+// only restate the current value, which is rejected as a no-op edit until the
+// handoff is returned to the person.
+const EDIT_REPAIR_COMBINED_ERRORS_NOTE = 'Note on validationErrors: they are NOT present in currentPageProfile. The host found them after applying every listed finding\'s edits together to currentPageProfile, so their array indexes refer to that edited result, not to currentPageProfile. Return edits that carry out the findings in a form whose combined result validates. When a finding\'s own edit causes an error (for example it removes a label from technologies but leaves that label\'s technologyReferences record), change that edit so every dependent field stays consistent, or leave that finding\'s edit out. Never return an edit that sets a field to the value it already has in currentPageProfile.';
+
 /** Build one minimal field-level repair request for a single page shard. */
  function buildCareerProfileEditRepairPrompt(corpus, page, shard, {
   findings = [],
@@ -3749,6 +3756,7 @@ async function resolveCrossPageConflict({ corpus, pages, pageProfiles, ledger, r
 }
 
 export const __crossPageRulingForTests = { crossPageConflicts, resolveCrossPageConflict, deterministicState };
+export const __editRepairPageForTests = (...args) => editRepairPage(...args);
 
 function throwIfAborted(signal) {
   if (signal?.aborted) throw (signal.reason || new Error('Career snapshot compilation was cancelled.'));
@@ -3786,6 +3794,13 @@ function validateAuditResult(result, corpus, profile, category, {
   const segments = segmentIndex(corpus);
   const entityIds = new Set(['identity']);
   for (const group of ['roles', 'achievements', 'projects', 'skills', 'education', 'certifications', 'otherEvidence']) for (const entity of profile[group] || []) entityIds.add(entity.id);
+  // Page validity of each finding on its own, measured against what the
+  // current shard already reports, so only errors the finding introduces count.
+  let baselinePageErrors = null;
+  const pageCheck = page && shard && pageProfiles ? {
+    errorsAfter: editedShard => editedPageRuleErrors(corpus, page, pageProfiles, editedShard),
+    baseline: () => (baselinePageErrors ||= new Set(editedPageRuleErrors(corpus, page, pageProfiles, shard))),
+  } : null;
   for (const [findingIndex, finding] of result.findings.entries()) {
     if (!isObject(finding) || typeof finding.id !== 'string' || !finding.id || !['blocker', 'warning'].includes(finding.severity)) {
       add('AUDIT_FINDING_INVALID', `${category} audit has an invalid finding.`, `${category} audit has an invalid finding. (findings[${findingIndex}])`);
@@ -3817,7 +3832,7 @@ function validateAuditResult(result, corpus, profile, category, {
       else if (allowedEntityIds && !pageKnown) add('AUDIT_ENTITY_OUT_OF_PAGE', `${category} audit cites an entity outside its bounded page: ${id}.`);
     }
     if (page && shard && ledger && isObject(finding)) {
-      for (const entry of auditFindingEditErrors(finding, segments, page, shard, ledger, category, pageProfiles)) {
+      for (const entry of auditFindingEditErrors(finding, segments, page, shard, ledger, category, pageProfiles, pageCheck)) {
         add(entry.ruleId, entry.message, entry.line);
       }
     }
@@ -3840,7 +3855,7 @@ function auditSchemaEntries(rawErrors, category) {
 // quotes those segments verbatim, carries edits that change exactly this page
 // shard on their own, and does not quietly re-open a settled decision. Every
 // message tells the auditor how to fix or drop the finding.
-function auditFindingEditErrors(finding, segments, page, shard, ledger, category, pageProfiles = null) {
+function auditFindingEditErrors(finding, segments, page, shard, ledger, category, pageProfiles = null, pageCheck = null) {
   const label = `${category} finding ${String(finding.id || '')}`;
   // Entries are `{ ruleId, message, line }`: `message` is the local text,
   // `line` the (possibly narrower) text forwarded to the answering chat.
@@ -3869,6 +3884,18 @@ function auditFindingEditErrors(finding, segments, page, shard, ledger, category
   }
   if (!applied.errors.length && pageProfiles) for (const line of introducedSkillNameDuplicateErrors(pageProfiles, page.index, applied.shard)) {
     add('AUDIT_CROSS_PAGE_SKILL_DUPLICATE', `${label} ${line}; drop the edit or the finding.`);
+  }
+  // The host applies findings only when the edited page still validates. A
+  // finding that breaks a page rule on its own (for example dropping a label
+  // from technologies while its technologyReferences record stays) used to be
+  // admitted here and fail only when every finding was applied together, where
+  // the repair worker saw errors that its pre-edit shard did not contain.
+  if (!applied.errors.length && pageCheck) {
+    const baseline = pageCheck.baseline();
+    for (const line of new Set(pageCheck.errorsAfter(applied.shard))) {
+      if (baseline.has(line)) continue;
+      add('AUDIT_EDIT_PAGE_INVALID', `${label} would leave ${page.id} invalid: ${line} Fix the edit so every dependent field stays consistent, or drop the finding.`);
+    }
   }
   // The local line keeps the settled value for the dock; the forwarded line
   // names ids only (target, decision, evidence segments).
@@ -4136,12 +4163,21 @@ function findingEvidenceSegmentIds(finding) {
 // The page check the old whole-page repair applied to its materialized shard:
 // page qualification, then validation against the contexts the shard
 // references, treating a host-merged (compacted) patch aggregate as such.
-function editedPageShardErrors(corpus, page, pageProfiles, shard) {
+function editedPageValidation(corpus, page, pageProfiles, shard) {
   const normalized = normalizeQualifiedPageProfile(shard, page);
   const compacted = compactHostMergedPatchProfile(normalized).compacted;
   const referenced = promptContextsReferencedByShard(pageProfiles, page.index, normalized);
-  const checked = validateCareerProfilePage(normalized, corpus, page, referenced.roles, referenced.projects, { hostMerged: compacted });
+  return { normalized, checked: validateCareerProfilePage(normalized, corpus, page, referenced.roles, referenced.projects, { hostMerged: compacted }) };
+}
+
+function editedPageShardErrors(corpus, page, pageProfiles, shard) {
+  const { normalized, checked } = editedPageValidation(corpus, page, pageProfiles, shard);
   return { shard: normalized, errors: checked.valid ? crossPageMergeErrors(pageProfiles, page.index, normalized) : checked.errors };
+}
+
+// Page rules only; cross-page merge errors are reported by their own check.
+function editedPageRuleErrors(corpus, page, pageProfiles, shard) {
+  return editedPageValidation(corpus, page, pageProfiles, shard).checked.errors;
 }
 
 function assembledDigestWith(pageProfiles, pageIndex, shard) {
@@ -4231,6 +4267,10 @@ async function editRepairPage({
     signal,
     task: 'career-profile-repair',
     responseSchema: CAREER_PROFILE_EDIT_REPAIR_SCHEMA,
+    // Shown to the worker, kept out of the durable step key: it is derived
+    // from inputs the key already hashes, so adding it never re-asks steps a
+    // saved run has already answered.
+    displayOnlyPromptSuffix: validationErrors.length ? EDIT_REPAIR_COMBINED_ERRORS_NOTE : '',
     responseValidator: countingValidator(stats, value => { materialize(value); return value; }),
     hints: {
       phase: 'edit-repair',
