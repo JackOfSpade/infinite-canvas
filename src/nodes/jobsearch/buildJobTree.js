@@ -1280,6 +1280,11 @@ export function buildJobTreeNodes({
         // copy: the old per-card resumeProfile clone persisted N identical
         // profile objects into the canvas file and nothing ever read it.
         originHubId: job.originHubId || null,
+        // When this row passed its search's applied-listing check
+        // (filterAppliedListings). A card later found to be an applied job is
+        // removed only when this is after the bundle was saved; a missing
+        // stamp (every older row) keeps the exact-listing X instead.
+        appliedCheckAt: typeof job.appliedCheckAt === 'string' && job.appliedCheckAt ? job.appliedCheckAt : undefined,
         // A card owns this immutable snapshot reference, rather than looking
         // up whichever profile the source hub happens to hold later.
         // A protected card already owns a frozen application audit trail.

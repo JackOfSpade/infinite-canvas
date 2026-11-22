@@ -140,7 +140,7 @@ const JOBCARD_SCORED_FIELDS = [
   // an unversioned/exported legacy canvas. Preserve them during the broad
   // card→hub migration instead of silently turning a preference-filtered or
   // compensation-audited listing into a different downstream result.
-  'compensationAssessment', 'preferenceAssessment', 'officialRescore',
+  'compensationAssessment', 'preferenceAssessment', 'officialRescore', 'appliedCheckAt',
 ];
 
 /**

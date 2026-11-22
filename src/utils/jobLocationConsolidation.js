@@ -23,6 +23,7 @@
  */
 import { listingStateRank } from '../../electron/ipc/officialPostingFields.js';
 import { mergeDeadSourceUrls } from './jobSourceLinks.js';
+import { APPLIED_CHECK_FIELD, earliestAppliedCheckAt } from './applicationBundleIdentity.js';
 
 /** Minimum normalized alphanumeric length of a full description/snippet. */
 export const MIN_DESCRIPTION_ALNUM = 500;
@@ -440,6 +441,11 @@ function buildConsolidatedRow(members, primaryMember) {
   const deadSourceUrls = mergeDeadSourceUrls(...members.map(member => member?.deadSourceUrls));
   if (deadSourceUrls.length > 0) row.deadSourceUrls = deadSourceUrls;
   else delete row.deadSourceUrls;
+  // The merged card is removable as a repost of an applied job only when every
+  // member posting passed the applied-listing check after the save.
+  const appliedCheckAt = earliestAppliedCheckAt(members);
+  if (appliedCheckAt) row[APPLIED_CHECK_FIELD] = appliedCheckAt;
+  else delete row[APPLIED_CHECK_FIELD];
   const reuseCardId = jobCardId(primary);
   if (reuseCardId) row.reuseCardId = reuseCardId;
   if (primary?.cardData) row.reuseCardData = primary.cardData;
@@ -839,6 +845,7 @@ export function consolidateBoardCascadeNodes(nodes) {
           consolidatedLocationCount: job.consolidatedLocationCount,
           consolidatedPostingCount: job.consolidatedPostingCount,
           ...(job.deadSourceUrls?.length ? { deadSourceUrls: job.deadSourceUrls } : {}),
+          [APPLIED_CHECK_FIELD]: job[APPLIED_CHECK_FIELD] || undefined,
         });
       }
     }

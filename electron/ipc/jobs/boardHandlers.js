@@ -1,3 +1,4 @@
+import { foldAppliedCheckInto } from '../../../src/utils/applicationBundleIdentity.js';
 import { normalizeBands, normalizeRanges, parseSalaryToNumeric, placeBand, placeRange, salaryRangeAnomaly, salaryRangeMetadata, sanitizeJobTaxonomy } from '../../../src/nodes/jobsearch/buildJobTree.js';
 import { HANDOFF_CONCURRENCY, mapAutomaticHandoffs } from '../../../src/utils/handoffScheduler.js';
 import { isLegacyUnscoredPlaceholder, isUnscoredPlaceholderCard } from '../../../src/utils/jobCardFilters.js';
@@ -1162,9 +1163,13 @@ export function registerBoardHandlers(ctx) {
     // First copy wins the official dedup, so the best score goes first.
     const byScore = eligibleIndexes().sort((a, b) => rows[b].matchScore - rows[a].matchScore || a - b);
     const positionOfRow = new Map(byScore.map(index => [rows[index], index]));
-    for (const { dropped: row } of officialPostingDedup(byScore.map(index => rows[index])).dropped) {
+    for (const { kept: winner, dropped: row } of officialPostingDedup(byScore.map(index => rows[index])).dropped) {
       dropped.set(positionOfRow.get(row), 'official-duplicate');
       counts.officialDuplicatesDropped += 1;
+      // The kept row now stands for the dropped one too, so it takes the
+      // earlier applied-listing check (or none). Mutated in place: later
+      // stages find rows by identity through positionOfRow.
+      foldAppliedCheckInto(winner, [winner, row]);
     }
 
     const settled = await settleBoardClosedRowsForHandler(eligibleIndexes().map(index => rows[index]), {

@@ -2,6 +2,9 @@ import { applicationListingKeys } from '../utils/applicationBundleIdentity';
 import { useEffect, useRef } from 'react';
 import { EventLogger } from '../utils/EventLogger';
 import { requestApplicationHandoffRefresh } from '../utils/applicationHandoffDock';
+import { appliedRemovalToast, jobCardHasApplicationWorkInFlight, shouldRemoveCardFoundAfterApplication } from '../utils/applicationLinkRemoval';
+import { planJobCardDeletionCleanup } from '../utils/jobCardDeletionCleanup';
+import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
 import {
   LOCAL_AI_POLL_INTERVAL_MS,
   LOCAL_AI_RESULT_SETTLE_MS,
@@ -40,10 +43,11 @@ const LOCAL_AI_RETRY_NOTICE_INTERVAL_MS = 30_000;
  * LOCAL_AI_IMPORT_IN_FLIGHT mutex and the manifest 'imported' save window.
  */
 export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast, nudgePersistence, quitGateRef = null }) {
-  const ctxRef = useRef({ navigation, getCurrentFile, addToast, nudgePersistence, quitGateRef });
+  const moduleRunQueue = useModuleRunQueue();
+  const ctxRef = useRef({ navigation, getCurrentFile, addToast, nudgePersistence, quitGateRef, moduleRunQueue });
   useEffect(() => {
-    ctxRef.current = { navigation, getCurrentFile, addToast, nudgePersistence, quitGateRef };
-  }, [navigation, getCurrentFile, addToast, nudgePersistence, quitGateRef]);
+    ctxRef.current = { navigation, getCurrentFile, addToast, nudgePersistence, quitGateRef, moduleRunQueue };
+  }, [navigation, getCurrentFile, addToast, nudgePersistence, quitGateRef, moduleRunQueue]);
 
   // jobId → { resultSha256, observedAt }: same two-poll settle window the card
   // uses, so a result.json mid-write is never imported.
@@ -604,6 +608,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
     };
 
     let restoredInventory = '';
+    const announcedRemovals = new Set();
     const restoreSavedLinks = async (allNodes, generation) => {
       const api = window.electronAPI;
       const canvasFilePath = ctxRef.current.getCurrentFile?.();
@@ -617,7 +622,8 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         title: typeof node.data?.title === 'string' ? node.data.title : '',
         company: typeof node.data?.company === 'string' ? node.data.company : '',
         location: typeof node.data?.location === 'string' ? node.data.location : '' }));
-      const signature = JSON.stringify([canvasFilePath, jobs.map(job => [job.nodeId, applicationListingKeys(job), job.title, job.company, job.location])]);
+      const inventorySignature = rows => JSON.stringify([canvasFilePath, rows.map(job => [job.nodeId, applicationListingKeys(job), job.title, job.company, job.location])]);
+      const signature = inventorySignature(jobs);
       if (signature === restoredInventory || !jobs.length) return;
       let result;
       try { result = await api.findSavedApplicationLinks({ canvasFilePath, jobs }); }
@@ -637,12 +643,37 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
       const listingUnchanged = (node, original) => !!original && node?.type === 'jobcard' && !node.data?.localApplication
         && JSON.stringify(applicationListingKeys(node.data)) === JSON.stringify(applicationListingKeys(original.data));
       const linkedIds = new Set();
+      // Live state after the lookup's await: a card whose row passed its
+      // search's applied-listing check after the matching bundle was saved
+      // would have been dropped by that check had it known this link (found
+      // later, e.g. its verified official posting). Remove it like a dismissal
+      // instead of showing the X. Locked cards/Boards, unstamped rows and a
+      // card with Generate in flight keep the X.
+      const liveNodes = ctxRef.current.navigation?.enumerateAllNodes?.() || [];
+      const liveById = new Map(liveNodes.map(node => [node.id, node]));
+      const findLive = id => liveById.get(id) || null;
+      const queueSnapshot = ctxRef.current.moduleRunQueue?.getSnapshot?.() || ctxRef.current.moduleRunQueue?.snapshot || null;
+      const busy = card => jobCardHasApplicationWorkInFlight(card, { canvasFilePath, queueSnapshot });
+      const removals = [];
+      const restoredIds = new Set();
+      const deferredIds = new Set();
       for (const link of links) {
         linkedIds.add(link.nodeId);
         const original = cards.find(node => node.id === link.nodeId);
+        const live = findLive(link.nodeId);
+        if (ctxRef.current.navigation?.removeNodesGlobally && listingUnchanged(live, original)
+          && shouldRemoveCardFoundAfterApplication(live, link.localApplication, findLive)) {
+          // A pointer would make the card permanently unremovable, so a card
+          // with Generate or a posting lookup still in flight gets neither:
+          // a later tick decides once its claims are released.
+          if (busy(live)) { deferredIds.add(link.nodeId); continue; }
+          removals.push(live);
+          continue;
+        }
         ctxRef.current.navigation?.updateNodeDataGlobally?.(link.nodeId, node => {
           if (!listingUnchanged(node, original)) return null;
           restored++;
+          restoredIds.add(link.nodeId);
           // An exact saved bundle supersedes any earlier same-role pointer.
           return { localApplication: link.localApplication, priorRoleApplication: null };
         });
@@ -670,7 +701,48 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           return { priorRoleApplication: null };
         });
       }
-      if (restored || roleUpdated || roleCleared) {
+      let removed = 0;
+      if (removals.length) {
+        const nav = ctxRef.current.navigation;
+        const removedIds = new Set(removals.map(node => node.id));
+        // Same planner as a user dismissal (useCanvasOSDeletion onNodesDelete):
+        // Board stats from the cross-level live snapshot, and each level that
+        // loses cards is reflowed inside the removal itself.
+        const getHubNode = hubId => (removedIds.has(hubId) ? null : findLive(hubId));
+        const { boardUpdates } = planJobCardDeletionCleanup(removals, liveNodes.filter(node => !removedIds.has(node.id)), getHubNode);
+        if (nav.removeNodesGlobally([...removedIds], (remaining, removedHere) => (
+          planJobCardDeletionCleanup(removedHere, remaining, getHubNode).treeNodes
+        ))) {
+          removed = removedIds.size;
+          removedIds.forEach(cardId => {
+            ctxRef.current.moduleRunQueue?.cancelQueuedRunsForNode?.(cardId, 'Job card removed: found after its application was saved');
+          });
+          boardUpdates.forEach(({ hubId, stats }) => nav.updateNodeDataGlobally?.(hubId, stats));
+          EventLogger.log(`[ApplicationLinks] removed ${removed} cards found after their application was saved boards=${boardUpdates.length}`);
+          // A later Combine rebuilds a removed row (deletion is view-only), and
+          // the next tick removes it again: name each job once per session.
+          const unannounced = removals.filter((node) => {
+            const key = JSON.stringify([node.data?.company || '', node.data?.title || '', applicationListingKeys(node.data)]);
+            if (announcedRemovals.has(key)) return false;
+            announcedRemovals.add(key);
+            return true;
+          });
+          const toast = appliedRemovalToast(unannounced);
+          if (toast) ctxRef.current.addToast?.(toast);
+        }
+      }
+      if (removed) {
+        // The settled inventory is what the next tick will see: neither the
+        // removed cards nor the ones that just took their bundle pointer. A
+        // card restored under the same id (undo) changes it and is looked up
+        // again.
+        const removedIds = new Set(removals.map(node => node.id));
+        restoredInventory = inventorySignature(jobs.filter(job => !removedIds.has(job.nodeId) && !restoredIds.has(job.nodeId)));
+      }
+      // A deferred card is still owed a decision: leave the inventory
+      // unsettled so the next tick looks it up again.
+      if (deferredIds.size) restoredInventory = '';
+      if (restored || roleUpdated || roleCleared || removed) {
         ctxRef.current.nudgePersistence?.();
         if (restored || roleUpdated) EventLogger.log(`[ApplicationLinks] restored saved bundle pointers cards=${restored} role=${roleUpdated}`);
       }

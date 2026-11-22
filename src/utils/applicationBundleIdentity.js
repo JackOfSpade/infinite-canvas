@@ -65,20 +65,85 @@ export function applicationListingKeys(job = {}) {
   return [...new Set(keys)].sort();
 }
 
+// When a row passed the applied-listing check below (an ISO time). A Board card
+// whose stamp is later than a matching bundle's save would have been dropped by
+// that check had it known the link (found later, e.g. its verified official
+// posting), so it is removed instead of shown with the X. Rows without a stamp
+// (every row checked before the stamp existed, or never checked) keep the X.
+export const APPLIED_CHECK_FIELD = 'appliedCheckAt';
+
+/** The row's applied-listing check time in epoch ms, or null. */
+export function appliedCheckTime(job) {
+  const value = job?.[APPLIED_CHECK_FIELD];
+  if (typeof value !== 'string' || !value) return null;
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? at : null;
+}
+
+/**
+ * The stamp a row standing for all of `rows` (merged duplicates, location
+ * variants, a re-found carried listing) may carry: the EARLIEST check, so it is
+ * removable only when every merged posting was checked after the save. Any row
+ * without a stamp leaves the merged row without one (null).
+ */
+export function earliestAppliedCheckAt(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  let earliest = null;
+  for (const row of list) {
+    const at = appliedCheckTime(row);
+    if (at == null) return null;
+    if (earliest == null || at < earliest.at) earliest = { at, value: row[APPLIED_CHECK_FIELD] };
+  }
+  return earliest ? earliest.value : null;
+}
+
+/** `row` carrying the merged stamp of `rows`; the same object when unchanged. */
+export function withMergedAppliedCheck(row, rows) {
+  if (!row || typeof row !== 'object') return row;
+  const merged = earliestAppliedCheckAt(rows);
+  if (merged === null) {
+    if (!Object.hasOwn(row, APPLIED_CHECK_FIELD)) return row;
+    const { [APPLIED_CHECK_FIELD]: _dropped, ...rest } = row;
+    return rest;
+  }
+  return row[APPLIED_CHECK_FIELD] === merged ? row : { ...row, [APPLIED_CHECK_FIELD]: merged };
+}
+
+/** In-place form of withMergedAppliedCheck, for callers that track rows by identity. */
+export function foldAppliedCheckInto(row, rows) {
+  if (!row || typeof row !== 'object') return row;
+  const merged = earliestAppliedCheckAt(rows);
+  if (merged === null) delete row[APPLIED_CHECK_FIELD];
+  else row[APPLIED_CHECK_FIELD] = merged;
+  return row;
+}
+
 // Drop search results whose posting is already part of a saved application.
-export function filterAppliedListings(jobs, appliedListingKeys) {
+// Every kept row is stamped with the time of this check (one time per call). A
+// row that already carries an earlier valid stamp keeps it: the first check is
+// the one a card shown from it was judged by. Kept rows are stamped in place so
+// callers' row identity (maps, checkpoints) is unchanged.
+export function filterAppliedListings(jobs, appliedListingKeys, { checkedAt = new Date().toISOString() } = {}) {
   if (!Array.isArray(jobs)) return { kept: [], removed: 0, samples: [] };
   const applied = appliedListingKeys instanceof Set ? appliedListingKeys
     : new Set(Array.isArray(appliedListingKeys) ? appliedListingKeys : []);
-  if (!applied.size) return { kept: [...jobs], removed: 0, samples: [] };
+  const checkedAtMs = Date.parse(checkedAt);
+  const stamp = (job) => {
+    if (!job || typeof job !== 'object' || !Number.isFinite(checkedAtMs)) return;
+    const prior = appliedCheckTime(job);
+    if (prior == null || prior > checkedAtMs) job[APPLIED_CHECK_FIELD] = new Date(checkedAtMs).toISOString();
+  };
   const kept = [];
   const samples = [];
   let removed = 0;
   for (const job of jobs) {
-    if (job && applicationListingKeys(job).some(key => applied.has(key))) {
+    if (applied.size && job && applicationListingKeys(job).some(key => applied.has(key))) {
       removed++;
       if (samples.length < 5) samples.push({ title: job.title, company: job.company, url: job.url });
-    } else kept.push(job);
+    } else {
+      stamp(job);
+      kept.push(job);
+    }
   }
   return { kept, removed, samples };
 }

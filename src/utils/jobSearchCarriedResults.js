@@ -10,7 +10,8 @@
 
 import { jobSearchShownRun } from './jobBoardSourceAdmission.js';
 import { normalizedJobCareerSnapshotId } from './jobCareerSnapshotBinding.js';
-import { uniqueJobsAcrossSources } from './jobIdentity.js';
+import { dedupJobsAcrossSources } from './jobIdentity.js';
+import { withMergedAppliedCheck } from './applicationBundleIdentity.js';
 
 function savedRows(data) {
   return Array.isArray(data?.scoredJobs) ? data.scoredJobs.filter(Boolean) : [];
@@ -71,13 +72,36 @@ export function carriedTerminalRows(data, { jobRunId = null, careerSnapshotId = 
   return mergeCarriedJobs([], carriedJobsForTerminal(data, { jobRunId, careerSnapshotId }));
 }
 
-/** New rows first, then each kept row that is not the same listing as a new one. */
+/**
+ * New rows first, then each kept row that is not the same listing as a new one.
+ * A kept row keeps its ORIGINAL applied-listing check stamp. A new row that is
+ * the same listing as a kept row stands for the card the Board was already
+ * showing, so it takes the earliest stamp of the two (none when either lacks
+ * one): a re-scan never makes a card shown before an application look checked
+ * after it.
+ */
 export function mergeCarriedJobs(newRows, carriedRows) {
   const fresh = Array.isArray(newRows) ? newRows : [];
-  const kept = Array.isArray(carriedRows) && carriedRows.length > 0
-    ? uniqueJobsAcrossSources(fresh, carriedRows)
-    : [];
-  return kept.length > 0 ? [...fresh, ...kept] : fresh;
+  if (!Array.isArray(carriedRows) || carriedRows.length === 0) return fresh;
+  const freshSet = new Set(fresh);
+  const absorbed = new Map();
+  const deduped = dedupJobsAcrossSources([...fresh, ...carriedRows], {
+    onDuplicate: ({ kept, dropped }) => {
+      if (!freshSet.has(kept) || freshSet.has(dropped)) return;
+      if (!absorbed.has(kept)) absorbed.set(kept, [kept]);
+      absorbed.get(kept).push(dropped);
+    },
+  });
+  const kept = deduped.filter(job => !freshSet.has(job));
+  let changed = false;
+  const freshOut = absorbed.size === 0 ? fresh : fresh.map((row) => {
+    if (!absorbed.has(row)) return row;
+    const next = withMergedAppliedCheck(row, absorbed.get(row));
+    if (next !== row) changed = true;
+    return next;
+  });
+  const head = changed ? freshOut : fresh;
+  return kept.length > 0 ? [...head, ...kept] : head;
 }
 
 function summaryOf(rows) {

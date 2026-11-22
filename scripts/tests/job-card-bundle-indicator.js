@@ -35,6 +35,7 @@ function fallbackManagerFixture(api) {
     selectFallbackLocalAiJobs: all => localAiFallback.selectFallbackLocalAiJobs(all, () => true),
     useRef: value => { const ref = { current: value }; refs.push(ref); return ref; },
     useEffect: effect => effects.push(effect),
+    useModuleRunQueue: () => ({ cancelQueuedRunsForNode() {}, getSnapshot: () => ({ active: null, activeRuns: [], queued: [] }) }),
     window: { electronAPI: api, setInterval: callback => { tick = callback; return 1; }, clearInterval() {} },
     EventLogger: { log() {} },
     requestApplicationHandoffRefresh() {},

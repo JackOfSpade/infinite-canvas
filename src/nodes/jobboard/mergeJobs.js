@@ -1,4 +1,5 @@
 import { jobTitleCompanyLocationKey, jobTitleCompanyUrlKey } from '../../utils/jobIdentity.js';
+import { withMergedAppliedCheck } from '../../utils/applicationBundleIdentity.js';
 
 // A running Search temporarily drops out of the Board's terminal input
 // signature. Keep this canonical list beside the snapshot policy so the Board
@@ -44,6 +45,7 @@ export const ACTIVE_JOB_SEARCH_STATES = new Set([
 export function unionScoredJobs(jobArrays, stats) {
   const order = [];        // dedup keys in first-seen order
   const byKey = new Map(); // key -> winning job
+  const membersByKey = new Map(); // key -> every colliding copy (applied-check stamp merge)
   let totalIncoming = 0;   // valid job objects seen across all arrays
   let collisions = 0;      // duplicate keys encountered (any resolution)
   let collisionUpgrades = 0; // collisions where a higher matchScore replaced the kept copy
@@ -70,6 +72,8 @@ export function unionScoredJobs(jobArrays, stats) {
         order.push(key);
       } else {
         collisions++;
+        if (!membersByKey.has(key)) membersByKey.set(key, [existing]);
+        membersByKey.get(key).push(job);
         if (jobMatchScore(job) > jobMatchScore(existing)) {
           byKey.set(key, job); // higher score wins; first-seen position unchanged
           collisionUpgrades++;
@@ -97,7 +101,12 @@ export function unionScoredJobs(jobArrays, stats) {
     stats.preferenceFilteredSkipped = preferenceFilteredSkipped;
   }
 
-  return order.map(k => byKey.get(k));
+  // One card stands for every colliding copy: it may claim it passed the
+  // applied-listing check after a save only when every copy did (earliest
+  // stamp; none when any copy lacks one).
+  return order.map(k => (membersByKey.has(k)
+    ? withMergedAppliedCheck(byKey.get(k), membersByKey.get(k))
+    : byKey.get(k)));
 }
 
 /**

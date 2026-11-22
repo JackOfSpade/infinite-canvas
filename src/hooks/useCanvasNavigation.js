@@ -2,7 +2,7 @@ import { useState, useCallback, useMemo, useRef, useEffect, useLayoutEffect } fr
 import { useReactFlow } from '@xyflow/react';
 import { getNodeDims, getNodesBounds } from '../utils/constants';
 
-import { safeClone, syncStackUpward, getCanvasData, deepUpdateNode, deepAddElements, collectNodesDeep } from '../utils/navigationUtils';
+import { safeClone, syncStackUpward, getCanvasData, deepUpdateNode, deepAddElements, collectNodesDeep, filterEdgesForRemovedNodes, removeNodesFromActiveLevel, removeNodesFromStack } from '../utils/navigationUtils';
 import { EventLogger } from '../utils/EventLogger';
 import { getReactFlowContainerSize } from '../utils/reactFlowDom';
 import { hasActiveExternalRunState } from '../utils/undoNonRestorableState';
@@ -472,6 +472,23 @@ export function useCanvasNavigation({
   }, [setNodes, canMutateCanvas, setStackGuarded]);
 
   /**
+   * Globally removes nodes by id from the active canvas, every navigation-
+   * stack level and nested group canvasData, with the edges that touch them.
+   * Unlike ReactFlow deleteElements this reaches levels that are not mounted,
+   * and it does NOT fire onNodesDelete: the caller owns any cleanup (e.g. a
+   * job card's tree reflow via `reflowLevel` and its Board stats).
+   */
+  const removeNodesGlobally = useCallback((nodeIds, reflowLevel = null) => {
+    if (!canMutateCanvas()) return false;
+    const ids = new Set((nodeIds || []).filter(id => typeof id === 'string' && id));
+    if (!ids.size) return false;
+    setNodes(prev => removeNodesFromActiveLevel(prev, ids, reflowLevel));
+    setEdges(prev => filterEdgesForRemovedNodes(prev, ids));
+    setStackGuarded(prevStack => removeNodesFromStack(prevStack, ids, reflowLevel));
+    return true;
+  }, [setNodes, setEdges, canMutateCanvas, setStackGuarded]);
+
+  /**
    * Appends new nodes and edges to the targetNodeId either inside its subcanvas or as siblings.
    * Uses functional updates to safely execute against the active state queue, preserving
    * preceding updates (e.g. removing the dragged node from its old location).
@@ -539,6 +556,7 @@ export function useCanvasNavigation({
     extractToParent: extractToLevel,
     updateNodeDataGlobally,
     addElementsGlobally,
+    removeNodesGlobally,
     resetStack,
     freezeForQuit,
     breadcrumbs,
@@ -548,7 +566,7 @@ export function useCanvasNavigation({
     stateSwapRef,
   }), [
     diveIn, diveOut, jumpTo, flushStack, enumerateAllNodes, enumerateAllEdges, extractToLevel,
-    updateNodeDataGlobally, addElementsGlobally, resetStack, freezeForQuit,
+    updateNodeDataGlobally, addElementsGlobally, removeNodesGlobally, resetStack, freezeForQuit,
     breadcrumbs, depth, isAnimating, animPhase, stateSwapRef,
   ]);
 }

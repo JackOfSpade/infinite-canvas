@@ -4,9 +4,21 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import { runInNewContext } from 'node:vm';
+import * as localAiFallback from '../../src/utils/localAiFallback.js';
+import { readFileSync } from 'node:fs';
+import { appliedRemovalToast, jobCardHasApplicationWorkInFlight, shouldRemoveCardFoundAfterApplication } from '../../src/utils/applicationLinkRemoval.js';
+import { claimRunningApplicationDocument, clearRunningApplicationDocument } from '../../src/utils/applicationDocumentRuns.js';
+import { beginOfficialPostingPreparation } from '../../src/utils/officialPostingPreparation.js';
+import { mergeCarriedJobs } from '../../src/utils/jobSearchCarriedResults.js';
+import { consolidateJobLocations } from '../../src/utils/jobLocationConsolidation.js';
+import { moduleFingerprint, unionScoredJobs } from '../../src/nodes/jobboard/mergeJobs.js';
+import { buildJobTreeNodes } from '../../src/nodes/jobsearch/buildJobTree.js';
+import { planJobCardDeletionCleanup } from '../../src/utils/jobCardDeletionCleanup.js';
+import { deepRemoveNodes, filterEdgesForRemovedNodes, removeNodesFromActiveLevel, removeNodesFromStack } from '../../src/utils/navigationUtils.js';
 import { findSavedApplicationLinks, loadAppliedListingKeys } from '../../electron/ipc/localAiApplication.js';
 import {
-  applicationListingKeys, applicationRoleKey, filterAppliedListings, selectSavedApplicationBundle,
+  appliedCheckTime, applicationListingKeys, applicationRoleKey, earliestAppliedCheckAt, foldAppliedCheckInto, filterAppliedListings, selectSavedApplicationBundle,
 } from '../../src/utils/applicationBundleIdentity.js';
 
 const FIXTURE_JOB = { company: 'Acme Corp', title: 'Senior Engineer', location: 'Remote' };
@@ -211,5 +223,312 @@ export default [
       assert.ok(empty instanceof Set);
       assert.equal(empty.size, 0);
     } finally { await fs.rm(root, { recursive: true, force: true }); }
+  } },
+  { name: 'a card whose row passed the applied check after its bundle was saved is removable; unstamped, earlier and locked are not', run() {
+    const saved = Date.parse(FIXTURE_IMPORTED_AT);
+    const at = ms => new Date(ms).toISOString();
+    const bundle = { id: 'b', status: 'saved', receipt: { importedAt: FIXTURE_IMPORTED_AT } };
+    const board = (extra = {}) => ({ id: 'board', type: 'jobboard', data: { ...extra } });
+    const card = (extra = {}) => ({ id: 'c', type: 'jobcard', data: { hubId: 'board', originHubId: 'late', appliedCheckAt: at(saved + 60_000), ...extra } });
+    const lookup = (...nodes) => id => nodes.find(node => node.id === id) || null;
+    assert.equal(shouldRemoveCardFoundAfterApplication(card(), bundle, lookup(board())), true);
+    // Checked before or exactly at the save: the card may have been shown before it.
+    assert.equal(shouldRemoveCardFoundAfterApplication(card({ appliedCheckAt: at(saved - 1) }), bundle, lookup(board())), false);
+    assert.equal(shouldRemoveCardFoundAfterApplication(card({ appliedCheckAt: at(saved) }), bundle, lookup(board())), false, 'strictly later only');
+    // Unstamped (every older row) or unparsable stamps keep the X.
+    assert.equal(shouldRemoveCardFoundAfterApplication(card({ appliedCheckAt: undefined }), bundle, lookup(board())), false);
+    assert.equal(shouldRemoveCardFoundAfterApplication(card({ appliedCheckAt: 'not a date' }), bundle, lookup(board())), false);
+    assert.equal(shouldRemoveCardFoundAfterApplication(card(), { ...bundle, receipt: {} }, lookup(board())), false);
+    assert.equal(shouldRemoveCardFoundAfterApplication(card(), { ...bundle, receipt: { importedAt: 'not a date' } }, lookup(board())), false);
+    // Locks and an existing bundle keep the X path (work in flight is deferred by the caller).
+    assert.equal(shouldRemoveCardFoundAfterApplication(card({ locked: true }), bundle, lookup(board())), false);
+    assert.equal(shouldRemoveCardFoundAfterApplication(card(), bundle, lookup(board({ locked: true }))), false);
+    assert.equal(shouldRemoveCardFoundAfterApplication(card({ localApplication: { id: 'x' } }), bundle, lookup(board())), false);
+  } },
+  { name: 'Generate in flight is read from the card claim, its posting preparation, its Board refresh and the run queue', run() {
+    const card = { id: 'busy-card', type: 'jobcard', data: { hubId: 'busy-board' } };
+    const file = '/project/canvas.json';
+    assert.equal(jobCardHasApplicationWorkInFlight(card, { canvasFilePath: file, queueSnapshot: { active: null, queued: [], activeRuns: [] } }), false);
+    assert.ok(claimRunningApplicationDocument('busy-card', 'both'));
+    try { assert.equal(jobCardHasApplicationWorkInFlight(card, { canvasFilePath: file }), true); }
+    finally { clearRunningApplicationDocument('busy-card'); }
+    for (const nodeId of ['busy-card', 'busy-board']) {
+      const preparation = beginOfficialPostingPreparation({ canvasFilePath: file, nodeId, cancel() {} });
+      try {
+        assert.equal(jobCardHasApplicationWorkInFlight(card, { canvasFilePath: file }), true, nodeId);
+        assert.equal(jobCardHasApplicationWorkInFlight(card, { canvasFilePath: '/other.json' }), false, 'claims are per canvas');
+      } finally { preparation.finish(); }
+    }
+    assert.equal(jobCardHasApplicationWorkInFlight(card, { queueSnapshot: { activeRuns: [{ nodeId: 'busy-card', lane: 'application' }], queued: [] } }), true);
+    assert.equal(jobCardHasApplicationWorkInFlight(card, { queueSnapshot: { activeRuns: [], queued: [{ nodeId: 'busy-card', lane: 'application' }] } }), true);
+    assert.equal(jobCardHasApplicationWorkInFlight(card, { queueSnapshot: { activeRuns: [{ nodeId: 'other' }], queued: [{ nodeId: 'other' }] } }), false);
+  } },
+  { name: 'the removal toast names up to three jobs, then counts the rest', run() {
+    const named = (company, title) => ({ data: { company, title } });
+    assert.equal(appliedRemovalToast([]), null);
+    assert.deepEqual(appliedRemovalToast([named('Intouch Insight', 'Software Developer')]), {
+      title: 'Already applied', type: 'info',
+      description: 'Removed 1 job you already applied to: Intouch Insight — Software Developer',
+    });
+    const many = appliedRemovalToast([named('A', 'One'), named('B', 'Two'), named('', 'Three'), named('D', 'Four'), named('E', 'Five')]);
+    assert.equal(many.description, 'Removed 5 jobs you already applied to: A — One; B — Two; Three; +2 more');
+  } },
+  { name: 'filterAppliedListings stamps every kept row with one check time and keeps an earlier stamp', run() {
+    const applied = new Set(applicationListingKeys({ url: 'https://example.test/jobs/acme-1' }));
+    const earlier = '2024-01-01T00:00:00.000Z';
+    const rows = [
+      { url: 'https://example.test/jobs/acme-1' },
+      { url: 'https://example.test/jobs/acme-2' },
+      { url: 'https://example.test/jobs/acme-3', appliedCheckAt: earlier },
+      { url: 'https://example.test/jobs/acme-4', appliedCheckAt: '2030-01-01T00:00:00.000Z' },
+    ];
+    const checkedAt = '2024-06-01T00:00:00.000Z';
+    const result = filterAppliedListings(rows, applied, { checkedAt });
+    assert.equal(result.removed, 1);
+    assert.equal(rows[0].appliedCheckAt, undefined, 'a dropped row is not stamped');
+    assert.equal(result.kept[0], rows[1], 'kept rows keep their identity');
+    assert.deepEqual(result.kept.map(row => row.appliedCheckAt), [checkedAt, earlier, checkedAt]);
+    // No saved bundles is still a check; the default time is the call time.
+    const before = Date.now();
+    const [fresh] = filterAppliedListings([{ url: 'https://example.test/jobs/x' }], new Set()).kept;
+    assert.ok(appliedCheckTime(fresh) >= before - 1 && appliedCheckTime(fresh) <= Date.now());
+    assert.equal(earliestAppliedCheckAt([{ appliedCheckAt: checkedAt }, { appliedCheckAt: earlier }]), earlier);
+    assert.equal(earliestAppliedCheckAt([{ appliedCheckAt: checkedAt }, {}]), null, 'missing on any => missing');
+    assert.equal(earliestAppliedCheckAt([]), null);
+    // Board research's official-duplicate drop folds the dropped row's check into the kept row, in place.
+    const winner = { appliedCheckAt: checkedAt };
+    assert.equal(foldAppliedCheckInto(winner, [winner, { appliedCheckAt: earlier }]), winner);
+    assert.equal(winner.appliedCheckAt, earlier);
+    foldAppliedCheckInto(winner, [winner, {}]);
+    assert.ok(!Object.hasOwn(winner, 'appliedCheckAt'), 'an unstamped duplicate leaves the kept row unstamped');
+  } },
+  { name: 'every search filter site stamps through the shared filterAppliedListings', async run() {
+    const sites = { 'electron/ipc/jobs/searchHandlers.js': 2, 'electron/ipc/jobs/recoveryHandlers.js': 3 };
+    for (const [file, count] of Object.entries(sites)) {
+      const source = await fs.readFile(new URL(`../../${file}`, import.meta.url), 'utf8');
+      assert.equal(source.match(/filterAppliedListings\(/g)?.length, count, file);
+      assert.ok(!source.includes('appliedCheckAt'), `${file} must not stamp on its own`);
+    }
+  } },
+  { name: 'a re-scan keeps the original stamp of a carried row, and a re-found listing never looks newer', run() {
+    const old = '2024-04-01T00:00:00.000Z';
+    const fresh = '2024-06-01T00:00:00.000Z';
+    const row = (id, extra = {}) => ({ source: 'indeed', title: `Engineer ${id}`, company: 'Acme', location: 'Ottawa, ON',
+      url: `https://ca.indeed.com/viewjob?jk=${id}`, jobkey: id, ...extra });
+    const carried = [row('a', { appliedCheckAt: old }), row('b', { appliedCheckAt: old }), row('c')];
+    const scanned = [row('a', { appliedCheckAt: fresh }), row('c', { appliedCheckAt: fresh }), row('d', { appliedCheckAt: fresh })];
+    const merged = mergeCarriedJobs(scanned, carried);
+    const byKey = new Map(merged.map(job => [job.jobkey, job]));
+    assert.deepEqual([...byKey.keys()].sort(), ['a', 'b', 'c', 'd']);
+    assert.equal(byKey.get('a').appliedCheckAt, old, 'the re-found listing keeps the earlier stamp');
+    assert.equal(byKey.get('b'), carried[1], 'a carried row is kept as is');
+    assert.equal(byKey.get('c').appliedCheckAt, undefined, 'an unstamped carried copy leaves the merged row unstamped');
+    assert.equal(byKey.get('d'), scanned[2], 'a new listing keeps its own stamp and identity');
+    assert.equal(scanned[0].appliedCheckAt, fresh, 'the new rows are not mutated');
+    assert.equal(mergeCarriedJobs(scanned, []), scanned);
+  } },
+  { name: 'location consolidation and the Board union keep the earliest stamp, and none when any copy lacks one', run() {
+    const description = Array.from({ length: 120 }, (_, i) => `responsibility${i} builds reliable services`).join(' ');
+    const posting = (location, extra = {}) => ({ title: 'Platform Engineer', company: 'Acme', location, description,
+      source: 'indeed', url: `https://ca.indeed.com/viewjob?jk=${encodeURIComponent(location)}`, matchScore: 80, ...extra });
+    const early = '2024-05-02T00:00:00.000Z';
+    const late = '2024-05-03T00:00:00.000Z';
+    const both = consolidateJobLocations([posting('Ottawa, ON', { appliedCheckAt: late }), posting('Toronto, ON', { appliedCheckAt: early })]);
+    assert.equal(both.jobs.length, 1, 'the fixture consolidates');
+    assert.equal(both.jobs[0].appliedCheckAt, early);
+    const partial = consolidateJobLocations([posting('Ottawa, ON', { appliedCheckAt: late }), posting('Toronto, ON')]);
+    assert.equal(partial.jobs.length, 1);
+    assert.ok(!Object.hasOwn(partial.jobs[0], 'appliedCheckAt'));
+    const url = 'https://example.test/jobs/1';
+    const union = unionScoredJobs([[{ title: 'T', company: 'C', url, matchScore: 90, appliedCheckAt: late }], [{ title: 'T', company: 'C', url, matchScore: 70, appliedCheckAt: early }]]);
+    assert.equal(union.length, 1);
+    assert.equal(union[0].matchScore, 90);
+    assert.equal(union[0].appliedCheckAt, early);
+    const unstamped = unionScoredJobs([[{ title: 'T', company: 'C', url, matchScore: 90, appliedCheckAt: late }], [{ title: 'T', company: 'C', url, matchScore: 70 }]]);
+    assert.ok(!Object.hasOwn(unstamped[0], 'appliedCheckAt'));
+    const single = { title: 'S', company: 'C', url: 'https://example.test/jobs/2', appliedCheckAt: late };
+    assert.equal(unionScoredJobs([[single]])[0], single, 'a row without collisions keeps its identity');
+    assert.equal(moduleFingerprint([single]), moduleFingerprint([{ ...single, appliedCheckAt: early }]), 'the stamp never makes a Board stale');
+  } },
+  { name: 'a Board Combine card carries its row stamp in its data', run() {
+    const build = job => buildJobTreeNodes({
+      displayedJobs: [job],
+      bucketTree: {
+        roles: [{ name: 'Platform Engineering', jobIndices: [0] }],
+        likelihoodBands: [{ label: 'Strong (70-100%)', minScore: 70, maxScore: 100 }],
+        salaryRanges: [{ label: '$120k+', minSalary: 120000, maxSalary: null }],
+      },
+      originalPos: { x: 0, y: 0 }, hubId: 'board', baseNodeId: 'b',
+    }).newNodes.find(node => node.type === 'jobcard');
+    const job = { title: 'T', company: 'C', url: 'https://example.test/jobs/1', matchScore: 80, salary: '$130,000', originHubId: 'search' };
+    assert.equal(build({ ...job, appliedCheckAt: '2024-05-02T00:00:00.000Z' }).data.appliedCheckAt, '2024-05-02T00:00:00.000Z');
+    assert.equal(build(job).data.appliedCheckAt, undefined);
+  } },
+  { name: 'saved bundle links carry the receipt save time the removal rule compares against', async run() {
+    await withReceiptFixture(async ({ canvasFilePath }) => {
+      const result = await findSavedApplicationLinks({ canvasFilePath, jobs: [{ nodeId: 'n', url: 'https://example.test/jobs/acme-1', ...FIXTURE_JOB }] });
+      assert.equal(result.links[0]?.localApplication?.receipt?.importedAt, FIXTURE_IMPORTED_AT);
+    });
+  } },
+  { name: 'global node removal reaches nested canvases, drops their edges and reflows only levels that lost nodes', run() {
+    const ids = new Set(['gone']);
+    const untouched = [{ id: 'a', data: {} }];
+    assert.equal(deepRemoveNodes(untouched, ids).nodes, untouched, 'identity kept when nothing matches');
+    const group = { id: 'g', type: 'group', data: { canvasData: { nodes: [{ id: 'gone' }, { id: 'stay' }], edges: [{ source: 'stay', target: 'gone' }, { source: 'stay', target: 'x' }] } } };
+    const reflowed = [];
+    const result = deepRemoveNodes([{ id: 'root' }, group], ids, (remaining, removed) => {
+      reflowed.push([remaining.map(n => n.id), removed.map(n => n.id)]);
+      return remaining.map(n => ({ ...n, reflowed: true }));
+    });
+    assert.equal(result.updated, true);
+    assert.deepEqual(reflowed, [[['stay'], ['gone']]]);
+    const inner = result.nodes[1].data.canvasData;
+    assert.deepEqual(inner.nodes, [{ id: 'stay', reflowed: true }]);
+    assert.deepEqual(inner.edges, [{ source: 'stay', target: 'x' }]);
+    const edges = [{ source: 'a', target: 'b' }];
+    assert.equal(filterEdgesForRemovedNodes(edges, ids), edges);
+    assert.deepEqual(filterEdgesForRemovedNodes([...edges, { source: 'gone', target: 'a' }], ids), edges);
+  } },
+  { name: 'the removal setters drop the cards from the active level, every stack level and their edges, reflowing each level once', run() {
+    const ids = new Set(['gone']);
+    const reflowCalls = [];
+    const reflow = (remaining, removed) => {
+      reflowCalls.push(removed.map(n => n.id));
+      return remaining.map(n => ({ ...n, reflowed: true }));
+    };
+    const active = [{ id: 'a' }, { id: 'gone' }];
+    assert.deepEqual(removeNodesFromActiveLevel(active, ids, reflow), [{ id: 'a', reflowed: true }]);
+    const untouchedActive = [{ id: 'a' }];
+    assert.equal(removeNodesFromActiveLevel(untouchedActive, ids, reflow), untouchedActive);
+    const untouchedLevel = { nodes: [{ id: 'x' }], edges: [{ source: 'x', target: 'y' }] };
+    const parentLevel = {
+      nodes: [{ id: 'g', type: 'group', data: { canvasData: { nodes: [{ id: 'gone' }, { id: 'kid' }], edges: [{ source: 'kid', target: 'gone' }] } } }],
+      edges: [{ source: 'g', target: 'gone' }, { source: 'g', target: 'x' }],
+      viewport: { zoom: 1 },
+    };
+    const stack = [untouchedLevel, parentLevel];
+    const next = removeNodesFromStack(stack, ids, reflow);
+    assert.notEqual(next, stack);
+    assert.equal(next[0], untouchedLevel, 'an untouched level keeps its identity');
+    assert.deepEqual(next[1].edges, [{ source: 'g', target: 'x' }]);
+    assert.deepEqual(next[1].viewport, { zoom: 1 });
+    assert.deepEqual(next[1].nodes[0].data.canvasData, { nodes: [{ id: 'kid', reflowed: true }], edges: [] });
+    assert.equal(removeNodesFromStack(next, ids, reflow), next, 'a second removal changes nothing');
+    assert.equal(removeNodesFromStack(stack, new Set(), reflow), stack);
+    // An edge-only reference still rewrites the level.
+    const edgeOnly = [{ nodes: [{ id: 'k' }], edges: [{ source: 'k', target: 'gone' }] }];
+    assert.deepEqual(removeNodesFromStack(edgeOnly, ids)[0].edges, []);
+    const source = readFileSync(new URL('../../src/hooks/useCanvasNavigation.js', import.meta.url), 'utf8');
+    const body = source.slice(source.indexOf('const removeNodesGlobally = useCallback'), source.indexOf('}, [setNodes, setEdges, canMutateCanvas, setStackGuarded]);'));
+    assert.ok(body.includes('setNodes(prev => removeNodesFromActiveLevel(prev, ids, reflowLevel));'));
+    assert.ok(body.includes('setEdges(prev => filterEdgesForRemovedNodes(prev, ids));'));
+    assert.ok(body.includes('setStackGuarded(prevStack => removeNodesFromStack(prevStack, ids, reflowLevel));'));
+  } },
+  { name: 'the restore tick removes a late-found applied repost like a dismissal, toasts it once, defers busy cards, and keeps the X otherwise', async run() {
+    const source = await fs.readFile(new URL('../../src/hooks/useLocalAiFallbackManager.js', import.meta.url), 'utf8');
+    const start = source.indexOf('export function useLocalAiFallbackManager(');
+    assert.ok(start >= 0);
+    const saved = Date.parse(FIXTURE_IMPORTED_AT);
+    const after = new Date(saved + 60_000).toISOString();
+    const before = new Date(saved - 60_000).toISOString();
+    const official = { level: 'L2', outcome: 'found', sourceUrl: 'https://acme.bamboohr.com/careers/142' };
+    const card = (id, appliedCheckAt, extra = {}) => ({ id, type: 'jobcard', position: { x: 0, y: 0 },
+      data: { hubId: 'board', originHubId: 'search', url: `https://jooble.test/${id}`, officialPosting: official, appliedCheckAt, ...FIXTURE_JOB, ...extra } });
+    let nodes = [
+      { id: 'board', type: 'jobboard', data: {} },
+      { id: 'search', type: 'jobhub', data: { jobRunId: `search-${saved + 120_000}` } },
+      card('repost', after),
+      // Same current search run, but the row was checked before the save
+      // (carried into the re-scan): shown before the application, keeps the X.
+      card('carried', before),
+      card('unstamped', undefined),
+      card('locked', after, { locked: true }),
+      card('generating', after),
+      card('queued', after),
+      { id: 'unmatched', type: 'jobcard', position: { x: 0, y: 0 }, data: { hubId: 'board', url: 'https://jooble.test/other', title: 'Other', company: 'Elsewhere', appliedCheckAt: after } },
+    ];
+    const boardWrites = [];
+    const cancelled = [];
+    const logs = [];
+    const toasts = [];
+    let nudges = 0;
+    let lookups = 0;
+    const navigation = {
+      enumerateAllNodes: () => nodes,
+      updateNodeDataGlobally(id, patch) {
+        nodes = nodes.map(node => {
+          if (node.id !== id) return node;
+          const next = typeof patch === 'function' ? patch(node) : patch;
+          if (next && node.type === 'jobboard') boardWrites.push(next);
+          return next ? { ...node, data: { ...node.data, ...next } } : node;
+        });
+      },
+      removeNodesGlobally(ids, reflow) { nodes = removeNodesFromActiveLevel(nodes, new Set(ids), reflow); return true; },
+    };
+    const localApplication = { id: 'bundle', status: 'saved', savedDir: '/x', receipt: { importedAt: FIXTURE_IMPORTED_AT } };
+    let tick;
+    const refs = [];
+    const effects = [];
+    const queueSnapshot = { active: null, activeRuns: [], queued: [{ nodeId: 'queued', lane: 'application' }] };
+    assert.ok(claimRunningApplicationDocument('generating', 'both'));
+    const hook = runInNewContext(`(${source.slice(start).replace('export function', 'function')})`, {
+      ...localAiFallback,
+      applicationListingKeys, shouldRemoveCardFoundAfterApplication, planJobCardDeletionCleanup,
+      jobCardHasApplicationWorkInFlight, appliedRemovalToast,
+      LOCAL_AI_RETRY_NOTICE_INTERVAL_MS: 30_000,
+      useRef: value => { const ref = { current: value }; refs.push(ref); return ref; },
+      useEffect: effect => effects.push(effect),
+      useModuleRunQueue: () => ({ cancelQueuedRunsForNode: (id) => cancelled.push(id), getSnapshot: () => queueSnapshot }),
+      window: { electronAPI: {
+        getLocalApplicationStatus: async () => ({ success: false }), importLocalApplication: async () => ({ success: false }),
+        findSavedApplicationLinks: async ({ jobs }) => {
+          lookups++;
+          return { success: true, links: jobs.filter(job => job.nodeId !== 'unmatched').map(job => ({ nodeId: job.nodeId, localApplication })), roleMatches: [] };
+        },
+      }, setInterval: callback => { tick = callback; return 1; }, clearInterval() {} },
+      EventLogger: { log: line => logs.push(line) },
+      requestApplicationHandoffRefresh() {},
+      Date,
+    });
+    hook({ navigation, getCurrentFile: () => '/project/canvas.json', addToast: toast => toasts.push(toast), nudgePersistence: () => { nudges++; } });
+    const cleanups = effects.map(effect => effect());
+    try {
+      for (let i = 0; i < 30 && !logs.some(line => line.includes('restored saved bundle pointers')); i++) await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(nodes.filter(n => n.type === 'jobcard').map(n => [n.id, n.data.localApplication?.id || null]), [
+        ['carried', 'bundle'], ['unstamped', 'bundle'], ['locked', 'bundle'], ['generating', null], ['queued', null], ['unmatched', null],
+      ], 'the late-found idle repost is removed; busy ones wait with no X; the rest keep the X');
+      assert.deepEqual(cancelled, ['repost']);
+      assert.ok(logs.includes('[ApplicationLinks] removed 1 cards found after their application was saved boards=1'), logs.join('\n'));
+      assert.deepEqual(toasts, [{ title: 'Already applied', type: 'info', description: 'Removed 1 job you already applied to: Acme Corp — Senior Engineer' }]);
+      assert.equal(boardWrites.length, 1, 'the Board stats are rewritten once, like a dismissal');
+      assert.ok(nudges >= 1);
+      const settle = async () => { await tick?.(); for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve)); };
+      // While work is in flight the deferred cards are looked up again each tick and still not decided.
+      let lookupsBefore = lookups;
+      await settle();
+      assert.equal(lookups, lookupsBefore + 1, 'a deferred card keeps the inventory unsettled');
+      assert.deepEqual(nodes.filter(n => ['generating', 'queued'].includes(n.id)).map(n => n.data.localApplication || null), [null, null]);
+      // Once the claims are released the next tick removes them, in one toast.
+      clearRunningApplicationDocument('generating');
+      queueSnapshot.queued = [];
+      await settle();
+      assert.deepEqual(nodes.filter(n => n.type === 'jobcard').map(n => n.id), ['carried', 'unstamped', 'locked', 'unmatched']);
+      assert.equal(toasts.length, 2);
+      assert.match(toasts[1].description, /^Removed 2 jobs you already applied to: /);
+      // With the unmatched card still present, the inventory settles: no further lookup.
+      lookupsBefore = lookups;
+      await settle();
+      assert.equal(lookups, lookupsBefore, 'the restored inventory signature settles after the removal');
+      // The removed card rebuilt under the same id (undo or a later Combine) is
+      // looked up and removed again, without naming the same job twice.
+      nodes = [...nodes, card('repost', after)];
+      await settle();
+      assert.equal(lookups, lookupsBefore + 1, 'a restored card is looked up again');
+      assert.ok(!nodes.some(n => n.id === 'repost'));
+      assert.equal(toasts.length, 2, 'a job is named in a toast once per session');
+    } finally {
+      clearRunningApplicationDocument('generating');
+      cleanups.forEach(cleanup => cleanup?.());
+    }
   } },
 ];

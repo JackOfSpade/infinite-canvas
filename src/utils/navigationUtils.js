@@ -109,6 +109,69 @@ export function deepUpdateNode(nodes, id, dataUpdate) {
 }
 
 /**
+ * Recursively removes the given node ids from a level and every nested group
+ * canvasData, dropping edges that touch them. `reflowLevel(remaining, removed)`
+ * may re-lay out a level that lost nodes (it must be pure); it runs once per
+ * affected level array. Unchanged arrays keep their identity.
+ */
+export function deepRemoveNodes(nodes, ids, reflowLevel = null) {
+  if (!Array.isArray(nodes) || !ids?.size) return { updated: false, nodes };
+  let anyUpdated = false;
+  const removedHere = [];
+  const kept = [];
+  for (const n of nodes) {
+    if (ids.has(n?.id)) { removedHere.push(n); continue; }
+    const nested = n?.data?.canvasData;
+    if (Array.isArray(nested?.nodes)) {
+      const inner = deepRemoveNodes(nested.nodes, ids, reflowLevel);
+      const innerEdges = Array.isArray(nested.edges) ? nested.edges : null;
+      const edges = innerEdges ? innerEdges.filter(e => !ids.has(e?.source) && !ids.has(e?.target)) : null;
+      if (inner.updated || (innerEdges && edges.length !== innerEdges.length)) {
+        anyUpdated = true;
+        kept.push({ ...n, data: { ...n.data, canvasData: { ...nested, nodes: inner.nodes, ...(innerEdges ? { edges } : {}) } } });
+        continue;
+      }
+    }
+    kept.push(n);
+  }
+  if (!removedHere.length) return { updated: anyUpdated, nodes: anyUpdated ? kept : nodes };
+  const reflowed = typeof reflowLevel === 'function' ? reflowLevel(kept, removedHere) : kept;
+  return { updated: true, nodes: Array.isArray(reflowed) ? reflowed : kept };
+}
+
+/** Drops edges touching any removed node id; keeps identity when none do. */
+export function filterEdgesForRemovedNodes(edges, ids) {
+  if (!Array.isArray(edges) || !ids?.size) return edges;
+  const next = edges.filter(e => !ids.has(e?.source) && !ids.has(e?.target));
+  return next.length === edges.length ? edges : next;
+}
+
+/**
+ * The navigation stack with the given node ids removed from every level (and
+ * nested canvases), with their edges. Unchanged levels, and the stack itself
+ * when nothing changed, keep their identity. Pure: the setter body of
+ * useCanvasNavigation.removeNodesGlobally.
+ */
+export function removeNodesFromStack(stack, ids, reflowLevel = null) {
+  if (!Array.isArray(stack) || !ids?.size) return stack;
+  let stackUpdated = false;
+  const newStack = stack.map(level => {
+    const { updated, nodes: newNodes } = deepRemoveNodes(level?.nodes, ids, reflowLevel);
+    const newEdges = filterEdgesForRemovedNodes(level?.edges, ids);
+    if (!updated && newEdges === level?.edges) return level;
+    stackUpdated = true;
+    return { ...level, nodes: updated ? newNodes : level.nodes, edges: newEdges };
+  });
+  return stackUpdated ? newStack : stack;
+}
+
+/** The active level's nodes with the ids removed; `nodes` itself when none matched. */
+export function removeNodesFromActiveLevel(nodes, ids, reflowLevel = null) {
+  const { updated, nodes: next } = deepRemoveNodes(nodes, ids, reflowLevel);
+  return updated ? next : nodes;
+}
+
+/**
  * Recursively finds the level where targetNodeId exists and appends newNodes and newEdges.
  * placement: 'inside' (insert into targetNodeId's canvasData) | 'sibling' (insert alongside targetNodeId)
  */
