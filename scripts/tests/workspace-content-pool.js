@@ -6,6 +6,9 @@ import {
   WORKSPACE_POOL_KEY,
   WORKSPACE_REF_KEY,
 } from '../../electron/ipc/workspaceContentPool.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { serializeWorkspaceForSave, serializeWorkspaceForSaveOffThread } from '../../electron/ipc/filesystem.js';
 import { fingerprint } from '../../src/utils/serializationUtils.js';
 import { undoHistoryLimit } from '../../src/utils/undoMemoryBudget.js';
@@ -79,11 +82,34 @@ export default [
     assert.equal(JSON.stringify(parseWorkspaceText(saved)), JSON.stringify(data));
     assert.throws(() => JSON.parse(saved), SyntaxError, 'a build without the pool refuses this file instead of saving references back');
   } },
-  { name: 'Saving on the worker thread writes exactly what saving on the main thread writes', async run() {
+  { name: 'Saving in the worker process writes exactly what saving on the main thread writes', async run() {
     const repeated = repeatedCanvas();
     assert.equal(await serializeWorkspaceForSaveOffThread(repeated), serializeWorkspaceForSave(repeated));
     const plain = { schemaVersion: 11, nodes: [{ id: 'n', data: { text: 'short' } }], edges: [] };
     assert.equal(await serializeWorkspaceForSaveOffThread(plain), JSON.stringify(plain));
+  } },
+  { name: 'A save worker that dies (out of memory, crash, timeout) saves the canvas plain and leaves the app running', async run() {
+    // 2026-11-22: a save worker *thread* that ran out of memory aborted the whole
+    // app, because Electron shares one heap between all threads. The worker is
+    // now a separate process; whatever happens to it, this process carries on.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'canvas-save-worker-'));
+    try {
+      const repeated = repeatedCanvas();
+      const plainText = JSON.stringify(repeated);
+      const aborts = path.join(dir, 'aborts.mjs');
+      fs.writeFileSync(aborts, "process.stdin.resume(); process.stdin.on('end', () => process.abort());\n");
+      assert.equal(await serializeWorkspaceForSaveOffThread(repeated, { workerPath: aborts }), plainText, 'an aborted worker means a plain save');
+      const garbled = path.join(dir, 'garbled.mjs');
+      fs.writeFileSync(garbled, "process.stdin.resume(); process.stdin.on('end', () => process.stdout.write('?'));\n");
+      assert.equal(await serializeWorkspaceForSaveOffThread(repeated, { workerPath: garbled }), plainText, 'an unreadable reply means a plain save');
+      const stuck = path.join(dir, 'stuck.mjs');
+      fs.writeFileSync(stuck, 'setInterval(() => {}, 1000);\n');
+      assert.equal(await serializeWorkspaceForSaveOffThread(repeated, { workerPath: stuck, timeoutMs: 300 }), plainText, 'a stuck worker is killed and the save goes out plain');
+      assert.equal(await serializeWorkspaceForSaveOffThread(repeated, { workerPath: path.join(dir, 'missing.mjs') }), plainText, 'a missing worker file means a plain save');
+      assert.equal(parseWorkspaceText(plainText).nodes.length, repeated.nodes.length, 'the plain save restores the same canvas');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   } },
   { name: 'Undo fingerprint and size are remembered per node and still see every edit', run() {
     const card = { id: 'a', type: 'jobcard', position: { x: 0, y: 0 }, data: { description: longText('listing') } };

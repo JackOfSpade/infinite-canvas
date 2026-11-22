@@ -117,9 +117,9 @@ export default defineConfig({
           },
         },
       },
-      // Canvas save worker thread: its own entry so the worker never loads main.cjs.
+      // Canvas save child process: its own entry so the process never loads main.cjs.
       {
-        entry: 'electron/ipc/workspaceSaveWorkerThread.js',
+        entry: 'electron/ipc/workspaceSaveWorker.js',
         vite: {
           plugins: [inputs],
           build: {

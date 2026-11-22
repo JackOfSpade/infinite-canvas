@@ -11,7 +11,7 @@ import { createCanvasDeltaStore } from './workspaceSaveDelta.js';
 import { WORKSPACE_FORMAT_UNSUPPORTED, formatPooledWorkspace, parseWorkspaceText, poolWorkspaceContent } from './workspaceContentPool.js';
 import path from 'path';
 import fs from 'fs';
-import { Worker } from 'node:worker_threads';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { constants as bufferConstants } from 'buffer';
 import { createHash, randomUUID } from 'crypto';
@@ -1883,57 +1883,96 @@ export function serializeWorkspaceForSave(data) {
 // (unpacked from the asar); the unbundled source finds its sibling module.
 function workspaceSaveWorkerPath() {
   if (typeof __dirname === 'string') {
-    return path.join(__dirname, 'workspaceSaveWorkerThread.js')
+    return path.join(__dirname, 'workspaceSaveWorker.js')
       .replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`);
   }
-  return fileURLToPath(new URL('./workspaceSaveWorkerThread.js', import.meta.url));
+  return fileURLToPath(new URL('./workspaceSaveWorker.js', import.meta.url));
 }
 
-function pooledFormOffThread(plain) {
+// Generous: the largest canvases measured take a few seconds. A stuck process
+// must not hold a save forever.
+const WORKSPACE_SAVE_WORKER_TIMEOUT_MS = 120_000;
+
+/**
+ * Pools `plain` in a short-lived child process. Not a worker thread: Electron
+ * shares one 4 GB heap between the main thread and all worker threads, so a
+ * worker that filled it aborted the whole app instead of only itself
+ * (2026-11-22). A child process has its own heap, and ending it returns all of
+ * that memory at once. Resolves the pooled text, or null for "save plain".
+ */
+export function pooledFormInChildProcess(plain, {
+  workerPath = workspaceSaveWorkerPath(),
+  spawnImpl = spawn,
+  timeoutMs = WORKSPACE_SAVE_WORKER_TIMEOUT_MS,
+} = {}) {
   return new Promise((resolve, reject) => {
-    // One short-lived thread per save: it holds several copies of the canvas
-    // while it works, and ending it returns all of that memory at once.
-    const worker = new Worker(workspaceSaveWorkerPath(), {
-      resourceLimits: { maxOldGenerationSizeMb: 8192 },
-    });
+    let child;
+    try {
+      // The app's own executable runs the script as Node (Electron needs
+      // ELECTRON_RUN_AS_NODE; plain Node ignores it).
+      child = spawnImpl(process.execPath, [workerPath], {
+        stdio: ['pipe', 'pipe', 'ignore'],
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', INFINITE_CANVAS_SAVE_WORKER: '1' },
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const chunks = [];
     let settled = false;
-    const settle = (fn, value) => {
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch { /* already gone */ }
+      settle(reject, new Error(`Canvas save worker took over ${Math.round(timeoutMs / 1000)}s.`));
+    }, timeoutMs);
+    function settle(fn, value) {
       if (settled) return;
       settled = true;
-      worker.terminate().catch(() => {});
+      clearTimeout(timer);
       fn(value);
-    };
-    worker.once('message', (reply) => {
-      if (!reply?.ok) return settle(reject, new Error(reply?.message || 'Canvas save worker failed.'));
-      if (reply.mismatch) logger.warn('[FileSystem] Canvas content pool did not restore identically; saving without it.');
-      settle(resolve, typeof reply.serialized === 'string' ? reply.serialized : null);
+    }
+    child.on('error', error => settle(reject, error));
+    child.stdout.on('data', chunk => chunks.push(chunk));
+    child.on('close', (code, signal) => {
+      if (code !== 0) {
+        settle(reject, new Error(`Canvas save worker stopped early (${signal ? `signal ${signal}` : `code ${code}`}).`));
+        return;
+      }
+      const output = Buffer.concat(chunks);
+      chunks.length = 0;
+      const status = output.length ? String.fromCharCode(output[0]) : '';
+      if (status === 'P') settle(resolve, output.toString('utf8', 1));
+      else if (status === 'N') settle(resolve, null);
+      else if (status === 'M') {
+        logger.warn('[FileSystem] Canvas content pool did not restore identically; saving without it.');
+        settle(resolve, null);
+      } else settle(reject, new Error('Canvas save worker returned no readable result.'));
     });
-    worker.once('error', error => settle(reject, error));
-    worker.once('exit', code => settle(reject, new Error(`Canvas save worker stopped early (code ${code}).`)));
-    worker.postMessage(plain);
+    // A worker that dies mid-read is reported by close.
+    child.stdin.on('error', () => {});
+    child.stdin.end(plain, 'utf8');
   });
 }
 
 /**
- * Same result as serializeWorkspaceForSave, with the slow part (removing
- * repeated content and proving it restores) on a worker thread. Any worker
- * failure falls back to doing that work here, so a save never depends on it.
+ * Same file text as serializeWorkspaceForSave when pooling succeeds, with the
+ * slow, memory-heavy part (removing repeated content and proving it restores)
+ * in a child process. If that process fails for any reason (out of memory,
+ * crash, timeout) the canvas is saved plain: it loads exactly the same, just
+ * larger. The work is never retried here, since running out of memory on the
+ * main thread would end the app.
  */
-export async function serializeWorkspaceForSaveOffThread(data) {
+export async function serializeWorkspaceForSaveOffThread(data, workerOptions = {}) {
   const megabytes = text => text.length / 1024 / 1024;
   let started = performance.now();
   const plain = plainWorkspaceText(data);
   recordMainPerf('save-serialize', performance.now() - started, megabytes(plain));
-  let pooled;
+  let pooled = null;
   started = performance.now();
   try {
-    pooled = await pooledFormOffThread(plain);
+    pooled = await pooledFormInChildProcess(plain, workerOptions);
     recordMainPerf('save-compress', performance.now() - started, megabytes(pooled ?? plain));
   } catch (error) {
-    logger.warn(`[FileSystem] Canvas save worker unavailable; serializing on the main thread: ${error?.message || error}`);
-    started = performance.now();
-    pooled = pooledFormOf(data, plain);
-    recordMainPerf('save-compress-fallback', performance.now() - started, megabytes(pooled ?? plain));
+    logger.warn(`[FileSystem] Canvas save worker failed; saving the canvas without pooling: ${error?.message || error}`);
   }
   return pooled ?? plain;
 }
