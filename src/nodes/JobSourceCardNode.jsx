@@ -1260,6 +1260,13 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
               ? (isJobSourceWarningGating(result.warning) ? result.warning : nextBlockedWarning)
               : (result.warning || null),
             jobRunId,
+            // An Indeed resume proved every planned result list was walked to
+            // its end; the hub may then move Indeed's date after a
+            // gate-clearing Solve (applySourceSolveToPendingCoverage).
+            walkComplete: result?.walkComplete === true,
+            // Listings the resume returned with no readable description: the
+            // hub keeps them unread, and owed once Indeed's date moves.
+            unreadListings: Array.isArray(result?.unreadListings) ? result.unreadListings : [],
             // The owning Search may need to continue directly into scoring.
             // It appends that promise synchronously during dispatch so this
             // source keeps the global lane until the whole paused workflow is
@@ -1421,7 +1428,15 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
             // 'searching' beat (jobs.js re-fetching descriptions) overwrites
             // `detail`, so a failing Solve skipped the restore and stranded the
             // card spinning with no warning and no Solve button.
-            if (!prev || isTerminalSourceStatus(prev.status)) return prev;
+            //
+            // Only a terminal beat that carries its OWN warning outranks this
+            // restore. The backend's resolve handler can emit a clean
+            // `done`/count-0 beat for the very pass that came back unresolved
+            // (a Solve window that closed without clearing anything). Yielding
+            // to that beat kept a green checkmark with 0 jobs on the card while
+            // the hub restored the gate and still offered "Solve all blocked
+            // sources (1)" — card and hub disagreeing about the same source.
+            if (!prev || (isTerminalSourceStatus(prev.status) && prev.warning)) return prev;
             return {
               ...prevForRestore,
               status: 'error',
@@ -1453,7 +1468,9 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           // back to red — unless a newer TERMINAL backend event already landed
           // (e.g. LinkedIn's re-emitted error), which we must not clobber. Same
           // predicate as the branch above so the two halves cannot drift apart.
-          setProgress(prev => (prev && !isTerminalSourceStatus(prev.status)) ? prevForRestore : prev);
+          // A clean `done` beat from this same unresolved pass is not a newer
+          // outcome (see the branch above), so it must not keep the checkmark.
+          setProgress(prev => (prev && !(isTerminalSourceStatus(prev.status) && prev.warning)) ? prevForRestore : prev);
         }
         // A pass that did not resolve ends the walk: the remaining queries are
         // still queued in the backend and the card keeps a live Solve button.

@@ -4,7 +4,7 @@ import { isLoginPageCopyAntiBot } from '../../electron/ipc/accounts.js';
 import { shouldAutoCloseCaptchaResolveWithoutExtractor } from '../test-dependencies.js';
 // Imported at the source: the shared test-dependencies barrel is edited by
 // other areas, and this helper is only exercised here.
-import { normalizeNativeTabQueryError } from '../../electron/ipc/browser/authWindows.js';
+import { classifyCaptchaResolveEmptyRead, normalizeNativeTabQueryError } from '../../electron/ipc/browser/authWindows.js';
 import { getRecentLogs } from '../../electron/logger.js';
 
 export default [
@@ -1425,6 +1425,53 @@ export default [
       assert(shouldAutoCloseCaptchaResolveWithoutExtractor({ ...cleanPage, sawChallenge: true, textLength: 20 }) === false,
         'a tiny redirect/loading body is not enough evidence of a recovered no-extractor page');
       return { requiresObservedChallenge: true };
+    },
+  },
+{
+    // A Glassdoor Solve window closed in under 2s: the first inline extract ran
+    // ~0.6s after launch on an 887-char body (still hydrating / interstitial),
+    // threw SITE_CHANGED, and the old handler latched it on the spot. The same
+    // page later loaded 10-33k chars and 30 items.
+    name: 'captcha resolve SITE_CHANGED latches only after the empty grace on a substantial body',
+    run: () => {
+      const graceMs = 30000;
+      const bodyTextGate = 1500; // READINESS.BODY_TEXT_GATE
+      // `siteChangedMs` is how long the body has been substantial while still
+      // throwing; `emptyMs` is the plain 0-item clock.
+      const sc = (textLength, siteChangedMs, extra = {}) => classifyCaptchaResolveEmptyRead({
+        siteChanged: true, textLength, emptyMs: siteChangedMs, siteChangedMs, graceMs, bodyTextGate, ...extra,
+      });
+      assert(sc(887, 0) === 'keep-waiting',
+        'a SITE_CHANGED throw on the first tiny hydration-time body must not close the window');
+      assert(sc(887, graceMs + 1000) === 'keep-waiting',
+        'a tiny body that still throws past the grace stays open for the user (never an empty success)');
+      assert(sc(12000, graceMs + 1000) === 'site-changed',
+        'a substantial body that still throws after the full grace is real selector drift');
+      assert(sc(12000, graceMs - 1) === 'keep-waiting',
+        'even a substantial body gets the full grace before drift is latched');
+      assert(sc(12000, graceMs) === 'site-changed', 'the grace boundary is inclusive');
+      assert(sc(bodyTextGate, graceMs) === 'keep-waiting' && sc(bodyTextGate + 1, graceMs) === 'site-changed',
+        'the body gate is strict (> gate)');
+      // A grace spent on a tiny interstitial does not count toward drift on the
+      // real page: the first big-body throw after it still waits.
+      assert(classifyCaptchaResolveEmptyRead({
+        siteChanged: true, textLength: 12000, emptyMs: graceMs + 5000, siteChangedMs: 0, graceMs, bodyTextGate,
+      }) === 'keep-waiting', 'drift is timed on the substantial-body clock, not the 0-item clock');
+      // The existing 0-item outcomes still run for a throw.
+      assert(sc(12000, graceMs + 1000, { consentVisible: true }) === 'consent-wait',
+        'a consent wall over a throwing page holds the window, it is not drift');
+      assert(sc(12000, 0, { noResultsSentinel: true }) === 'empty-noresults',
+        "the site's own 0-results empty state concludes immediately");
+      // A genuine 0-item read (no throw) is unchanged.
+      const plain = (textLength, emptyMs) => classifyCaptchaResolveEmptyRead({
+        siteChanged: false, textLength, emptyMs, graceMs, bodyTextGate,
+      });
+      assert(plain(887, 0) === 'keep-waiting', 'a plain 0-item read waits for the grace');
+      assert(plain(887, graceMs) === 'empty-grace', 'a plain 0-item read past the grace is an accepted empty result');
+      assert(classifyCaptchaResolveEmptyRead({ siteChanged: true, textLength: 1501, emptyMs: 30000, siteChangedMs: 30000 }) === 'site-changed'
+        && classifyCaptchaResolveEmptyRead({ siteChanged: true, textLength: 1500, emptyMs: 30000, siteChangedMs: 30000 }) === 'keep-waiting',
+        'defaults use the shared 1500-char READINESS.BODY_TEXT_GATE and 30s grace');
+      return { ok: true };
     },
   },
 {

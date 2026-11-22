@@ -280,6 +280,10 @@ export function useIssueReporter({
             combineSignature: typeof safeReportField(data, 'combineSignature') === 'string' ? safeReportField(data, 'combineSignature').slice(0, 4_000) : null,
             combineSourceRuns: boundedCombinedSourceRuns(safeReportField(data, 'combineSourceRuns')),
             mergeUnique: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'unique')),
+            // Combine's own dedup receipt: rows in, same-listing rows removed.
+            mergeIncoming: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'totalIncoming')),
+            mergeDuplicatesRemoved: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'duplicatesRemoved')),
+            overrideRemoved: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'overrideRemoved')),
             locationPostingsCollapsed: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'locationVariantPostingsCollapsed')),
             researchRemoved: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'researchRemoved')),
             carriedJobs: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'carriedJobs')),

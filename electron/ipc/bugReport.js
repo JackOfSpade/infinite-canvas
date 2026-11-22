@@ -1528,8 +1528,12 @@ function liveJobBoardState(node, renderedCardCounts, clearProvenance) {
     combineSignature: node.data?.combineSignature,
     combineSourceRuns: node.data?.combineSourceRuns,
     mergeUnique: node.data?.mergeStats?.unique,
+    mergeIncoming: node.data?.mergeStats?.totalIncoming,
+    mergeDuplicatesRemoved: node.data?.mergeStats?.duplicatesRemoved,
+    overrideRemoved: node.data?.mergeStats?.overrideRemoved,
     locationPostingsCollapsed: node.data?.mergeStats?.locationVariantPostingsCollapsed,
     researchRemoved: node.data?.mergeStats?.researchRemoved,
+    carriedJobs: node.data?.mergeStats?.carriedJobs,
     clearProvenance,
   };
 }

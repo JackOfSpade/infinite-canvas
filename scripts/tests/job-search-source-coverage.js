@@ -12,6 +12,8 @@ import { didDetailBlockReprobeRecover, partitionAlreadyReadJobs, selectManualSou
 import { filterJobsByAge, filterJobsByPostedSince } from '../../electron/ipc/jobDateFilter.js';
 import { assessSourceHealth } from '../../electron/ipc/jobSourceHealth.js';
 import { formatPipelineState } from '../../electron/ipc/bugReport/jobsSnapshot.js';
+import { selectIndeedPageRows } from '../../electron/extractors/indeedBrowser.js';
+import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import {
   __resetJobsTelemetryForTests,
   getJobsTelemetry,
@@ -30,6 +32,7 @@ import {
   serializeJobSearchWindow,
   applyResolvedListingsToPendingCoverage,
   applySourceSkipToPendingCoverage,
+  applySourceSolveToPendingCoverage,
   SOURCE_OWED_MAX_SCANS,
   sourceFinishedQueriesForRun,
   sourceOwedKeysForRun,
@@ -1006,6 +1009,47 @@ export default [
         'the later window checks keep it too');
       assert(selectManualSourcePageJobs(cards.map(card => ({ ...card, postedWindowExempt: undefined })), [], null, windowStart, null, () => { throw new Error('x'); })
         .map(job => job.title).join() === 'Undated', 'a failing lookup treats the card as not owed');
+    },
+  },
+  {
+    name: 'An Indeed resume that finishes Indeed with unread listings moves its date, and the next Indeed scrape opens them whatever their date',
+    run() {
+      const day = 86400000;
+      const bookmark = localDate(2026, 11, 15, 4).getTime();
+      const run1 = localDate(2026, 11, 18, 20).getTime();
+      const entry = at => ({ coverageStartedAt: at, completedAt: at, runId: null });
+      const card = (jk, posted) => ({ source: 'indeed', title: jk, company: 'Acme', url: `https://ca.indeed.com/viewjob?jk=${jk}`, posted });
+      const owedCard = card('owedjk', '5 days ago');
+      const staged = {
+        runId: 'r1', collectionStartedAt: run1, collectionCompletedAt: run1 + 1000, completedSourceIds: [],
+        participatingSourceIds: ['indeed'], walkCompleteSourceIds: [], locationKey: 'Canada', readContextKey: 'p',
+      };
+      const start = { sourceCoverage: { indeed: entry(bookmark) } };
+      // The resume walked every list, cleared the gate, read one listing and
+      // dropped one for a missing description.
+      const unread = [{ key: sourceJobKey(owedCard), title: 'owedjk', company: 'Acme', url: owedCard.url }];
+      const solved = applySourceSolveToPendingCoverage(staged, 'indeed', [sourceJobKey(card('readjk', 'Today'))], true,
+        { walkComplete: true, unreadListings: unread });
+      assert(solved.completedSourceIds.join() === 'indeed', 'the resume finished Indeed');
+      let data = { ...start, ...buildSourceCoverageCommitPatch(start, solved, 'hub') };
+      assert(data.sourceCoverage.indeed.coverageStartedAt === run1, 'Indeed\'s date moved to the run start');
+      const owedKeys = sourceOwedKeysForRun(data, ['indeed'], 'Canada').indeed;
+      assert(owedKeys?.join() === sourceJobKey(owedCard), `the dropped listing is owed, got ${JSON.stringify(owedKeys)}`);
+      assert(sourceOwedKeysForRun(data, ['indeed'], 'Elsewhere').indeed === undefined, 'owed only for the same search location');
+
+      // Next scan: the posted window starts at run1, after the owed card's date.
+      const owedSet = new Set(owedKeys);
+      const page = selectIndeedPageRows([{ ...owedCard }, card('stale', '5 days ago'), card('fresh', 'Today')], run1,
+        null, job => owedSet.has(sourceJobKey(job)));
+      assert(page.open.map(job => job.title).join() === 'owedjk,fresh', `the owed card is opened, got ${page.open.map(job => job.title).join()}`);
+      assert(filterJobsByAge(page.open, 1).length === 2, 'the age backstop keeps it too');
+
+      // That scan reads it: no longer owed.
+      data = { ...data, ...buildSourceCoverageCommitPatch(data, {
+        runId: 'r2', collectionStartedAt: run1 + day, collectionCompletedAt: run1 + day + 1, completedSourceIds: ['indeed'],
+        participatingSourceIds: ['indeed'], locationKey: 'Canada', readContextKey: 'p', readKeysBySource: { indeed: owedKeys },
+      }, 'hub') };
+      assert(data.sourceOwedListings.indeed === undefined, 'an owed Indeed listing that is read is no longer owed');
     },
   },
 ];

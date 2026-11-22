@@ -424,6 +424,69 @@ export default [
     },
   },
   {
+    // Report 2026-11-22: two Glassdoor Solve windows closed unresolved, the
+    // resolve handler still sent a clean `done`/count-0 beat, and the card's
+    // unresolved-branch restore yielded to it — a green checkmark with 0 jobs
+    // while the hub restored the gate and offered "Solve all blocked sources (1)".
+    name: 'an unresolved Solve restores its gate over a clean done beat, but not over a newer warned terminal beat',
+    run: () => {
+      const jobSource = fs.readFileSync(new URL('../../src/nodes/JobSourceCardNode.jsx', import.meta.url), 'utf8');
+      const branchStart = jobSource.indexOf('if (rawRestoreWarning) {');
+      const branchEnd = jobSource.indexOf("solveOutcome = 'failed';", branchStart);
+      assert(branchStart >= 0 && branchEnd > branchStart, 'the unresolved Solve branch is present');
+      const branch = jobSource.slice(branchStart, branchEnd);
+      const extract = (from) => {
+        const open = branch.indexOf('setProgress(', from) + 'setProgress'.length;
+        let depth = 0;
+        let end = open;
+        for (; end < branch.length; end += 1) {
+          if (branch[end] === '(') depth += 1;
+          else if (branch[end] === ')') {
+            depth -= 1;
+            if (depth === 0) break;
+          }
+        }
+        return { src: branch.slice(open + 1, end), end };
+      };
+      const warned = extract(0);
+      const plain = extract(branch.indexOf('} else if (prevForRestore) {'));
+      const gate = { code: 'description-query-blocked', severity: 'block' };
+      const prevForRestore = { jobRunId: 'run-1', status: 'error', count: 426, warning: gate };
+      const make = (src) => new Function(
+        'prevForRestore', 'isTerminalSourceStatus', 'rawRestoreWarning', 'restoreWarning',
+        `return (${src});`,
+      )(prevForRestore, isTerminalSourceStatus, gate, gate);
+      for (const updater of [make(warned.src), make(plain.src)]) {
+        const cleanDone = updater({ jobRunId: 'run-1', status: 'done', count: 0, warning: null });
+        assert(cleanDone?.status === 'error' && cleanDone.warning === gate && cleanDone.count === 426,
+          'a clean done/count-0 beat from the unresolved pass does not keep the checkmark');
+        const newerError = { jobRunId: 'run-1', status: 'error', warning: { code: 'linkedin-rate-limited', severity: 'throttle' } };
+        assert(updater(newerError) === newerError, 'a newer terminal beat carrying its own warning still wins');
+        assert(updater({ jobRunId: 'run-1', status: 'searching' })?.status === 'error', 'a live card is restored');
+        assert(updater(null) === null, 'a null progress state passes through');
+      }
+      return { checkmarkCleared: true };
+    },
+  },
+  {
+    name: 'the resolve handler sends no clean done beat and keeps its query queued for an unresolved pass',
+    run: () => {
+      const source = readJobsSource('recoveryHandlers');
+      assert(source.includes("const unresolvedPass = !readsEmployerPostings && result?.resolved === false && items.length === 0;"),
+        'an unresolved pass is named once');
+      assert(/resolveWarning\?\.severity === 'throttle' \|\| unresolvedPass\)\s*\n\s*\? 'error' : 'done'/.test(source),
+        'an unresolved pass carrying a warning is an error beat, never done');
+      assert(source.includes('const sendsTerminalBeat = !(unresolvedPass && !resolveWarning);')
+        && /if \(sendsTerminalBeat\) \{\s*\n\s*recordJobSourceProgress\(resolveProgress/.test(source),
+        'an unresolved pass with no warning sends no terminal beat, so the card restores its own gate');
+      assert(source.includes('if (sourceRecoveryCheckpointOwned && !readsEmployerPostings && !unresolvedPass) {'),
+        'an unresolved pass does not consume its checkpoint-owned blocked query');
+      assert(source.includes('const nextBlockedUrl = readsEmployerPostings || unresolvedPass ? null : remaining[0] || null;'),
+        'an unresolved pass hands back no next query: the failed one is still first in line');
+      return { unresolvedBeatSuppressed: true };
+    },
+  },
+  {
     // The Solve/Continue button's render gate became single-threaded when the
     // 'Retry verification' actionLabel was dropped: a native-challenge warning
     // carries no actionLabel and no usable url, so its `resumeState` is the ONLY

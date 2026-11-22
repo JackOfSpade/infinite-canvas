@@ -254,6 +254,29 @@ export function linkedInWalkComplete(queries, finishedQueries, ranQueries = null
 }
 
 /**
+ * Whether an Indeed Continue/Solve resume left every planned Indeed result list
+ * walked to its end. A query counts as walked when the run manifest's Indeed
+ * ledger marks its slot terminal (the first scrape walked it) or when this
+ * resume reached a terminal page for it (`terminalQueryIndexes`, the same
+ * points that checkpoint terminal:true). A `warning === null` alone proves
+ * nothing: frame detach, navigation and page-read errors, the retrieval budget
+ * and abort all stop the walk early with no warning. Fails closed: no manifest
+ * for this exact run, no planned queries, or a block/throttle warning → false.
+ */
+export function indeedResumeWalkComplete({ manifest, jobRunId, terminalQueryIndexes, warning } = {}) {
+  if (warning?.severity === 'block' || warning?.severity === 'throttle') return false;
+  if (!manifest || typeof jobRunId !== 'string' || !jobRunId || manifest.runId !== jobRunId) return false;
+  const planned = Array.isArray(manifest.inputs?.queries) ? manifest.inputs.queries : [];
+  if (planned.length === 0) return false;
+  const ledger = manifest.sources?.indeed?.queries && typeof manifest.sources.indeed.queries === 'object'
+    ? manifest.sources.indeed.queries
+    : {};
+  const resumed = new Set((Array.isArray(terminalQueryIndexes) ? terminalQueryIndexes : [])
+    .filter(index => Number.isSafeInteger(index) && index >= 0));
+  return planned.every((_query, index) => ledger[`#${index}`]?.terminal === true || resumed.has(index));
+}
+
+/**
  * The keys of one platform's unread listings that another platform read in the
  * same scan. The scan scores that other copy, so this one is not owed: it counts
  * as read and is not opened again. "Same job" is the scan's own cross-platform

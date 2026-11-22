@@ -589,6 +589,45 @@ export function shouldAutoCloseCaptchaResolveWithoutExtractor({
     && Number(textLength) > Number(bodyTextGate);
 }
 
+/**
+ * What the visible captcha-resolve window does with a 0-item inline-extract
+ * read.  A SITE_CHANGED throw counts as a 0-item read, NOT as proof of selector
+ * drift: the first probe fires ~0.6s after launch, when the body can still be
+ * hydrating or an interstitial (an 887-char Glassdoor body that later grew to
+ * 10-33k chars and 30 items closed its Solve window in under 2s).  Drift is
+ * only latched once the page has had the full empty grace AND carries a
+ * substantial body — the same bar the headless path (browserPool readiness
+ * deadline) and the no-extractor path (BODY_TEXT_GATE) already apply.  A tiny
+ * body that still throws keeps the window open for the user; it is never
+ * reported as a cleared empty result.
+ *
+ * Returns 'consent-wait' | 'empty-noresults' | 'site-changed' | 'empty-grace'
+ * | 'keep-waiting'.
+ */
+export function classifyCaptchaResolveEmptyRead({
+  siteChanged = false,
+  consentVisible = false,
+  noResultsSentinel = false,
+  textLength = 0,
+  emptyMs = 0,
+  // How long the body has been substantial (over the gate) while still
+  // throwing. Drift is measured on that clock, not the 0-item clock: a window
+  // that spent its grace on a tiny interstitial must not latch drift on the
+  // first full-size read of the real page while its cards are still rendering.
+  siteChangedMs = 0,
+  graceMs = 30000,
+  bodyTextGate = READINESS.BODY_TEXT_GATE,
+} = {}) {
+  if (consentVisible) return 'consent-wait';
+  if (noResultsSentinel) return 'empty-noresults';
+  if (siteChanged) {
+    return Number(textLength) > Number(bodyTextGate) && Number(siteChangedMs) >= Number(graceMs)
+      ? 'site-changed'
+      : 'keep-waiting';
+  }
+  return Number(emptyMs) < Number(graceMs) ? 'keep-waiting' : 'empty-grace';
+}
+
 // Glassdoor redirects an authenticated session to its country-specific domain
 // (for example www.glassdoor.com → www.glassdoor.ca). A captcha-resolve starts
 // on the scrape URL, so treating that safe first-party redirect as the user
@@ -2873,6 +2912,8 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     let postprocessMeta = null;    // bounded source-specific counts for diagnostics
     let autoCloseReason = null;   // why finishCleared fired (set at each call site)
     let siteChangedError = null;  // non-null when inline extract threw SITE_CHANGED (code fix needed, not captcha)
+    let lastSiteChangedThrow = null; // latest unlatched SITE_CHANGED throw (heartbeat only; cleared by any read that does not throw)
+    let substantialThrowSince = null; // when SITE_CHANGED throws began on a body over BODY_TEXT_GATE
     let siteChangedHandled = false; // de-dupe guard for the SITE_CHANGED branch — must NOT be `isTerminated`, see below
     let pollTimedOut = false;     // auto-detect poll gave up before any resolve
 
@@ -3113,6 +3154,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
             if (probe.textLength === 0) return;
             if (antiBotClearedAt == null) antiBotClearedAt = Date.now();
             let items = null;
+            let siteChangedThisRead = false;
             try {
               const result = await page.evaluate(inlineExtractorJS);
               items = unwrapInlineExtractorItems(result);
@@ -3123,35 +3165,25 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
             } catch (e) {
               extractOutcome = 'threw';
               const isSC = /SITE_CHANGED/i.test(e?.message || '');
-              logger.warn(`[StealthBrowser] Inline extract failed (${e?.message || e}); ${isSC ? 'code fix needed — not triggering auto-rescrape' : 'falling back to rescrape'}`);
-              if (isSC) {
-                // Guard against concurrent probe calls (multiple evaluates in-flight
-                // when the page finishes loading) both hitting this handler. The
-                // second one's warn/close would be a harmless duplicate, but it
-                // produces a confusing double WARN in the log.
-                //
-                // CRITICAL: this guard must NOT reuse `isTerminated`. That flag is
-                // cleanup()'s idempotency latch — setting it here makes the
-                // `disconnected` → cleanup() handler bail at its own `if
-                // (isTerminated) return`, so resolve() and finishAuthWindowDiagnostic()
-                // never fire. The Chrome window closes, but the awaiting
-                // resolve-job-source IPC never returns: the node's task stays
-                // registered and the source card spins on "resolving" forever
-                // (observed as "Glassdoor stuck" with a dangling Active IPC Task and
-                // an Auth Window stuck at result=open). Use a dedicated flag and let
-                // `close()` → cleanup() do the real teardown + resolve.
-                if (siteChangedHandled) return;
-                siteChangedHandled = true;
-                // The extractor is broken (not the captcha) — closing the window
-                // and rescraping headless would just fail again. Surface as
-                // stale-selectors via the resolve payload so marketplace.js can
-                // emit the right warning to the source card (Retry, not Solve).
-                siteChangedError = e?.message || String(e);
-                if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
-                if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
-                await requestCaptchaBrowserClose();
-                return;
+              // A tiny still-hydrating body can throw SITE_CHANGED on every
+              // probe tick; log each distinct message once, not once per poll.
+              if (!isSC || (e?.message || String(e)) !== lastSiteChangedThrow) {
+                logger.warn(`[StealthBrowser] Inline extract failed (${e?.message || e}); ${isSC ? 'SITE_CHANGED treated as a 0-item read until the empty grace passes on a substantial body' : 'falling back to rescrape'}`);
               }
+              if (isSC) {
+                // Not latched here: an early throw on a still-hydrating or
+                // interstitial body is a 0-item read. Remember it and let the
+                // 0-item branch below decide (classifyCaptchaResolveEmptyRead).
+                lastSiteChangedThrow = e?.message || String(e);
+                siteChangedThisRead = true;
+                items = [];
+              }
+            }
+            if (!siteChangedThisRead) lastSiteChangedThrow = null;
+            if (siteChangedThisRead && probe.textLength > READINESS.BODY_TEXT_GATE) {
+              if (substantialThrowSince == null) substantialThrowSince = Date.now();
+            } else {
+              substantialThrowSince = null;
             }
 
             const ceilingHit = Date.now() - antiBotClearedAt >= READINESS_CEILING_MS;
@@ -3176,42 +3208,78 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
                 return;
               }
               // count still climbing — keep polling.
-            } else if (probe.consentVisible) {
-              // A cookie-consent wall is covering the page — the 0 is the wall
-              // (or content gated behind it), NOT a genuinely-empty result, and
-              // the user is mid-accept. Restart the empty grace so it only starts
-              // counting once the wall is gone, and reset the hydration ceiling so
-              // post-dismiss rendering is measured fresh.
-              emptySince = null;
-              antiBotClearedAt = null;
-            } else if (matchesNoResultsSentinel(probe.bodyText)) {
-              // 0 items, no challenge, no consent wall, AND the page shows the
-              // site's OWN definitive "0 results" empty-state (e.g. Swappa "No
-              // products match this criteria" — Swappa sells only electronics, so
-              // a guitar query is genuinely empty). There is nothing for the user
-              // to clear, so conclude immediately rather than holding the full 30s
-              // human-scale grace (the "stuck on Swappa" report). The anti-bot
-              // detector now suppresses the Solve button for this case upstream, so
-              // this window normally won't even open — this is defense-in-depth for
-              // any resolve window that lands on a genuinely-empty page.
-              extractOutcome = 'matched 0 (no-results sentinel)';
-              logger.info(`[StealthBrowser] ${currentHost} shows a definitive "0 results" empty-state — concluding empty immediately (no captcha/consent, no grace wait)`);
-              await finishCleared(items, 'empty-noresults'); // items === []
-              return;
             } else {
-              // 0 items and no overlay we recognize — but the user may still be
-              // clearing one we don't (Swappa's cookie panel slipped past the
-              // consent selectors). Give a HUMAN-scale grace before concluding
-              // empty, instead of the headless ~2.4s cadence that raced the user.
-              if (emptySince == null) emptySince = Date.now();
-              const emptyMs = Date.now() - emptySince;
-              if (emptyMs >= RESOLVE_EMPTY_GRACE_MS) {
+              // 0 items (or a SITE_CHANGED throw, treated as 0 items).
+              //  - consent-wait: a cookie-consent wall is covering the page — the
+              //    0 is the wall (or content gated behind it), NOT a genuinely-
+              //    empty result, and the user is mid-accept. Restart the empty
+              //    grace so it only starts counting once the wall is gone, and
+              //    reset the hydration ceiling so post-dismiss rendering is
+              //    measured fresh.
+              //  - empty-noresults: no challenge, no consent wall, AND the page
+              //    shows the site's OWN definitive "0 results" empty-state (e.g.
+              //    Swappa "No products match this criteria"). Nothing for the user
+              //    to clear, so conclude immediately rather than holding the full
+              //    30s human-scale grace (the "stuck on Swappa" report).
+              //  - otherwise the user may still be clearing an overlay we don't
+              //    recognize, or the page is still hydrating: hold a HUMAN-scale
+              //    grace before concluding empty / latching selector drift.
+              if (!probe.consentVisible && emptySince == null) emptySince = Date.now();
+              const emptyMs = emptySince == null ? 0 : Date.now() - emptySince;
+              const emptyVerdict = classifyCaptchaResolveEmptyRead({
+                siteChanged: siteChangedThisRead,
+                consentVisible: probe.consentVisible,
+                noResultsSentinel: !probe.consentVisible && matchesNoResultsSentinel(probe.bodyText),
+                textLength: probe.textLength,
+                emptyMs,
+                siteChangedMs: substantialThrowSince == null ? 0 : Date.now() - substantialThrowSince,
+                graceMs: RESOLVE_EMPTY_GRACE_MS,
+              });
+              if (emptyVerdict === 'consent-wait') {
+                emptySince = null;
+                antiBotClearedAt = null;
+              } else if (emptyVerdict === 'empty-noresults') {
+                extractOutcome = 'matched 0 (no-results sentinel)';
+                logger.info(`[StealthBrowser] ${currentHost} shows a definitive "0 results" empty-state — concluding empty immediately (no captcha/consent, no grace wait)`);
+                await finishCleared(items, 'empty-noresults'); // items === []
+                return;
+              } else if (emptyVerdict === 'site-changed') {
+                // Guard against concurrent probe calls (multiple evaluates in-flight
+                // when the page finishes loading) both reaching this branch. The
+                // second one's warn/close would be a harmless duplicate, but it
+                // produces a confusing double WARN in the log.
+                //
+                // CRITICAL: this guard must NOT reuse `isTerminated`. That flag is
+                // cleanup()'s idempotency latch — setting it here makes the
+                // `disconnected` → cleanup() handler bail at its own `if
+                // (isTerminated) return`, so resolve() and finishAuthWindowDiagnostic()
+                // never fire. The Chrome window closes, but the awaiting
+                // resolve-job-source IPC never returns: the node's task stays
+                // registered and the source card spins on "resolving" forever
+                // (observed as "Glassdoor stuck" with a dangling Active IPC Task and
+                // an Auth Window stuck at result=open). Use a dedicated flag and let
+                // `close()` → cleanup() do the real teardown + resolve.
+                if (siteChangedHandled) return;
+                siteChangedHandled = true;
+                // The extractor is broken (not the captcha): a substantial body
+                // still yields SITE_CHANGED after the full grace. Closing and
+                // rescraping headless would just fail again. Surface as
+                // stale-selectors via the resolve payload so marketplace.js can
+                // emit the right warning to the source card (Retry, not Solve).
+                siteChangedError = lastSiteChangedThrow;
+                logger.warn(`[StealthBrowser] ${currentHost} still throws SITE_CHANGED after ${Math.round((Date.now() - substantialThrowSince) / 1000)}s on a ${probe.textLength}-char body — code fix needed, closing`);
+                if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
+                if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
+                await requestCaptchaBrowserClose();
+                return;
+              } else if (emptyVerdict === 'empty-grace') {
                 extractOutcome = 'matched 0';
                 logger.info(`[StealthBrowser] ${currentHost} found 0 items after ${Math.round(emptyMs / 1000)}s with no captcha/consent detected — accepting empty result`);
                 await finishCleared(items, 'empty-grace'); // items === []
                 return;
               }
-              // keep polling — give the user time to clear a cookie/login wall.
+              // keep-waiting — give the user time to clear a cookie/login wall,
+              // or the page time to hydrate past a tiny SITE_CHANGED body.
             }
           }
         } else if (shouldAutoCloseCaptchaResolveWithoutExtractor({
@@ -3242,7 +3310,9 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
               : (inlineExtractorJS
                   ? (lastExtractCount > 0
                       ? `no widgets; extractor at ${lastExtractCount} item(s), waiting for count to settle`
-                      : `no widgets; 0 items so far — holding the window open up to ${RESOLVE_EMPTY_GRACE_MS / 1000}s for the user to clear a cookie/login wall before concluding empty`)
+                      : lastSiteChangedThrow
+                        ? `no widgets; extractor throws SITE_CHANGED on textLen=${probe.textLength} — holding the window open (drift is latched only after ${RESOLVE_EMPTY_GRACE_MS / 1000}s on a body over ${READINESS.BODY_TEXT_GATE} chars)`
+                        : `no widgets; 0 items so far — holding the window open up to ${RESOLVE_EMPTY_GRACE_MS / 1000}s for the user to clear a cookie/login wall before concluding empty`)
                   : (everSawChallenge
                       ? `challenge was seen earlier; no widgets but textLen=${probe.textLength} below ${READINESS.BODY_TEXT_GATE} threshold`
                       : `no challenge observed in this window — leaving the page open for the user to inspect or close manually`));
@@ -3316,6 +3386,8 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
         sawChallenge: everSawChallenge,
         sawConsent: everSawConsent,
         textLen: lastTextLen,
+        // Only a latched drift verdict: an early hydration-time throw is not
+        // evidence of stale selectors, and the report reads this as exactly that.
         siteChangedError: siteChangedError || null,
         postprocessOutcome,
         postprocessMeta,

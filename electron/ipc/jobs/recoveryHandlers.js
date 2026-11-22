@@ -1,4 +1,4 @@
-import { ACTIVE_SOURCE_IDS, acceptProviderSearchResults, buildResolvedDescriptionWarning, consumeRecoveryBlockedUrl, filterJobsByDescriptionEvidence, getJobSourceResolveConfig, hasResolvedJobDescription, linkedInBrowserUnavailableWarning, mergeDescriptionRecoverySourceJobs, mergeResolvedDescriptionRecoveryCandidate, nextDescriptionRecoveryGuidance, overlayResolvedRecoveryRows, partitionResolvedDescriptionRecoveryCandidates, reconcileResolvedDescriptionRecovery, recoveryBlockedUrlsForSource, resolveSourceLabel, retiredListingKeys, snapshotDescriptionRecoveryJobs, sourceHealthWarningForRows } from './sourceRules.js';
+import { ACTIVE_SOURCE_IDS, acceptProviderSearchResults, buildResolvedDescriptionWarning, consumeRecoveryBlockedUrl, filterJobsByDescriptionEvidence, getJobSourceResolveConfig, hasResolvedJobDescription, indeedResumeWalkComplete, linkedInBrowserUnavailableWarning, listingReadProgress, mergeDescriptionRecoverySourceJobs, mergeResolvedDescriptionRecoveryCandidate, nextDescriptionRecoveryGuidance, overlayResolvedRecoveryRows, partitionResolvedDescriptionRecoveryCandidates, reconcileResolvedDescriptionRecovery, recoveryBlockedUrlsForSource, resolveSourceLabel, retiredListingKeys, snapshotDescriptionRecoveryJobs, sourceHealthWarningForRows } from './sourceRules.js';
 import { GOOGLE_APPLY_LINKS_RATE_LIMITED_CODE, buildPhysicalCardWalkPlan, enrichResolvedJobDescriptions, googleApplyLinksRateLimitedWarning, normalizeGoogleApplyOptions, preloadResolvedJobList, selectGoogleApplyUrl, withoutGlassdoorJobPageUrl } from '../browser/manualScraper.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
 import { RECENT_INDEED_LOGIN_MS, clearLinkedInCeiling, indeedLoginStamp, jobsTelemetry, linkedInSameIpRetryDecision, linkedinCeiling, rememberLinkedInCeiling } from './state.js';
@@ -24,6 +24,7 @@ import { normalizeJobCollectionLimits } from '../../../src/utils/jobCollectionLi
 import { normalizeJobsMarkup, repairJobsMojibake } from '../../../src/utils/textEncoding.js';
 import { openCaptchaResolveWindow, openNativeIndeedChallengeWindow } from '../browser/authWindows.js';
 import { readStatusCache, runPlatformLoginFlow } from '../accounts.js';
+import { readRunState } from '../jobRunStaging.js';
 import { reconcileGlassdoorSalaryFromDescription } from '../../../src/utils/jobSalaryReconciliation.js';
 import { sourceJobKey } from '../../../src/utils/jobIdentity.js';
 import { withSharedProfileLock } from '../sharedProfileLock.js';
@@ -1237,10 +1238,20 @@ export function registerRecoveryHandlers(ctx) {
     // diagnostics reflect the final card state, without reviving the completed
     // gather pipeline. The renderer event remains best-effort, matching the
     // LinkedIn Solve branch above.
+    //
+    // A pass whose window closed without clearing anything (`resolved:false`,
+    // no rows) is not a finished source. With no rows, neither warning above
+    // can form, so the old fallback stamped a clean `done`/count-0 beat — the
+    // card showed a green checkmark with 0 jobs while the hub, told the pass
+    // failed, restored its gate and kept offering "Solve all blocked sources".
+    // Such a pass sends no terminal beat (the card restores its own actionable
+    // warning) and, when it does carry a warning, is always an error.
+    const unresolvedPass = !readsEmployerPostings && result?.resolved === false && items.length === 0;
     const resolveStatus = resolveWarning?.severity === 'info'
       ? 'skipped'
-      : (resolveWarning?.severity === 'block' || resolveWarning?.severity === 'throttle')
+      : (resolveWarning?.severity === 'block' || resolveWarning?.severity === 'throttle' || unresolvedPass)
         ? 'error' : 'done';
+    const sendsTerminalBeat = !(unresolvedPass && !resolveWarning);
     const resolveProgress = {
       nodeId,
       sourceId,
@@ -1252,15 +1263,20 @@ export function registerRecoveryHandlers(ctx) {
       completed: 1,
       total: 1,
     };
-    recordJobSourceProgress(resolveProgress, { updatePipeline: false, expectedNodeId: nodeId });
-    if (!event.sender?.isDestroyed?.()) event.sender?.send?.('job-source-progress', resolveProgress);
+    if (sendsTerminalBeat) {
+      recordJobSourceProgress(resolveProgress, { updatePipeline: false, expectedNodeId: nodeId });
+      if (!event.sender?.isDestroyed?.()) event.sender?.send?.('job-source-progress', resolveProgress);
+    }
     // Multi-query sequential solve: if this source had more than one blocked query,
     // consume the exact checkpoint-owned queue first. That queue survives a
     // restart or another canvas claiming process-global diagnostics; telemetry
     // remains only a backward-compatible same-process fallback.
     let checkpointRemainingUrls = null;
     // An employer-posting read opened no blocked query, so the queue is untouched.
-    if (sourceRecoveryCheckpointOwned && !readsEmployerPostings) {
+    // Neither is it for an unresolved pass: nothing on that query was read, so
+    // it stays queued and the card's next Solve reopens it, as the card's own
+    // "remaining queries are still queued in the backend" contract says.
+    if (sourceRecoveryCheckpointOwned && !readsEmployerPostings && !unresolvedPass) {
       const queuedUrls = recoveryBlockedUrlsForSource(sourceRecoverySnapshot?.descriptionRecoveryState, sourceId);
       if (queuedUrls.length > 0) {
         const consumedQueue = consumeRecoveryBlockedUrl(
@@ -1297,11 +1313,15 @@ export function registerRecoveryHandlers(ctx) {
         }
       }
     }
-    const remaining = checkpointRemainingUrls ?? (canWriteTelemetry()
-      ? (jobsTelemetry.sourceBlockedUrls?.[sourceId] || []).filter(u => u !== url)
-      : []);
-    if (!readsEmployerPostings && canWriteTelemetry() && jobsTelemetry.sourceBlockedUrls) jobsTelemetry.sourceBlockedUrls[sourceId] = remaining;
-    const nextBlockedUrl = readsEmployerPostings ? null : remaining[0] || null;
+    const remaining = checkpointRemainingUrls ?? (unresolvedPass && sourceRecoveryCheckpointOwned
+      ? recoveryBlockedUrlsForSource(sourceRecoverySnapshot?.descriptionRecoveryState, sourceId)
+      : canWriteTelemetry()
+        ? (jobsTelemetry.sourceBlockedUrls?.[sourceId] || []).filter(u => unresolvedPass || u !== url)
+        : []);
+    if (!readsEmployerPostings && !unresolvedPass && canWriteTelemetry() && jobsTelemetry.sourceBlockedUrls) jobsTelemetry.sourceBlockedUrls[sourceId] = remaining;
+    // An unresolved pass ends the card's walk; the query it failed on is still
+    // first in line, so there is no "next" query to hand back.
+    const nextBlockedUrl = readsEmployerPostings || unresolvedPass ? null : remaining[0] || null;
     if (nextBlockedUrl) logger.info(`[Jobs][${nodeId}] Next blocked URL for ${sourceId}: ${nextBlockedUrl}`);
     recordGenericResolvePass(
       resolveWarning?.severity === 'block' || resolveWarning?.severity === 'throttle'
@@ -1334,6 +1354,8 @@ export function registerRecoveryHandlers(ctx) {
       // than a guess. Older renderers ignore it; no migration needed.
       remainingBlockedCount: readsEmployerPostings ? 0 : remaining.length,
       attemptedBlockedUrl: readsEmployerPostings ? null : url,
+      // Why a visible window closed unresolved, for the card's diagnostics.
+      ...(unresolvedPass && result?.siteChangedError ? { siteChangedError: String(result.siteChangedError).slice(0, 500) } : {}),
       ...(readsEmployerPostings ? { employerPostingRead: { ...(enrichmentMeta || {}) } } : {}),
       // Google recovery returns the complete score-safe source subset from its
       // checkpoint, not an incremental provider page. Replacement semantics
@@ -1787,8 +1809,39 @@ export function registerRecoveryHandlers(ctx) {
     };
     const resolved = items.length > 0 || !result?.warning;
     const warning = result?.warning || resumeHealthWarning;
+    // Every planned Indeed result list walked to its end, by the first scrape
+    // (manifest ledger) or by this resume (terminal pages it reached). This
+    // resume passes no onPageJobs, so its terminal pages never reach the
+    // ledger; the extractor reports them instead. Only then may a
+    // gate-clearing Solve move Indeed's scan date (applySourceSolveToPendingCoverage).
+    //
+    // A listing this resume returned without a readable description is sent
+    // back as unread (`unreadListings`). The hub keeps it on Indeed's not-done
+    // list, and once the date moves it stays owed: the next scan opens it if it
+    // turns up, whatever its date (fetchIndeedListingsBrowser's isOwed hook).
+    // A listing the board retired (closed, expired) is finished, not owed.
+    const retiredKeys = retiredListingKeys(descriptionEvidence.dropped, boardClosedRetirement(officialResolution));
+    const retiredKeySet = new Set(retiredKeys);
+    const unreadListings = listingReadProgress(
+      descriptionEvidence.dropped.filter(job => !retiredKeySet.has(sourceJobKey(job))),
+    ).unreadListings;
+    let walkComplete = false;
+    if (warning?.severity !== 'block' && warning?.severity !== 'throttle' && canvasFilePath && jobRunId) {
+      try {
+        const runState = await readRunState(canvasFilePath, Date.now(), { nodeId });
+        walkComplete = indeedResumeWalkComplete({
+          manifest: runState?.manifest,
+          jobRunId,
+          terminalQueryIndexes: result?.terminalQueryIndexes,
+          warning,
+        });
+      } catch (error) {
+        logger.warn(`[Jobs][${nodeId}] Indeed resume could not read its run ledger; walk treated as incomplete: ${error?.message || error}`);
+        walkComplete = false;
+      }
+    }
     const funnelDetail = `extracted=${extracted.length}, countryScopeDropped=${countryScope.dropped}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, descriptionEvidenceDropped=${descriptionEvidence.dropped.length}, languageDropped=${languageFilter.dropped.length}, new=${items.length}`;
-    logger.info(`[Jobs][${nodeId}] Indeed resume complete: ${funnelDetail}`);
+    logger.info(`[Jobs][${nodeId}] Indeed resume complete: ${funnelDetail}; walkComplete=${walkComplete}`);
 
     // Resume occurs after the original search already wrote its final source
     // summary. Advance that summary with the rows actually gathered now (and
@@ -1877,9 +1930,19 @@ export function registerRecoveryHandlers(ctx) {
       };
     }
     recordResumeAttempt(sourceId, attemptMode, resolved ? 'resolved' : 'blocked', warning?.code ? `warning: ${warning.code}; ${funnelDetail}` : funnelDetail);
+    // Same retirement the generic resolve path records: the gather stage
+    // stamped this source as still waiting on the user, and a resume that
+    // finished with no block left has answered it.
+    if (canWriteTelemetry()
+      && resolved
+      && warning?.severity !== 'block'
+      && warning?.severity !== 'throttle') {
+      recordSourceResolvedAfterGather(sourceId);
+    }
     return {
       resolved,
       items,
+      walkComplete,
       // The renderer owns the score-ready merge, but its visible collected
       // counter must retain this raw source-returned dimension. In the real
       // 307 + 90 resume case, only 8 rows are score-ready while all 90 were
@@ -1889,7 +1952,9 @@ export function registerRecoveryHandlers(ctx) {
       // Append semantics, same as the generic resolve return: a resumed page
       // contributes rows, so only an explicitly retired listing may retire one
       // the renderer already holds. See retiredListingKeys.
-      removedItemKeys: retiredListingKeys(descriptionEvidence.dropped, boardClosedRetirement(officialResolution)),
+      removedItemKeys: retiredKeys,
+      // Listings returned with no readable description: still owed by Indeed.
+      ...(unreadListings.length > 0 ? { unreadListings } : {}),
     };
   }, { beforeReply: checkpointContinuationBeforeReply('resume-job-source'), captureListingLiveness: true });
 

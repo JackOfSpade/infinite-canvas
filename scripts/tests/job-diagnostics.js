@@ -3854,6 +3854,53 @@ export default [
           }
         }
 
+        // Combine dedups same-listing rows even within ONE Search's run
+        // (live report: 419 run → 413 unique, 6 duplicates; 68 collapsed and
+        // 2 removed by research left 343 cards). Scaled here to the 16-job
+        // fixture: 16 → 14 unique (2 duplicates), 3 collapsed, 1 researched.
+        // Duplicates are credited only from a complete, consistent receipt.
+        telemetry.bucketing.input = 10;
+        const dedupBoardOutput = (receipt) => {
+          const output = generateMarkdown({
+            filterCode: 'FULL',
+            filterStats: {
+              hasJobNodes: true, currentNodeIds: [nodeId, 'deduped-board'],
+              jobBoardStates: [{
+                id: 'deduped-board', hubState: 'done', resultCount: 10, mergeUnique: 14,
+                locationPostingsCollapsed: 3, researchRemoved: 1, renderedCardCount: 10,
+                combineSignature: `${nodeId}=fingerprint`, connectedSourceHubIds: [nodeId],
+                ...receipt,
+              }],
+            },
+            nodes: [{ id: nodeId, type: 'jobhub', data: {} }], edges: [], drawings: [],
+            frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+          }).markdown;
+          return output.slice(output.indexOf('## Job Completion Assessment'), output.indexOf('## Job Search Pipeline'));
+        };
+        const dedupConsistent = dedupBoardOutput({ mergeIncoming: 16, mergeDuplicatesRemoved: 2 });
+        assert(dedupConsistent.includes('✅ **VERIFIED COMPLETE**')
+          && !dedupConsistent.includes('≠ current run')
+          && !dedupConsistent.includes('≠ taxonomy input'),
+        'a one-source Board whose consistent Combine receipt removed duplicates reconciles with the run');
+        assert(dedupConsistent.includes('after 2 duplicates removed by Combine and 3 location postings collapsed and 1 removed by Board research')
+          && dedupConsistent.includes('16 combined − 2 duplicates = 14 merged − 3 collapsed − 1 removed by research = 10 cards'),
+        'the Taxonomy and consumer lines name the duplicates Combine removed');
+        const dedupMissing = dedupBoardOutput({});
+        assert(dedupMissing.includes('⚠️ **INDETERMINATE**')
+          && dedupMissing.includes('results 10 + 3 location postings collapsed + 1 removed after research ≠ current run 16')
+          && !dedupMissing.includes('duplicates removed by Combine'),
+        'an older Board without the dedup receipt keeps the strict one-source gap');
+        const dedupPartial = dedupBoardOutput({ mergeDuplicatesRemoved: 2 });
+        assert(dedupPartial.includes('⚠️ **INDETERMINATE**') && dedupPartial.includes('≠ current run 16')
+          && !dedupPartial.includes('duplicates removed by Combine'),
+        'a receipt missing its input count credits no duplicates');
+        const dedupInconsistent = dedupBoardOutput({ mergeIncoming: 16, mergeDuplicatesRemoved: 3 });
+        assert(dedupInconsistent.includes('⚠️ **INDETERMINATE**')
+          && dedupInconsistent.includes('merge counts do not add up: 16 combined − 3 duplicates removed ≠ merged unique 14')
+          && dedupInconsistent.includes('results 10 + 3 location postings collapsed + 1 removed after research ≠ current run 16')
+          && !dedupInconsistent.includes('16 combined − 3 duplicates ='),
+        'an inconsistent dedup receipt is its own gap and credits nothing');
+
         telemetry.bucketing.input = originalTaxonomyInput;
 
         const boardSourceMismatch = generateMarkdown({
@@ -4223,8 +4270,18 @@ export default [
           && issueReporterSource.includes("combineSignature: typeof safeReportField(data, 'combineSignature')")
           && issueReporterSource.includes("mergeUnique: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'unique'))")
           && issueReporterSource.includes("locationPostingsCollapsed: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'locationVariantPostingsCollapsed'))")
+          && issueReporterSource.includes("mergeIncoming: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'totalIncoming'))")
+          && issueReporterSource.includes("mergeDuplicatesRemoved: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'duplicatesRemoved'))")
+          && issueReporterSource.includes("overrideRemoved: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'overrideRemoved'))")
           && issueReporterSource.includes('connectedSourceHubIds:'),
         'the renderer stamps bounded board count, merge, and source-correlation facts before JOBS/RECOVERY filters remove the node payload');
+        const bugReportSource = fs.readFileSync(path.resolve('electron/ipc/bugReport.js'), 'utf8');
+        const liveBoardStateSource = bugReportSource.slice(bugReportSource.indexOf('function liveJobBoardState('), bugReportSource.indexOf('function buildMediaPlayerStateMarkdown('));
+        assert(liveBoardStateSource.includes('mergeIncoming: node.data?.mergeStats?.totalIncoming')
+          && liveBoardStateSource.includes('mergeDuplicatesRemoved: node.data?.mergeStats?.duplicatesRemoved')
+          && liveBoardStateSource.includes('overrideRemoved: node.data?.mergeStats?.overrideRemoved')
+          && liveBoardStateSource.includes('carriedJobs: node.data?.mergeStats?.carriedJobs'),
+        'the main-process board state forwards the same Combine dedup receipt and carried rows as the renderer');
 
         // These process-global stage records do not carry run tokens.  If an
         // older populated run left them behind, the newer explicit-zero proof

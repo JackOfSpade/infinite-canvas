@@ -7968,7 +7968,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // user's chance to Skip it, so its date moves here (see the helper).
         // Without this the platform re-read the same days on every scan.
         const next = staged?.runId && staged.runId === resolvedRunId
-          ? applySourceSolveToPendingCoverage(staged, resolvedSourceId, resolvedKeys, sourceGateCleared)
+          ? applySourceSolveToPendingCoverage(staged, resolvedSourceId, resolvedKeys, sourceGateCleared, {
+            // An Indeed resume re-walks result lists itself; it says whether
+            // every planned list now ends (see indeedResumeWalkComplete).
+            walkComplete: e.detail?.walkComplete === true,
+            // Listings it returned unread stay on the not-done list (owed once
+            // the date moves), so moving the date loses none of them.
+            unreadListings: Array.isArray(e.detail?.unreadListings) ? e.detail.unreadListings : [],
+          })
           : staged;
         if (next !== staged && next.completedSourceIds !== staged.completedSourceIds) {
           EventLogger.log(`[JobSearch][${id}] Solve on ${resolvedSourceId} finished it: every result list was walked, so its date moves and any listing still unread stays owed`);

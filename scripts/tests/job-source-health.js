@@ -1,14 +1,16 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { assessSourceHealth, DESCRIPTIONS_NOT_FETCHED_CODE, descriptionsNotFetchedWarning, sourceHealthWarning } from '../../electron/ipc/jobSourceHealth.js';
 import { collectionScopeCaveatsFromSourceResults, describeSourceHealthFailures, normalizeCollectionScopeCaveats, sourceHealthCaveats } from '../../src/utils/jobCollectionScopeCaveats.js';
 import { AUTOMATIC_DESCRIPTION_SOLVE_WAIT_MS, automaticDescriptionSolveDue, EMPLOYER_POSTING_READ_SOURCE_IDS, employerPostingReadOnSkip, isJobSourceWarningGating } from '../../src/utils/jobSourceWarningPolicy.js';
 import { EMPLOYER_POSTING_READ_MAX_LISTINGS, readListingsFromEmployerPostings } from '../../electron/ipc/jobs/employerPostingRead.js';
-import { linkedInWalkComplete, listingReadProgress, listingsReadElsewhere } from '../../electron/ipc/jobs/sourceRules.js';
-import { applyResolvedListingsToPendingCoverage, applySourceSolveToPendingCoverage, buildSourceCoverageCommitPatch, sourcesWithoutDateProgress } from '../../src/utils/jobSearchSourceCoverage.js';
+import { indeedResumeWalkComplete, linkedInWalkComplete, listingReadProgress, listingsReadElsewhere } from '../../electron/ipc/jobs/sourceRules.js';
+import { applyResolvedListingsToPendingCoverage, applySourceSolveToPendingCoverage, buildSourceCoverageCommitPatch, sourceOwedKeysForRun, sourcesWithoutDateProgress } from '../../src/utils/jobSearchSourceCoverage.js';
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
+import { filterJobsByPostedSince } from '../../electron/ipc/jobDateFilter.js';
 import { appendWalkGuard, CHALLENGE_ESCALATE_MS, descriptionPanelPacing, DETAIL_BLOCK_MAX_TOTAL_REPROBES, detailBlockCooldownMs, panelWindowWaitMs, revealLowGrowthStop, selectManualSourcePageJobs, WALK_GUARD_MAX } from '../../electron/ipc/browser/manualScraper.js';
 import { linkedInEnrichedRow } from '../../electron/extractors/apiExtractors.js';
-import { indeedPanelDescription, indeedPanelShowsJob } from '../../electron/extractors/indeedBrowser.js';
+import { indeedPanelDescription, indeedPanelShowsJob, selectIndeedPageRows } from '../../electron/extractors/indeedBrowser.js';
 
 const TEXT = 'Build reliable services for regional teams. '.repeat(12);
 const row = (source, over = {}) => ({ source, title: 'Engineer', company: 'Acme', location: 'Toronto', posted: '1 day ago', salary: '$1', url: `https://${source}.test/1`, snippet: TEXT, ...over });
@@ -466,6 +468,145 @@ export default [
       // A walk that was cut short is never finished by a Solve.
       const cutShort = { ...pending, walkCompleteSourceIds: [] };
       assert.deepEqual(applySourceSolveToPendingCoverage(cutShort, 'linkedin', ['a', 'b'], true).completedSourceIds, []);
+    },
+  },
+  {
+    name: 'An Indeed resume that walked every planned list moves Indeed\'s date and keeps what it could not read as owed',
+    run() {
+      const unread = ['a', 'b', 'c'].map(key => ({ key, title: key.toUpperCase(), company: 'C', url: `https://indeed.test/${key}` }));
+      const start = { sourceCoverage: { indeed: { coverageStartedAt: 1000, completedAt: 2000, runId: 'r0' } } };
+      // The first scrape was challenged, so the search never recorded Indeed as walked.
+      const pending = { runId: 'r', collectionStartedAt: 5000, collectionCompletedAt: 6000, completedSourceIds: [],
+        participatingSourceIds: ['indeed'], walkCompleteSourceIds: [], locationKey: 'Canada', readContextKey: 'p',
+        sourceQueryProgress: { indeed: { finishedQueries: [], unreadListings: unread } } };
+      const stalled = sourcesWithoutDateProgress(start, pending, 'hub', ['indeed']);
+      assert.equal(stalled.length, 1);
+      assert.equal(stalled[0].walkComplete, false);
+
+      // Report 2026-11-22: the resume walked every list and cleared the gate,
+      // but 3 listings were still unread. Indeed's date moves and they stay owed.
+      const withUnread = applySourceSolveToPendingCoverage(pending, 'indeed', ['a'], true, { walkComplete: true });
+      assert.deepEqual(withUnread.walkCompleteSourceIds, ['indeed']);
+      assert.deepEqual(withUnread.completedSourceIds, ['indeed']);
+      assert.equal(sourcesWithoutDateProgress(start, withUnread, 'hub', ['indeed']).length, 0, 'the date moves');
+      const owedData = { ...start, ...buildSourceCoverageCommitPatch(start, withUnread, 'hub') };
+      assert.equal(owedData.sourceCoverage.indeed.coverageStartedAt, 5000);
+      assert.deepEqual(owedData.sourceOwedListings.indeed.listings.map(listing => listing.key), ['b', 'c'], 'unread listings stay owed');
+      assert.deepEqual(sourceOwedKeysForRun(owedData, ['indeed'], 'Canada'), { indeed: ['b', 'c'] }, 'the next Indeed scrape is handed them');
+
+      // Rows the resume itself returned unread (no readable description) join
+      // the not-done list and stay owed too, even when the first scrape saw none.
+      const clean = { ...pending, sourceQueryProgress: {} };
+      const dropped = [{ key: 'd', title: 'D', company: 'C', url: 'https://indeed.test/d' }];
+      const fromResume = applySourceSolveToPendingCoverage(clean, 'indeed', ['x'], true, { walkComplete: true, unreadListings: dropped });
+      assert.deepEqual(fromResume.sourceQueryProgress.indeed.unreadListings.map(listing => listing.key), ['d']);
+      const resumeData = { ...start, ...buildSourceCoverageCommitPatch(start, fromResume, 'hub') };
+      assert.deepEqual(resumeData.sourceOwedListings.indeed.listings.map(listing => listing.key), ['d']);
+      // Still gated: they are recorded unread, and the date stays.
+      const gatedWithRows = applySourceSolveToPendingCoverage(clean, 'indeed', [], false, { walkComplete: true, unreadListings: dropped });
+      assert.deepEqual(gatedWithRows.sourceQueryProgress.indeed.unreadListings.map(listing => listing.key), ['d']);
+      assert.deepEqual(gatedWithRows.completedSourceIds, []);
+      // A row this run already read is not added; malformed rows are ignored.
+      const alreadyRead = applySourceSolveToPendingCoverage({ ...clean, readKeysBySource: { indeed: ['d'] } }, 'indeed', [], false,
+        { unreadListings: [...dropped, { title: 'no key' }, null] });
+      assert.equal(alreadyRead.sourceQueryProgress?.indeed, undefined);
+
+      // The resume read the last unread listings: nothing is missing, so the date moves with nothing owed.
+      const moved = applySourceSolveToPendingCoverage(pending, 'indeed', ['a', 'b', 'c'], true, { walkComplete: true });
+      assert.deepEqual(moved.walkCompleteSourceIds, ['indeed']);
+      assert.deepEqual(moved.completedSourceIds, ['indeed']);
+      const data = { ...start, ...buildSourceCoverageCommitPatch(start, moved, 'hub') };
+      assert.equal(data.sourceCoverage.indeed.coverageStartedAt, 5000);
+      assert.equal(data.sourceOwedListings?.indeed, undefined);
+      // Recording it twice does not duplicate the id.
+      assert.deepEqual(applySourceSolveToPendingCoverage(moved, 'indeed', [], true, { walkComplete: true }).walkCompleteSourceIds, ['indeed']);
+
+      // Flag missing or false: the date stays stalled exactly as before.
+      for (const options of [undefined, {}, { walkComplete: false }, { walkComplete: 'true' }]) {
+        const kept = applySourceSolveToPendingCoverage(pending, 'indeed', [], true, options);
+        assert.deepEqual(kept.completedSourceIds, [], JSON.stringify(options));
+        assert.deepEqual(kept.walkCompleteSourceIds, [], JSON.stringify(options));
+        assert.equal(sourcesWithoutDateProgress(start, kept, 'hub', ['indeed']).length, 1, JSON.stringify(options));
+      }
+      // A walk proven complete but with the gate still up records nothing.
+      const stillGated = applySourceSolveToPendingCoverage(pending, 'indeed', [], false, { walkComplete: true });
+      assert.deepEqual(stillGated.walkCompleteSourceIds, []);
+      assert.deepEqual(stillGated.completedSourceIds, []);
+    },
+  },
+  {
+    name: 'Indeed opens an owed listing whatever its date, and the search hands Indeed its owed listings',
+    run() {
+      const windowStart = Date.now() - 2 * 86400000;
+      const card = (jk, posted) => ({ source: 'indeed', title: jk, url: `https://ca.indeed.com/viewjob?jk=${jk}`, posted });
+      const cards = [card('owed1', '20 days ago'), card('old1', '20 days ago'), card('new1', 'Today'), card('read1', 'Today')];
+      const owed = new Set([sourceJobKey(cards[0])]);
+      const page = selectIndeedPageRows(cards, windowStart, job => (job.title === 'read1' ? 'read' : false), job => owed.has(sourceJobKey(job)));
+      assert.deepEqual(page.open.map(job => job.title), ['owed1', 'new1'], 'the owed card survives the window; the old one does not');
+      assert.equal(page.readEarlier, 1);
+      assert.equal(cards[0].postedWindowExempt, true, 'the mark travels with the row');
+      assert.equal(filterJobsByPostedSince(page.open, windowStart).length, 2, 'the final window check keeps it too');
+      // No hook, or a hook that throws: nothing is exempt.
+      const fresh = () => [card('owed1', '20 days ago'), card('new1', 'Today')];
+      assert.deepEqual(selectIndeedPageRows(fresh(), windowStart).open.map(job => job.title), ['new1']);
+      assert.deepEqual(selectIndeedPageRows(fresh(), windowStart, null, () => { throw new Error('x'); }).open.map(job => job.title), ['new1']);
+
+      const search = fs.readFileSync('electron/ipc/jobs/searchHandlers.js', 'utf8');
+      assert.match(search, /fetchIndeedListingsBrowser\(indeedPlan\.queries,[\s\S]{0,800}alreadyReadBySource\.indeed \|\| null,[\s\S]{0,200}owedBySource\.indeed \|\| null\);/,
+        'runIndeed passes the owed hook');
+      assert.doesNotMatch(search, /readsCards && sourceId !== 'indeed'/, 'Indeed can be recorded as fully walked like any card-reading platform');
+      const extractor = fs.readFileSync('electron/extractors/indeedBrowser.js', 'utf8');
+      assert.match(extractor, /const alreadyRead = selectIndeedPageRows\(\s*newProviderCandidates\.map\(candidate => candidate\.job\),\s*collectionStartTimestamp,\s*isAlreadyRead,\s*isOwed,/);
+    },
+  },
+  {
+    name: 'An Indeed resume counts as fully walked only when every planned query is terminal in the ledger or in this resume',
+    run() {
+      const manifest = {
+        runId: 'r',
+        inputs: { queries: ['q0', 'q1', 'q2'] },
+        sources: { indeed: { status: 'blocked', queries: { '#0': { lastPage: 3, terminal: true }, '#1': { lastPage: 1 } } } },
+      };
+      const walked = options => indeedResumeWalkComplete({ manifest, jobRunId: 'r', warning: null, ...options });
+      assert.equal(walked({ terminalQueryIndexes: [1, 2] }), true, 'q0 from the first scrape, q1/q2 from the resume');
+      assert.equal(walked({ terminalQueryIndexes: [0, 1, 2] }), true);
+      assert.equal(walked({ terminalQueryIndexes: [] }), false, 'warning null with nothing terminal: a frame detach, nav error or budget stop');
+      assert.equal(walked({ terminalQueryIndexes: undefined }), false);
+      assert.equal(walked({ terminalQueryIndexes: [1] }), false, 'q2 never reached its end');
+      assert.equal(walked({ terminalQueryIndexes: [1, 2], warning: { code: 'scrape-failed', severity: 'block' } }), false);
+      assert.equal(walked({ terminalQueryIndexes: [1, 2], warning: { code: 'rate-limited', severity: 'throttle' } }), false);
+      assert.equal(walked({ terminalQueryIndexes: [1, 2], warning: { code: 'x', severity: 'info' } }), true);
+      // The full plan cannot be established: fail closed.
+      assert.equal(indeedResumeWalkComplete({ manifest, jobRunId: 'other', terminalQueryIndexes: [0, 1, 2] }), false, 'another run');
+      assert.equal(indeedResumeWalkComplete({ manifest, jobRunId: null, terminalQueryIndexes: [0, 1, 2] }), false);
+      assert.equal(indeedResumeWalkComplete({ manifest: null, jobRunId: 'r', terminalQueryIndexes: [0, 1, 2] }), false);
+      assert.equal(indeedResumeWalkComplete({ manifest: { ...manifest, inputs: {} }, jobRunId: 'r', terminalQueryIndexes: [0, 1, 2] }), false);
+      assert.equal(indeedResumeWalkComplete({ manifest: { ...manifest, inputs: { queries: [] } }, jobRunId: 'r', terminalQueryIndexes: [] }), false);
+    },
+  },
+  {
+    name: 'The Indeed resume reports walk completion and retires the gather-stage block, and the card and hub pass it on',
+    run() {
+      const handler = fs.readFileSync('electron/ipc/jobs/recoveryHandlers.js', 'utf8');
+      const resume = handler.slice(handler.indexOf("handleSafe('resume-job-source'"));
+      assert.ok(resume.length > 0);
+      assert.match(resume, /indeedResumeWalkComplete\(\{\s*manifest: runState\?\.manifest,\s*jobRunId,\s*terminalQueryIndexes: result\?\.terminalQueryIndexes,/);
+      assert.match(resume, /if \(canWriteTelemetry\(\)\s*&& resolved\s*&& warning\?\.severity !== 'block'\s*&& warning\?\.severity !== 'throttle'\) \{\s*recordSourceResolvedAfterGather\(sourceId\);/);
+      assert.match(resume, /return \{\s*resolved,\s*items,\s*walkComplete,/);
+      assert.doesNotMatch(resume, /descriptionEvidence\.dropped\.length === 0\) \{/,
+        'a resumed row with no readable description no longer keeps the walk incomplete: it is sent back unread and stays owed');
+      assert.match(resume, /const unreadListings = listingReadProgress\(\s*descriptionEvidence\.dropped\.filter\(job => !retiredKeySet\.has\(sourceJobKey\(job\)\)\),\s*\)\.unreadListings;/);
+      assert.match(resume, /\.\.\.\(unreadListings\.length > 0 \? \{ unreadListings \} : \{\}\)/);
+      const extractor = fs.readFileSync('electron/extractors/indeedBrowser.js', 'utf8');
+      const checkpoints = extractor.match(/onPageJobs\(\{[^}]*terminal: true \}\)/g) || [];
+      const recorded = extractor.match(/terminalQueryIndexes\.add\(queryIndexes\[qi\]\);\n\s*if \(onPageJobs\) await onPageJobs\(\{[^}]*terminal: true \}\)/g) || [];
+      assert.ok(checkpoints.length >= 4);
+      assert.equal(recorded.length, checkpoints.length, 'every terminal checkpoint records its query, with or without onPageJobs');
+      assert.match(extractor, /terminalQueryIndexes: \[\.\.\.terminalQueryIndexes\]/);
+      assert.match(fs.readFileSync('src/nodes/JobSourceCardNode.jsx', 'utf8'), /walkComplete: result\?\.walkComplete === true/);
+      assert.match(fs.readFileSync('src/nodes/JobSourceCardNode.jsx', 'utf8'), /unreadListings: Array\.isArray\(result\?\.unreadListings\) \? result\.unreadListings : \[\]/);
+      assert.match(fs.readFileSync('src/nodes/JobSearchNode.jsx', 'utf8'), /walkComplete: e\.detail\?\.walkComplete === true,[\s\S]{0,300}unreadListings: Array\.isArray\(e\.detail\?\.unreadListings\) \? e\.detail\.unreadListings : \[\]/);
+      assert.match(fs.readFileSync('src/nodes/JobSearchNode.jsx', 'utf8'), /applySourceSolveToPendingCoverage\(staged, resolvedSourceId, resolvedKeys, sourceGateCleared, \{[\s\S]{0,200}walkComplete: e\.detail\?\.walkComplete === true/);
     },
   },
   {

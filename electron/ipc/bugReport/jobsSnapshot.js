@@ -2065,6 +2065,18 @@ function boardNonnegativeCount(value) {
     : null;
 }
 
+// Combine's same-listing dedup, credited only when its receipt is complete and
+// self-consistent (rows in − duplicates removed = merged unique). Anything
+// else credits nothing, so older or damaged receipts keep the strict check.
+function boardCombineDuplicates(board) {
+  const incoming = board?.mergeIncoming;
+  const removed = board?.mergeDuplicatesRemoved;
+  const unique = board?.mergeUnique;
+  const known = incoming != null && removed != null && unique != null;
+  const consistent = known && incoming - removed === unique;
+  return { known, consistent, incoming, removed: consistent ? removed : 0 };
+}
+
 function signedCount(value) {
   if (value == null || value === '') return null;
   const count = Number(value);
@@ -3330,6 +3342,11 @@ export function buildJobCompletionAssessment(
       hubState: receiptIdentifier(boardDiagnosticValue(board, 'hubState'), 'empty'),
       resultCount: boardNonnegativeCount(boardDiagnosticValue(board, 'resultCount')),
       mergeUnique: boardNonnegativeCount(boardDiagnosticValue(board, 'mergeUnique')),
+      // Combine's dedup receipt. Null when absent (older Boards): the
+      // one-source check then cannot credit any duplicates to Combine.
+      mergeIncoming: boardNonnegativeCount(boardDiagnosticValue(board, 'mergeIncoming')),
+      mergeDuplicatesRemoved: boardNonnegativeCount(boardDiagnosticValue(board, 'mergeDuplicatesRemoved')),
+      overrideRemoved: boardNonnegativeCount(boardDiagnosticValue(board, 'overrideRemoved')),
       locationPostingsCollapsed: boardNonnegativeCount(boardDiagnosticValue(board, 'locationPostingsCollapsed') ?? 0),
       researchRemoved: boardNonnegativeCount(boardDiagnosticValue(board, 'researchRemoved') ?? 0) ?? 0,
       // Earlier rows a Board re-scan kept: in the Board's union, not in the run.
@@ -3655,7 +3672,8 @@ export function buildJobCompletionAssessment(
     !board.stale && board.resultCount === taxonomyInput
     && (board.combinedSourceHubIds.length > 1
       || (board.combinedSourceHubIds.length === 1
-        && (board.locationPostingsCollapsed > 0 || board.researchRemoved > 0 || board.carriedJobs > 0)
+        && (board.locationPostingsCollapsed > 0 || board.researchRemoved > 0 || board.carriedJobs > 0
+          || boardCombineDuplicates(board).removed > 0)
         && board.mergeUnique - board.locationPostingsCollapsed - board.researchRemoved === board.resultCount))
   )) || null;
 
@@ -3791,12 +3809,21 @@ export function buildJobCompletionAssessment(
     } else if (board.resultCount !== board.mergeUnique - (collapsed ?? 0) - board.researchRemoved) {
       gaps.push(`Job Board \`${boardLabel(board)}\` results ${board.resultCount} ≠ merged unique ${board.mergeUnique}${collapsed ? ` − ${collapsed} location postings collapsed` : ''}${board.researchRemoved ? ` − ${board.researchRemoved} removed by research` : ''}`);
     }
-    // A one-source board has no legitimate cross-module dedup adjustment, so
-    // its pre-consolidation count must equal this run's score-ready result.
-    // Multi-source boards validate their renderer-side merge receipt above.
-    if (board.combinedSourceHubIds.length === 1 && boardExpectedCount != null
-      && board.resultCount + (collapsed ?? 0) + board.researchRemoved !== boardExpectedCount + board.carriedJobs) {
-      gaps.push(`Job Board \`${boardLabel(board)}\` results ${board.resultCount}${collapsed ? ` + ${collapsed} location postings collapsed` : ''}${board.researchRemoved ? ` + ${board.researchRemoved} removed after research` : ''} ≠ current run ${boardExpectedCount}${board.carriedJobs ? ` + ${board.carriedJobs} kept from earlier` : ''}`);
+    // A one-source board's Combine can still remove same-listing duplicates
+    // within that one run (unionScoredJobs dedups by listing key). Those are
+    // credited only from a complete, self-consistent merge receipt; a receipt
+    // that does not add up is its own gap, and an older Board without one
+    // keeps the strict comparison. Multi-source boards validate their
+    // renderer-side merge receipt above.
+    if (board.combinedSourceHubIds.length === 1 && boardExpectedCount != null) {
+      const combineDuplicates = boardCombineDuplicates(board);
+      if (combineDuplicates.known && !combineDuplicates.consistent) {
+        gaps.push(`Job Board \`${boardLabel(board)}\` merge counts do not add up: ${board.mergeIncoming} combined − ${board.mergeDuplicatesRemoved} duplicates removed ≠ merged unique ${board.mergeUnique}`);
+      }
+      const duplicatesRemoved = combineDuplicates.removed;
+      if (board.resultCount + (collapsed ?? 0) + board.researchRemoved + duplicatesRemoved !== boardExpectedCount + board.carriedJobs) {
+        gaps.push(`Job Board \`${boardLabel(board)}\` results ${board.resultCount}${collapsed ? ` + ${collapsed} location postings collapsed` : ''}${board.researchRemoved ? ` + ${board.researchRemoved} removed after research` : ''}${duplicatesRemoved ? ` + ${duplicatesRemoved} duplicates removed by Combine` : ''} ≠ current run ${boardExpectedCount}${board.carriedJobs ? ` + ${board.carriedJobs} kept from earlier` : ''}${board.overrideRemoved > 0 ? ` (the Board's own preferences removed ${board.overrideRemoved} job(s) before Combine)` : ''}`);
+      }
     }
   }
 
@@ -3915,7 +3942,7 @@ export function buildJobCompletionAssessment(
     ? telemetryAmbiguity
       ? `- Taxonomy: not attributable — ${telemetryAmbiguity}.`
       : '- Taxonomy: not retained in this process.'
-    : `- Taxonomy: input ${taxonomyInput ?? '?'} · missing ${taxonomyMissing ?? '?'} · duplicated ${taxonomyDuplicated ?? '?'}${taxonomy.error ? ' · ⚠️ error recorded' : ''}${unionTaxonomyBoard ? ` · input is Job Board \`${boardLabel(unionTaxonomyBoard)}\`'s union across ${unionTaxonomyBoard.combinedSourceHubIds.length} source hub(s), ${unionTaxonomyBoard.locationPostingsCollapsed || unionTaxonomyBoard.researchRemoved ? `after ${[unionTaxonomyBoard.locationPostingsCollapsed ? `${unionTaxonomyBoard.locationPostingsCollapsed} location postings collapsed` : '', unionTaxonomyBoard.researchRemoved ? `${unionTaxonomyBoard.researchRemoved} removed by Board research` : ''].filter(Boolean).join(' and ')}; this hub scored ${scored ?? '?'} job(s)` : `so it can differ from this hub's ${scored ?? '?'} scored job(s) by design`}` : ''}.`;
+    : `- Taxonomy: input ${taxonomyInput ?? '?'} · missing ${taxonomyMissing ?? '?'} · duplicated ${taxonomyDuplicated ?? '?'}${taxonomy.error ? ' · ⚠️ error recorded' : ''}${unionTaxonomyBoard ? ` · input is Job Board \`${boardLabel(unionTaxonomyBoard)}\`'s union across ${unionTaxonomyBoard.combinedSourceHubIds.length} source hub(s), ${unionTaxonomyBoard.locationPostingsCollapsed || unionTaxonomyBoard.researchRemoved || boardCombineDuplicates(unionTaxonomyBoard).removed ? `after ${[boardCombineDuplicates(unionTaxonomyBoard).removed ? `${boardCombineDuplicates(unionTaxonomyBoard).removed} duplicates removed by Combine` : '', unionTaxonomyBoard.locationPostingsCollapsed ? `${unionTaxonomyBoard.locationPostingsCollapsed} location postings collapsed` : '', unionTaxonomyBoard.researchRemoved ? `${unionTaxonomyBoard.researchRemoved} removed by Board research` : ''].filter(Boolean).join(' and ')}; this hub scored ${scored ?? '?'} job(s)` : `so it can differ from this hub's ${scored ?? '?'} scored job(s) by design`}` : ''}.`;
   const receiptLine = receiptState.liveOwnerWithoutTerminalReceipt
     ? '- Terminal receipt: not recorded for the selected live run — it is incomplete until a terminal receipt is written.'
     : !receiptState.exists
@@ -3974,7 +4001,7 @@ export function buildJobCompletionAssessment(
         + (board.staleReason ? ` (${board.staleReason})` : '')).join('; ')}${deliberatelyClearedBoards.length ? ` · deliberately cleared: ${deliberatelyClearedBoards.map(board => `\`${boardLabel(board)}\` (prior ${board.clearProvenance.priorResultCount ?? '?'}; result cards no longer present)`).join('; ')}` : ''}${totalBoards > boards.length ? ` · ${totalBoards - boards.length} additional board(s) omitted from this bounded summary` : ''}.`
       : relevantBoards.length === 0
         ? `- Job Board consumers: ${totalBoards} recorded · none correlate to this source run.`
-        : `- Job Board consumers: ${relevantBoards.length}/${totalBoards} correlate to this source run · no stale board state${deliberatelyClearedBoards.length ? ` · deliberately cleared: ${deliberatelyClearedBoards.map(board => `\`${boardLabel(board)}\` (prior ${board.clearProvenance.priorResultCount ?? '?'}; result cards no longer present)`).join('; ')}` : ''}${relevantBoards.some(board => board.locationPostingsCollapsed > 0) ? ` · location consolidation: ${relevantBoards.filter(board => board.locationPostingsCollapsed > 0).map(board => `${board.mergeUnique} merged − ${board.locationPostingsCollapsed} collapsed${board.researchRemoved ? ` − ${board.researchRemoved} removed by research` : ''} = ${board.resultCount} cards`).join('; ')}` : ''}${relevantBoards.some(board => board.researchRemoved > 0 && !(board.locationPostingsCollapsed > 0)) ? ` · Board research: ${relevantBoards.filter(board => board.researchRemoved > 0 && !(board.locationPostingsCollapsed > 0)).map(board => `${board.mergeUnique} merged − ${board.researchRemoved} removed by research = ${board.resultCount} cards`).join('; ')}` : ''}${renderedCardFacts.length ? ` · rendered cards: ${renderedCardFacts.join('; ')}` : ''}.`) + boardStateBoundedSuffix;
+        : `- Job Board consumers: ${relevantBoards.length}/${totalBoards} correlate to this source run · no stale board state${deliberatelyClearedBoards.length ? ` · deliberately cleared: ${deliberatelyClearedBoards.map(board => `\`${boardLabel(board)}\` (prior ${board.clearProvenance.priorResultCount ?? '?'}; result cards no longer present)`).join('; ')}` : ''}${relevantBoards.some(board => board.locationPostingsCollapsed > 0) ? ` · location consolidation: ${relevantBoards.filter(board => board.locationPostingsCollapsed > 0).map(board => `${boardCombineDuplicates(board).removed ? `${board.mergeIncoming} combined − ${board.mergeDuplicatesRemoved} duplicates = ` : ''}${board.mergeUnique} merged − ${board.locationPostingsCollapsed} collapsed${board.researchRemoved ? ` − ${board.researchRemoved} removed by research` : ''} = ${board.resultCount} cards`).join('; ')}` : ''}${relevantBoards.some(board => board.researchRemoved > 0 && !(board.locationPostingsCollapsed > 0)) ? ` · Board research: ${relevantBoards.filter(board => board.researchRemoved > 0 && !(board.locationPostingsCollapsed > 0)).map(board => `${boardCombineDuplicates(board).removed ? `${board.mergeIncoming} combined − ${board.mergeDuplicatesRemoved} duplicates = ` : ''}${board.mergeUnique} merged − ${board.researchRemoved} removed by research = ${board.resultCount} cards`).join('; ')}` : ''}${renderedCardFacts.length ? ` · rendered cards: ${renderedCardFacts.join('; ')}` : ''}.`) + boardStateBoundedSuffix;
   const googleSource = telemetry?.search?.bySource?.google || receipt?.sources?.google || null;
   const googleReveal = googleSource ? revealCoverageFact(googleSource) : null;
   const googleCoverage = !googleSource

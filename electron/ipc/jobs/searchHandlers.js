@@ -1226,7 +1226,9 @@ export function registerSearchHandlers(ctx) {
       try {
         const r = await fetchIndeedListingsBrowser(indeedPlan.queries, combinedSignal, ageDaysFor('indeed'), null, (detail) => {
           emitProgress({ nodeId, sourceId: 'indeed', status: 'searching', count: 0, detail, completed: getCompletedQueriesFromDetail(detail, queryTotal), total: queryTotal });
-        }, indeedPlan.startPages, stageOnPage, location, normalizedCollectionLimits, indeedPlan.pageBudgets, true, activeIndeedIndexes, postedSinceFor('indeed'), alreadyReadBySource.indeed || null);
+        }, indeedPlan.startPages, stageOnPage, location, normalizedCollectionLimits, indeedPlan.pageBudgets, true, activeIndeedIndexes, postedSinceFor('indeed'), alreadyReadBySource.indeed || null,
+          // Listings still owed from before Indeed's date moved are opened whatever their date.
+          owedBySource.indeed || null);
         await afterSearchProviderResult('indeed', r);
         await assertSearchCurrent();
         // Observation of the session the scrape actually ran with — survives
@@ -3249,7 +3251,7 @@ export function registerSearchHandlers(ctx) {
                 if (linkedInWalkComplete(queries, linkedIn?.finishedQueries, carriedQueriesBySource.linkedin)) {
                   sourceWalkCompleteIds.push(sourceId);
                 }
-              } else if (readsCards && sourceId !== 'indeed') {
+              } else if (readsCards) {
                 const ledger = finalState.manifest.sources?.[sourceId]?.queries || {};
                 const walked = queries.every((_query, index) => ledger[`#${index}`]?.terminal === true
                   || carriedQueryPlans?.[sourceId]?.[index]?.terminal === true);

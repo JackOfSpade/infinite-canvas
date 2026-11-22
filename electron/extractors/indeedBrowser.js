@@ -914,6 +914,24 @@ export async function runIndeedReEnrichPass(page, { jobs, stage, label, waitUnti
 }
 
 /** Exclusive 0-based page end for an Indeed query, exported for resume tests. */
+/**
+ * The rows of one Indeed result page that this run opens. A card still owed
+ * from before Indeed's date moved (`isOwed`) is marked `postedWindowExempt` and
+ * kept whatever its date, here and in every later window check, so it is read
+ * again when it turns up. Every other card must be inside the posted window.
+ * Then cards an earlier run already read or showed are left out. A lookup that
+ * throws treats the card as not owed.
+ */
+export function selectIndeedPageRows(rows, collectionStartTimestamp, isAlreadyRead = null, isOwed = null) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (typeof isOwed === 'function') {
+    for (const job of list) {
+      try { if (isOwed(job) === true) job.postedWindowExempt = true; } catch { /* treated as not owed */ }
+    }
+  }
+  return partitionAlreadyReadJobs(filterJobsByPostedSince(list, collectionStartTimestamp), isAlreadyRead);
+}
+
 export function indeedQueryPageEnd(startPage, pageBudget) {
   // `pageBudget` is the absolute lifetime ceiling for this generated query,
   // not a fresh allowance on every crash resume. Returning the greater value
@@ -957,9 +975,11 @@ export function resolveIndeedPageBudgets(queryCount, collectionLimits, resumePag
  * @param {boolean} [isResume] — true when continuing an interrupted run
  * @param {number[]|null} [originalQueryIndexes] — query positions in the original run
  * @param {number|null} [collectionStartTimestamp] — posted-since cutoff for this run
+ * @param {Function|null} [isAlreadyRead] — 'read'/'shown' for a card an earlier run already handled
+ * @param {Function|null} [isOwed] — true for a card still owed from before Indeed's date moved
  * @returns {Promise<{ items: object[], warning: object|null, gathered: number }>}
  */
-export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0, onPageJobs = null, location = '', collectionLimits = null, resumePageBudgets = null, isResume = false, originalQueryIndexes = null, collectionStartTimestamp = null, isAlreadyRead = null) {
+export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0, onPageJobs = null, location = '', collectionLimits = null, resumePageBudgets = null, isResume = false, originalQueryIndexes = null, collectionStartTimestamp = null, isAlreadyRead = null, isOwed = null) {
   if (isBackgroundE2E()) {
     const disabled = backgroundE2EDisabledError('Indeed browser extraction');
     return {
@@ -1224,6 +1244,13 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     // budget), one entry per stop. jobs.js merges them per source so a run
     // stopped by a guard is never read as an exhausted one.
     const walkGuards = [];
+    // Query indexes whose walk reached a terminal page this run (empty page,
+    // stop decision, short/last page, page budget) — the same points that
+    // checkpoint terminal:true. Recorded even when onPageJobs is null (the
+    // native-challenge resume passes none) so a resume can prove its walk
+    // finished. Non-terminal stops (frame detach, nav/content errors,
+    // retrieval budget, abort) never add one.
+    const terminalQueryIndexes = new Set();
     // A bounded per-query retrieval budget protects explicit small requests
     // from multiplying into a large crawl. It is deliberately distinct from
     // the user-visible platform cap, which is applied centrally only when the
@@ -1412,10 +1439,12 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         // A listing an earlier run already read, or already showed, is not
         // opened again and is left out of this run's rows (same rule as the
         // other browser platforms).
-        const alreadyRead = partitionAlreadyReadJobs(filterJobsByPostedSince(
+        const alreadyRead = selectIndeedPageRows(
           newProviderCandidates.map(candidate => candidate.job),
           collectionStartTimestamp,
-        ), isAlreadyRead);
+          isAlreadyRead,
+          isOwed,
+        );
         alreadyReadSkipped += alreadyRead.readEarlier + alreadyRead.shownEarlier;
         readEarlierSkipped += alreadyRead.readEarlier;
         const pageJobs = alreadyRead.open.slice(0, Math.max(0, resultCap - queryCollected));
@@ -1451,6 +1480,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         // this query. Checkpoint it before breaking so a crash cannot restart
         // this already-observed page forever.
         if (rawPageJobs.length === 0) {
+          terminalQueryIndexes.add(queryIndexes[qi]);
           if (onPageJobs) await onPageJobs({ sourceId: 'indeed', query: q, queryIndex: queryIndexes[qi], page: p + 1, jobs: [], terminal: true });
           break;
         }
@@ -1565,11 +1595,13 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           } else {
             logger.info(`[Indeed/Browser] q="${q}" p=${p + 1}: ${stopDecision.detail || stopDecision.reason}`);
           }
+          terminalQueryIndexes.add(queryIndexes[qi]);
           if (onPageJobs) await onPageJobs({ sourceId: 'indeed', query: q, queryIndex: queryIndexes[qi], page: p + 1, jobs: [], terminal: true });
           break;
         }
 
         if (rawPageJobs.length < 10 || hasNextPage === false) {
+          terminalQueryIndexes.add(queryIndexes[qi]);
           if (onPageJobs) await onPageJobs({ sourceId: 'indeed', query: q, queryIndex: queryIndexes[qi], page: p + 1, jobs: [], terminal: true });
           break;
         }
@@ -1590,6 +1622,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
             });
             logger.warn(`[Indeed/Browser] q="${q}" ${guard.detail}`);
           } else explicitPageBudgetReached = true;
+          terminalQueryIndexes.add(queryIndexes[qi]);
           if (onPageJobs) await onPageJobs({ sourceId: 'indeed', query: q, queryIndex: queryIndexes[qi], page: p + 1, jobs: [], terminal: true });
           break;
         }
@@ -1760,6 +1793,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       // jobs.js merges them per source; without them a guard-stopped run reads
       // exactly like an exhausted one.
       walkGuards,
+      terminalQueryIndexes: [...terminalQueryIndexes],
       cap: autoPageBudgetReached
           ? { type: 'auto-pages-per-platform', limit: pageBudgets.reduce((sum, value) => sum + value, 0) }
           : explicitPageBudgetReached

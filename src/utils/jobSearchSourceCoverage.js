@@ -538,17 +538,61 @@ export function applySourceSkipToPendingCoverage(pending, sourceId) {
 }
 
 /**
- * Record a finished Solve pass on the staged result of the same run. What it
- * read counts as read. When the pass also leaves the platform with no block to
- * act on (`gateCleared`), the run carries on by itself and the user can no
- * longer Skip, so the platform is treated as Skip treats it: with every result
- * list walked its date moves, and listings that still could not be read (no
- * link, a page that will not load) stay owed. Returns the same object when
- * nothing changes.
+ * Add listings a Solve pass returned unread to the platform's not-done list on
+ * the staged result. A listing already read in this run is not added. Returns
+ * the same object when nothing changes.
  */
-export function applySourceSolveToPendingCoverage(pending, sourceId, resolvedKeys, gateCleared) {
-  const read = applyResolvedListingsToPendingCoverage(pending, sourceId, resolvedKeys);
-  return gateCleared === true ? applySourceSkipToPendingCoverage(read, sourceId) : read;
+function addUnreadListingsToPendingCoverage(pending, sourceId, listings) {
+  const incoming = unreadListingList(listings);
+  if (!isPlainRecord(pending) || !isSafeSourceId(sourceId) || incoming.length === 0) return pending;
+  const read = new Set(isPlainRecord(pending.readKeysBySource) && Array.isArray(pending.readKeysBySource[sourceId])
+    ? pending.readKeysBySource[sourceId]
+    : []);
+  const progressBefore = isPlainRecord(pending.sourceQueryProgress) ? pending.sourceQueryProgress : {};
+  const entry = isPlainRecord(progressBefore[sourceId]) ? progressBefore[sourceId] : null;
+  const before = unreadListingList(entry?.unreadListings);
+  const known = new Set(before.map(listing => listing.key));
+  const added = incoming.filter(listing => !read.has(listing.key) && !known.has(listing.key));
+  if (added.length === 0) return pending;
+  return {
+    ...pending,
+    sourceQueryProgress: {
+      ...progressBefore,
+      [sourceId]: {
+        ...(entry || {}),
+        finishedQueries: Array.isArray(entry?.finishedQueries) ? entry.finishedQueries : [],
+        unreadListings: unreadListingList([...before, ...added]),
+      },
+    },
+  };
+}
+
+/**
+ * Record a finished Solve pass on the staged result of the same run. What it
+ * read counts as read, and listings it returned with no readable description
+ * (`unreadListings`) join the platform's not-done list. When the pass also
+ * leaves the platform with no block to act on (`gateCleared`), the run carries
+ * on by itself and the user can no longer Skip, so the platform is treated as
+ * Skip treats it: with every result list walked its date moves, and listings
+ * that still could not be read (no link, a page that will not load) stay owed.
+ * `walkComplete: true` says the pass itself walked every planned result list to
+ * its end (an Indeed resume), so the platform counts as fully walked.
+ * Returns the same object when nothing changes.
+ */
+export function applySourceSolveToPendingCoverage(pending, sourceId, resolvedKeys, gateCleared, { walkComplete, unreadListings } = {}) {
+  const read = addUnreadListingsToPendingCoverage(
+    applyResolvedListingsToPendingCoverage(pending, sourceId, resolvedKeys),
+    sourceId,
+    unreadListings,
+  );
+  if (gateCleared !== true) return read;
+  if (walkComplete === true && isPlainRecord(read) && isSafeSourceId(sourceId)) {
+    const walked = uniqueSourceIds(read.walkCompleteSourceIds);
+    if (!walked.includes(sourceId)) {
+      return applySourceSkipToPendingCoverage({ ...read, walkCompleteSourceIds: [...walked, sourceId] }, sourceId);
+    }
+  }
+  return applySourceSkipToPendingCoverage(read, sourceId);
 }
 
 /**

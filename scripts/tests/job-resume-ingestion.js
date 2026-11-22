@@ -2576,7 +2576,8 @@ export default [
         && resume.includes('recordJobSourceProgress(resumeProgress, { updatePipeline: false, expectedNodeId: nodeId })')
         && resume.includes('const retryProgress = {\n        nodeId,\n        sourceId,\n        jobRunId,')
         && resume.includes('const resumeProgress = {\n      nodeId,\n      sourceId,\n      jobRunId,')
-        && resume.includes('removedItemKeys: retiredListingKeys(descriptionEvidence.dropped, boardClosedRetirement(officialResolution))'),
+        && resume.includes('const retiredKeys = retiredListingKeys(descriptionEvidence.dropped, boardClosedRetirement(officialResolution));')
+        && resume.includes('removedItemKeys: retiredKeys,'),
       'native Indeed resume records the complete funnel, history samples, evidence drops, and run-correlated terminal source events without reactivating the gather pipeline');
       const postSearchStart = jobSearchNode.indexOf('const handlePostSearchResult');
       const postSearchEnd = jobSearchNode.indexOf('if (foundJobs.length === 0)', postSearchStart);
