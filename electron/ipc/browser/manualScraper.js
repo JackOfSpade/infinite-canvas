@@ -28,6 +28,7 @@ import {
   setActivitySink,
   withInFlight,
   resetManualScraperTelemetry,
+  isIgnorableManualBrowserTelemetry,
 } from './manualScraper/scrapeTelemetry.js';
 export {
   resetScrapePace,
@@ -69,6 +70,7 @@ import {
   SOURCE_LABELS,
   sleepUnlessAborted,
   browserClosedWarning,
+  pageUnreadableWarning,
   resolveManualSourceStopReason,
   manualPageCapForTasks,
   selectManualSourcePageJobs,
@@ -95,6 +97,7 @@ export {
   detailBlockCooldownMs,
   DETAIL_BLOCK_MAX_TOTAL_REPROBES,
   browserClosedWarning,
+  pageUnreadableWarning,
   resolveManualSourceStopReason,
   manualPageCapForTasks,
   selectManualSourcePageJobs,
@@ -168,7 +171,10 @@ import {
   safePageUrl,
   launchScrapePlatformBrowser,
   scrapeFingerprintPolicy,
+  applyStealthMask,
+  OVERLAY_SCRIPT,
 } from './manualScraper/scrapeBrowser.js';
+import { createBackgroundScrapePage } from './backgroundScrapeBrowser.js';
 import {
   waitForReady,
 } from './manualScraper/pageReadiness.js';
@@ -270,6 +276,7 @@ import {
   closeStealthBrowser, getUserDataDir, findChromePath,
 } from '../stealthBrowser.js';
 import { logger } from '../../logger.js';
+import { partitionByPageTitleScreen } from '../jobs/pageTitleScreen.js';
 import { GOOGLE_POSTED_TEXT_PATTERN } from './googlePostedDate.js';
 import { isProfileLockCollision } from '../browserLaunchTelemetry.js';
 import { humanDelay } from '../../utils/humanDelay.js';
@@ -442,6 +449,100 @@ export async function enrichResolvedJobDescriptions(page, jobs, sourceId, signal
 
 
 
+
+// ── Detached list page recovery ──────────────────────────────────────────────
+/**
+ * Open a second scrape tab in the SAME platform browser, set up exactly as
+ * launchScrapePlatformBrowser sets up its first page: same background-page
+ * creation, the stealth mask unless this source runs plain, the console /
+ * network-failure telemetry, the main-frame status feed into the shared
+ * `navStatusRef`, and the overlay on every new document. Used only when the
+ * walk's page object can no longer be read (Puppeteer "Attempted to use
+ * detached Frame"). Keep in step with launchScrapePlatformBrowser.
+ */
+async function openReplacementScrapePage(platform) {
+  const { browser, navStatusRef } = platform;
+  const replacement = await createBackgroundScrapePage(browser, { width: 1280, height: 900 });
+  try {
+    if (platform.fingerprint?.plain !== true) await applyStealthMask(replacement);
+    replacement.on('console', (msg) => {
+      const type = msg.type();
+      if (type !== 'error' && type !== 'warning') return;
+      const loc = msg.location();
+      if (isIgnorableManualBrowserTelemetry({ url: loc?.url || '', text: msg.text() })) return;
+      manualScraperTelemetry.consoleLogs.push({
+        ts: Date.now(),
+        type,
+        text: msg.text().slice(0, 300),
+        url: (loc?.url || '').slice(0, 120),
+        line: loc?.lineNumber ?? null,
+      });
+      if (manualScraperTelemetry.consoleLogs.length > 60) manualScraperTelemetry.consoleLogs.shift();
+    });
+    replacement.on('requestfailed', (req) => {
+      const url = req.url();
+      if (isIgnorableManualBrowserTelemetry({ url })) return;
+      manualScraperTelemetry.networkErrors.push({
+        ts: Date.now(),
+        method: req.method(),
+        url: url.slice(0, 200),
+        status: null,
+        errorText: req.failure()?.errorText || 'unknown',
+      });
+      if (manualScraperTelemetry.networkErrors.length > 30) manualScraperTelemetry.networkErrors.shift();
+    });
+    replacement.on('response', (res) => {
+      const status = res.status();
+      try {
+        if (res.request().resourceType() === 'document' && res.frame() === replacement.mainFrame()) {
+          navStatusRef.last = status;
+        }
+      } catch { /* frame may be detached on rapid navigations — skip */ }
+      if (status < 400) return;
+      const url = res.url();
+      if (isIgnorableManualBrowserTelemetry({ url })) return;
+      manualScraperTelemetry.networkErrors.push({
+        ts: Date.now(),
+        method: res.request().method(),
+        url: url.slice(0, 200),
+        status,
+        errorText: null,
+      });
+      if (manualScraperTelemetry.networkErrors.length > 30) manualScraperTelemetry.networkErrors.shift();
+    });
+    await replacement.evaluateOnNewDocument(OVERLAY_SCRIPT);
+  } catch (error) {
+    await replacement.close().catch(() => {});
+    throw error;
+  }
+  return replacement;
+}
+
+/**
+ * The URL a recovered list page should reopen, or null when the walk's
+ * position cannot be reproduced from a URL. Scroll-revealed lists, load-more
+ * lists past their first batch, and click pagers past their first page would
+ * reopen at the top and silently re-read or skip rows, so those are not
+ * recovered here (the walk keeps its rows and stays retryable instead).
+ */
+export function detachedListRecoveryUrl({
+  deadPageUrl = '',
+  taskUrl = '',
+  scrollSource = false,
+  urlPaginated = false,
+  loadMoreRowsRead = 0,
+  onFirstPage = true,
+} = {}) {
+  if (scrollSource) return null;
+  if (loadMoreRowsRead > 0) return null;
+  const isUrl = value => /^https?:\/\//i.test(String(value || ''));
+  // First page: the query's own list URL. Right after a check the dead page's
+  // last URL can be the check's own route, which would reopen the check.
+  if (onFirstPage) return isUrl(taskUrl) ? taskUrl : (isUrl(deadPageUrl) ? deadPageUrl : null);
+  // Past the first page only a URL pager can be reopened at the same page.
+  if (!urlPaginated) return null;
+  return isUrl(deadPageUrl) ? deadPageUrl : null;
+}
 
 // ── Main export ───────────────────────────────────────────────────────────────
 /**
@@ -626,6 +727,12 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       const walkGuards             = [];
       // Set when THIS source's Chrome disconnects without our own teardown.
       let browserClosedUnexpectedly = false;
+      // Set when the walk's page object could no longer be read (Puppeteer
+      // "Attempted to use detached Frame") and its one recovery for that query
+      // did not produce a usable page. Reported through the browser-closed
+      // path: rows kept, unread queries named, retryable — never as an
+      // extractor fault, because nothing about the extractor was observed.
+      let pageDetachedUnrecovered = null;
 
       const displayIndex = sourceIndexBase + si + 1;
       const displayTotal = sourceTotal || sourceList.length;
@@ -667,7 +774,75 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         });
         continue;
       }
-      const { page, navStatusRef } = platform;
+      // `let`: a detached list page is replaced once per query (see
+      // recoverDetachedListPage). Every use below reads this binding, so the
+      // walk and its helpers follow the replacement.
+      let { page } = platform;
+      const { navStatusRef } = platform;
+
+      // One recovery per query for a page object that can no longer be read:
+      // open a fresh tab in this same platform browser (set up like the first),
+      // close the dead one, reopen the query's list URL there, and run the
+      // normal readiness/challenge wait so any new check is handed to the user,
+      // never bypassed. Returns the wait's outcome, or 'page-detached' when no
+      // live page could be obtained. The caller decides what each outcome means.
+      const recoverDetachedListPage = async ({ url, overlayBase, qi, pageNum, cause }) => {
+        const deadPage = page;
+        const attempt = {
+          phase: 'page-detached-recovery', sourceId, srcName,
+          queryIndex: qi + 1, queryTotal: sourceTasks.length, pageNum,
+          cause, url: String(url || '').slice(0, 300),
+        };
+        if (!url) {
+          recordManualScraperTelemetry({ ...attempt, outcome: 'position-not-reproducible' }, { updateActive: false });
+          return 'page-detached';
+        }
+        if (platform.isClosed?.()) {
+          recordManualScraperTelemetry({ ...attempt, outcome: 'browser-closed' }, { updateActive: false });
+          return 'page-detached';
+        }
+        let replacement;
+        try {
+          replacement = await openReplacementScrapePage(platform);
+        } catch (error) {
+          const reason = String(error?.message || error).replace(/\s+/g, ' ').slice(0, 200);
+          logger.warn(`[BrowserScraper] ${srcName} q${qi + 1}: could not open a replacement page after the list page detached: ${reason}`);
+          recordManualScraperTelemetry({ ...attempt, outcome: 'replacement-failed', error: reason }, { updateActive: false });
+          return 'page-detached';
+        }
+        page = replacement;
+        platform.page = replacement;
+        const deadClosed = await deadPage.close().then(() => true).catch(() => false);
+        // A dead tab left open would hide the replacement, and with it any new
+        // check the user has to solve there.
+        if (!deadClosed) await replacement.bringToFront().catch(() => {});
+        logger.warn(`[BrowserScraper] ${srcName} q${qi + 1} p${pageNum}: list page detached (${cause}) — reopened ${url} in a fresh tab (one recovery per query)`);
+        navStatusRef.last = null;
+        const issued = await page.evaluate(u => { window.location.href = u; }, url)
+          .then(() => true)
+          .catch(() => false);
+        if (!issued) {
+          recordManualScraperTelemetry({ ...attempt, outcome: 'navigation-failed' }, { updateActive: false });
+          return 'page-detached';
+        }
+        await sleepUnlessAborted(humanDelay(NAV_SETTLE_MS), signal);
+        if (signal?.aborted) return 'abort';
+        await injectOverlay(page);
+        await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: 'Reopened the results page — loading…' }).catch(() => {});
+        const recoveredState = await waitForReady(page, sourceId, overlayBase, signal, url);
+        recordManualScraperTelemetry({ ...attempt, outcome: recoveredState, landedUrl: safePageUrl(page) }, { updateActive: false });
+        return recoveredState;
+      };
+      const noteDetachedUnrecovered = ({ qi, pageNum, cause, recoveryState }) => {
+        pageDetachedUnrecovered = { queryIndex: qi + 1, pageNum, cause, recoveryState };
+        logger.warn(`[BrowserScraper] ${srcName} q${qi + 1} p${pageNum}: list page could not be read (${cause}; recovery: ${recoveryState}) — keeping ${allJobs.length} row(s) and stopping this source; it stays retryable`);
+        recordManualScraperTelemetry({
+          phase: 'page-detached-unrecovered', sourceId, srcName,
+          queryIndex: qi + 1, queryTotal: sourceTasks.length, pageNum,
+          cause, recoveryState, count: allJobs.length,
+        });
+        earlyExit = true;
+      };
 
       logger.info(`[BrowserScraper] Starting ${displayIndex}/${displayTotal}: ${srcName} (${sourceTasks.length} queries) — fresh isolated browser launched`);
       recordManualScraperTelemetry({
@@ -859,8 +1034,28 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         await injectOverlay(page);
         await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: 'Loading…' });
 
+        // One detached-page recovery per query (recoverDetachedListPage).
+        let pageRecoveryUsed = false;
+        // A 'page-detached' wait means the page object is dead — nothing was
+        // observed about the site. Recover once, re-running the full readiness
+        // wait on the fresh page; otherwise stop through the browser-closed path.
+        const settleDetachedReadiness = async (state, url) => {
+          if (state !== 'page-detached') return state;
+          if (pageRecoveryUsed) return 'page-detached';
+          pageRecoveryUsed = true;
+          const recovered = await recoverDetachedListPage({
+            url, overlayBase, qi, pageNum: task.options?.startPageNum || 1, cause: 'readiness-probe',
+          });
+          if (recovered !== 'page-detached' && recovered !== 'abort' && !navigationIssued) {
+            // The dead page never took this query's navigation; the fresh one did.
+            recordIssuedManualQuery(executedQueries, { query: task.query || '', url: task.url }, true);
+          }
+          return recovered;
+        };
+
         // Wait for real content — handles challenge pages
         let readyState = await waitForReady(page, sourceId, overlayBase, signal, task.url);
+        readyState = await settleDetachedReadiness(readyState, task.url);
 
         // Glassdoor's canonical redirect drops the posting-date filter: the
         // request carried `fromAge=14` and the landed SRCH route carried none,
@@ -886,9 +1081,23 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
               .catch(() => false);
             await new Promise(r => setTimeout(r, humanDelay(NAV_SETTLE_MS)));
             readyState = await waitForReady(page, sourceId, overlayBase, signal, reapplyUrl);
+            readyState = await settleDetachedReadiness(readyState, reapplyUrl);
           }
         }
         if (readyState === 'abort' || signal?.aborted) { earlyExit = true; break; }
+        if (readyState === 'page-detached') {
+          noteDetachedUnrecovered({
+            qi, pageNum: task.options?.startPageNum || 1, cause: 'readiness-probe',
+            recoveryState: pageRecoveryUsed ? 'failed' : 'not-attempted',
+          });
+          break;
+        }
+        if (readyState !== 'ok' && readyState !== 'recovered' && readyState !== 'hard-block' && readyState !== 'skip') {
+          // An outcome this walk does not know is never read as a usable page.
+          logger.warn(`[BrowserScraper] ${srcName} q${qi + 1}: unexpected readiness outcome "${readyState}" — not extracting from an unconfirmed page`);
+          noteDetachedUnrecovered({ qi, pageNum: task.options?.startPageNum || 1, cause: `readiness-${readyState}`, recoveryState: 'not-attempted' });
+          break;
+        }
         if (readyState === 'hard-block') {
           // Cloudflare "Additional Verification Required" — no interactive widget,
           // nothing the user can solve. Skip all remaining queries for this
@@ -1151,7 +1360,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           // distinguish "extractor still running" from "extractor returned 0".
           // Naming the await makes a stalled evaluate visible while it stalls,
           // and the outcome row below closes the pair.
-          const { jobs: extracted, siteChangedError, evalError } = await withInFlight(
+          const { jobs: extracted, siteChangedError, evalError, detachedError } = await withInFlight(
             'extractor evaluate',
             `${srcName} q${qi + 1} p${pageNum}`,
             () => runExtractor(page, task.extractorJS),
@@ -1164,8 +1373,64 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             queryTotal: sourceTasks.length,
             pageNum,
             extracted: extracted.length,
-            outcome: evalError ? 'eval-error' : siteChangedError ? 'site-changed' : 'ok',
+            outcome: detachedError ? 'page-detached' : evalError ? 'eval-error' : siteChangedError ? 'site-changed' : 'ok',
           }, { updateActive: false });
+
+          // The page object is dead ("Attempted to use detached Frame"):
+          // retrying evaluate on it can only throw again, and it says nothing
+          // about the extractor. Recover a live page ONCE for this query and
+          // re-extract the same page; otherwise stop via the browser-closed path.
+          if (detachedError) {
+            const startPage = task.options?.startPageNum || 1;
+            const recoveryUrl = pageRecoveryUsed ? null : detachedListRecoveryUrl({
+              deadPageUrl: safePageUrl(page),
+              taskUrl: task.url,
+              scrollSource: SCROLL_SOURCES.has(sourceId),
+              urlPaginated,
+              loadMoreRowsRead: loadMorePrevCount,
+              onFirstPage: pageNum === startPage,
+            });
+            let recoveryState = pageRecoveryUsed ? 'already-used' : 'position-not-reproducible';
+            if (recoveryUrl) {
+              pageRecoveryUsed = true;
+              recoveryState = await recoverDetachedListPage({
+                url: recoveryUrl, overlayBase, qi, pageNum, cause: 'extractor-evaluate',
+              });
+            }
+            if (recoveryState === 'abort' || signal?.aborted) { earlyExit = true; break; }
+            // 'recovered' means the readiness wait sent the page back to the URL
+            // it was given (recoveryUrl, this same list position) after a check,
+            // so re-extracting it is valid on any page.
+            if (recoveryState === 'ok' || recoveryState === 'recovered') {
+              evalErrStreak = 0;
+              continue;
+            }
+            if (recoveryState === 'hard-block' || recoveryState === 'skip') {
+              if (!sourceSiteChangedWarning || sourceSiteChangedWarning.severity !== 'block') {
+                sourceSiteChangedWarning = recoveryState === 'hard-block'
+                  ? {
+                    code:       'cloudflare-hard-block',
+                    severity:   'block',
+                    action:     'none',
+                    shortLabel: 'Wait, then retry',
+                    retryAfterAt: Date.now() + HARD_BLOCK_RETRY_WAIT_MS,
+                    url:        task.url,
+                    evidence:   `${srcName} was hard-blocked by Cloudflare when its results page ${pageNum} was reopened — no interactive challenge to solve.`,
+                    suggestion: `Retry unlocks after the wait. Let the IP/session restriction cool down, confirm ${srcName} opens normally in a normal Chrome tab, then choose Retry. Skip continues without these listings.`,
+                  }
+                  : {
+                    code:       'session-blocked',
+                    severity:   'block',
+                    evidence:   `${srcName} re-served a bot challenge immediately after verification when its results page ${pageNum} was reopened, so the session is blocked and the source was skipped.`,
+                    suggestion: `Open ${srcName} in a normal Chrome tab, ensure you are logged in and unblocked, then run the search again.`,
+                  };
+              }
+              sourceSkipped = true;
+              break;
+            }
+            noteDetachedUnrecovered({ qi, pageNum, cause: 'extractor-evaluate', recoveryState });
+            break;
+          }
 
           // A non-SITE_CHANGED throw (e.g. "context destroyed" from a
           // mid-evaluate navigation) is usually transient and should retry,
@@ -1469,9 +1734,11 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           }
           pagesExtracted++;   // this page's selectors worked — see the SITE_CHANGED branch above
 
-          // Trust the platform's ranked/fuzzy search results. Every distinct row
-          // returned for the issued query is eligible for detail expansion; the
-          // app must not impose a second exact-ish title admission policy.
+          // Every distinct row returned for the issued query is a candidate.
+          // Before its detail is opened, the AI page title screen
+          // (pageTitleScreen.js, task.options.screenTitles) may skip rows that
+          // are clearly a different kind of job; it replaced the old rule of
+          // opening every card and screening titles only after the gather.
           // Physical cards this iteration actually put in front of us. On a
           // load-more source `extracted` is the WHOLE accumulated list and is
           // re-scanned from row 0 every iteration, so counting a duplicate per
@@ -1546,7 +1813,26 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           // history step would drop a shown one, and a read one was already
           // judged by the run that read it.
           const alreadyRead = partitionAlreadyReadJobs(selectedPageJobs, task.options?.isAlreadyRead);
-          const jobsToExpand = alreadyRead.open;
+          let jobsToExpand = alreadyRead.open;
+          // AI title screen before any detail is opened (pageTitleScreen.js).
+          // Rows it removes are never opened and never staged; it fails open.
+          if (typeof task.options?.screenTitles === 'function' && jobsToExpand.length > 0 && !signal?.aborted) {
+            const titleScreen = task.options.screenTitles(jobsToExpand, { query: task.query || '', queryIndex: task.queryIndex ?? qi, page: pageNum });
+            if (titleScreen.waitMs > 0) {
+              await updateOverlay(page, {
+                ...overlayBase,
+                pageNum,
+                count: allJobs.length,
+                status: `Checking ${jobsToExpand.length} titles before opening them…`,
+              }).catch(() => {});
+              await titleScreen.wait(titleScreen.waitMs);
+            }
+            const screened = partitionByPageTitleScreen(jobsToExpand, titleScreen);
+            if (screened.skipped.length > 0) {
+              logger.info(`[BrowserScraper] ${srcName} q${qi + 1} p${pageNum}: title screen skipped ${screened.skipped.length} of ${jobsToExpand.length} card(s) before opening them`);
+            }
+            jobsToExpand = screened.open;
+          }
           sourceAlreadyReadSkipped += alreadyRead.readEarlier + alreadyRead.shownEarlier;
           sourceReadEarlierSkipped += alreadyRead.readEarlier;
           const walkPlan = buildPhysicalCardWalkPlan(extracted, jobsToExpand);
@@ -1617,6 +1903,8 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
               jobs: jobsToExpand.map(job => ({
                 ...job,
                 descriptionDeferredReason: sourceDetailBlockCode,
+                // Never requested: the block's cooldown skipped it.
+                descriptionDeferredBy: 'block-cooldown',
               })),
               descError: null,
               descWarning: null,
@@ -1832,9 +2120,11 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
               : mergeDescriptionDetailMissWarning(sourceSiteChangedWarning, descWarning);
           }
           // Glassdoor: a block from its PANEL fallback stops only the panel part
-          // while its job-page route is still on (glassdoorJobPage.js keeps
-          // that panel-only block and its cooldown/re-probe). The source-wide
-          // block below is armed only once both routes are blocked.
+          // while its job-page route is still on AND reading rows
+          // (glassdoorJobPage.js keeps that panel-only block and its
+          // cooldown/re-probe). The source-wide block below, which waits out
+          // the cooldown, is armed once the job page is off or read nothing in
+          // this batch (glassdoorPanelBlockIsSourceWide).
           const glassdoorPanelOnlyBlock = Boolean(detailResult?.descriptionRoute)
             && DETAIL_BLOCK_WARNING_CODES.includes(descWarning?.code)
             && !glassdoorPanelBlockIsSourceWide(sourceDetailPacing);
@@ -1874,9 +2164,9 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             sourceDetailBlockAt = Date.now();
             sourceDetailBlockCount += 1;
           }
-          // Glassdoor's job-page route turned off while its panel was already
-          // blocked: both routes are blocked now, so the panel-only block
-          // becomes the source-wide one (keeping its original clock).
+          // Glassdoor's job-page route turned off, or read nothing, while its
+          // panel was already blocked: no route is reading, so the panel-only
+          // block becomes the source-wide one (keeping its original clock).
           if (detailResult?.descriptionRoute && !sourceDetailBlockCode) {
             const handover = takeGlassdoorPanelBlockForSource(sourceDetailPacing);
             if (handover) {
@@ -2114,8 +2404,37 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           }
 
           // Wait for new content to appear on the paginated page
-          const pagedReady = await waitForReady(page, sourceId, overlayBase, signal, task.url);
+          let pagedReady = await waitForReady(page, sourceId, overlayBase, signal, task.url);
           if (pagedReady === 'abort' || signal?.aborted) { earlyExit = true; break; }
+          // The page object died during the page turn. Reading its URL or
+          // extracting from it would only report stale facts (a ZipRecruiter
+          // direct-page check would call it the provider's result window), so
+          // reopen it once for this query, or stop this source honestly.
+          if (pagedReady === 'page-detached') {
+            const recoveryUrl = pageRecoveryUsed ? null : detachedListRecoveryUrl({
+              deadPageUrl: safePageUrl(page),
+              taskUrl: task.url,
+              scrollSource: SCROLL_SOURCES.has(sourceId),
+              urlPaginated,
+              loadMoreRowsRead: loadMorePrevCount,
+              onFirstPage: false,
+            });
+            let recoveryState = pageRecoveryUsed ? 'already-used' : 'position-not-reproducible';
+            if (recoveryUrl) {
+              pageRecoveryUsed = true;
+              recoveryState = await recoverDetachedListPage({
+                url: recoveryUrl, overlayBase, qi, pageNum, cause: 'page-turn-readiness',
+              });
+            }
+            if (recoveryState === 'abort' || signal?.aborted) { earlyExit = true; break; }
+            if (!['ok', 'recovered', 'hard-block', 'skip'].includes(recoveryState)) {
+              noteDetachedUnrecovered({ qi, pageNum, cause: 'page-turn-readiness', recoveryState });
+              break;
+            }
+            // 'recovered' here returned the fresh page to recoveryUrl (this page),
+            // not to page 1, so it must not take the back-to-page-1 branch below.
+            pagedReady = recoveryState === 'recovered' ? 'ok' : recoveryState;
+          }
           if (pagedReady === 'hard-block' || pagedReady === 'skip') {
             // A block must be able to replace a non-block warning: this slot is
             // per-source and every writer used to bail on ANY existing value, so
@@ -2226,10 +2545,20 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       // recorded as a clean finish and its date bookmark advanced. Make it a
       // blocking warning: the rows gathered so far are kept, and the source
       // stays unfinished until it is run again or skipped.
+      // A list page whose object could no longer be read, and could not be
+      // replaced, takes the same path: rows kept, unread queries named, the
+      // source left retryable. Its evidence says what was observed — the page
+      // stopped responding — not that the window closed.
+      const pageUnreadable = !!pageDetachedUnrecovered && !browserClosedUnexpectedly && !signal?.aborted;
       const browserClosed = browserClosedUnexpectedly && !signal?.aborted;
-      if (browserClosed && !sourceSiteChangedWarning) {
+      if ((browserClosed || pageUnreadable) && !sourceSiteChangedWarning) {
         const unreadQueries = Math.max(0, sourceTasks.length - executedQueries.length);
-        sourceSiteChangedWarning = browserClosedWarning({ srcName, unreadQueries, queryTotal: sourceTasks.length });
+        sourceSiteChangedWarning = pageUnreadable
+          ? pageUnreadableWarning({
+            srcName, unreadQueries, queryTotal: sourceTasks.length,
+            queryIndex: pageDetachedUnrecovered.queryIndex, pageNum: pageDetachedUnrecovered.pageNum,
+          })
+          : browserClosedWarning({ srcName, unreadQueries, queryTotal: sourceTasks.length });
         logger.warn(`[BrowserScraper] ${sourceSiteChangedWarning.evidence}`);
       }
 
@@ -2237,6 +2566,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         earlyExit,
         aborted: !!signal?.aborted,
         browserClosed,
+        pageUnreadable,
         sourceSkipped,
         detailEnrichmentFailed,
         hitPerSourceCap,
@@ -2410,9 +2740,10 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       // Close this platform's browser completely before the next launches, so each
       // platform starts from a fresh process with no carried-over session signal.
       await teardownCurrent();
-      // Each source runs in its own Chrome, so one that died says nothing
-      // about the next. Clear the stop it raised; a cancel still ends the run.
-      if (browserClosed) earlyExit = false;
+      // Each source runs in its own Chrome, so one that died (or whose results
+      // page stopped responding) says nothing about the next. Clear the stop it
+      // raised; a cancel still ends the run.
+      if (browserClosed || pageUnreadable) earlyExit = false;
     }
   } finally {
     await teardownCurrent();

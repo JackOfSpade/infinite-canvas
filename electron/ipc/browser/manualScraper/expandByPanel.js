@@ -36,7 +36,7 @@ import {
 } from './googleApply.js';
 import { getChallengeSignals } from './pageReadiness.js';
 import { updateOverlay, waitIfPaused } from './scrapeBrowser.js';
-import { notePacePanelInterrupt, recordManualScraperTelemetry } from './scrapeTelemetry.js';
+import { notePacePanelInterrupt, notePacePanelWindowWait, recordManualScraperTelemetry } from './scrapeTelemetry.js';
 import { classifyPanelWalkInterrupt, describePanelWalkInterrupt, readPanelWalkCover } from '../panelWalkInterrupt.js';
 import { GOOGLE_POSTED_TEXT_PATTERN, readGooglePanelPostedDate } from '../googlePostedDate.js';
 import { createBackgroundScrapePage } from '../backgroundScrapeBrowser.js';
@@ -45,9 +45,14 @@ import { logger } from '../../../logger.js';
 import { isAggregatorHost } from '../../officialSourceHosts.js';
 
 // Marks every row from startIndex on as not yet described, with the reason the walk stopped.
-function deferRowsFrom(rows, startIndex, reason) {
+// The row at startIndex is the one that failed; the rows after it were never
+// requested, which `descriptionDeferredBy: 'walk-stopped'` records so a report
+// can say "1 failed, N not requested" instead of N+1 failures.
+function deferRowsFrom(rows, startIndex, reason, failedRowExtra = null) {
   for (let index = startIndex; index < rows.length; index++) {
-    rows[index] = { ...rows[index], descriptionDeferredReason: reason };
+    rows[index] = index === startIndex
+      ? { ...rows[index], descriptionDeferredReason: reason, ...(failedRowExtra || {}) }
+      : { ...rows[index], descriptionDeferredReason: reason, descriptionDeferredBy: 'walk-stopped' };
   }
 }
 
@@ -268,7 +273,10 @@ export async function expandDescriptionsByPanel(page, jobs, sourceId, overlayBas
       evidence: `Glassdoor returned HTTP ${failure.status} from its right-side panel endpoint for "${title || 'an untitled listing'}". This is a source response failure, not a panel-selector timeout; the scraper stopped before issuing another request.`,
       suggestion: 'Retry Glassdoor later. List results were retained; this and later unresolved rows remain eligible for a future run.',
     };
-    deferRowsFrom(enhanced, startIndex, 'description-panel-http-error');
+    // The status is otherwise only in the in-memory telemetry ring; keeping it
+    // on the saved row lets a run without a bug report still say what failed.
+    deferRowsFrom(enhanced, startIndex, 'description-panel-http-error',
+      Number.isFinite(Number(failure.status)) ? { descriptionDeferredStatus: Number(failure.status) } : null);
     await updateOverlay(page, {
       ...overlayBase,
       count: totalSoFar,
@@ -319,6 +327,9 @@ export async function expandDescriptionsByPanel(page, jobs, sourceId, overlayBas
     if (waitMs <= 0) return;
     panelWindowWaits++;
     panelWindowWaitedMs += waitMs;
+    // Also on the source's pace record, so the report's pace line shows these
+    // waits even after this batch's summary has aged out of the event ring.
+    notePacePanelWindowWait(sourceId, { srcName: overlayBase.srcName, waitMs });
     await updateOverlay(page, {
       ...overlayBase,
       count: totalSoFar,

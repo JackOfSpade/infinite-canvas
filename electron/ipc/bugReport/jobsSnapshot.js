@@ -57,7 +57,7 @@ export function renderScrapePaceLines(pace, now = Date.now()) {
 
 // Glassdoor's job-page → panel-fallback route on its card-walk summary line.
 // Fixed codes and counts only; an unknown stop code is printed as 'unknown'.
-const CARD_WALK_ROUTE_STOP_CODES = new Set(['none', 'unreadable', '429-first', '429-second', 'challenge']);
+const CARD_WALK_ROUTE_STOP_CODES = new Set(['none', 'unreadable', 'no-reads', '429-first', '429-second', 'challenge']);
 const CARD_WALK_PANEL_BLOCK_CODES = new Set(['armed', 'deferred', 'reprobe-failed', 'recovered']);
 export function describeCardWalkDescriptionRoute(route) {
   if (!route || typeof route !== 'object' || Array.isArray(route)) return [];
@@ -69,6 +69,7 @@ export function describeCardWalkDescriptionRoute(route) {
     `job-page-stop ${code(route.stopReason)}${route.routeOffAtStart === true ? ' (route already off)' : ''}`,
     `source job-page-stop ${code(route.sourceStopReason)}`,
     ...(n(route.silentMisses) > 0 ? [`job-page-unread ${n(route.silentMisses)} (sent to panel)`] : []),
+    ...(route.detailTabFailed === true ? ['job-page tab could not open (sent to panel)'] : []),
     ...(CARD_WALK_PANEL_BLOCK_CODES.has(route.panelBlock) ? [`panel-only-block ${route.panelBlock}`] : []),
   ];
 }
@@ -105,11 +106,36 @@ export function sourceReceiptWindowParts(source) {
   if (alreadyReadSkipped != null && alreadyReadSkipped > 0) {
     parts.push(`${alreadyReadSkipped} card(s) left unopened because an earlier run already read or showed them`);
   }
+  const titleScreen = source?.pageTitleScreen;
+  if (titleScreen && typeof titleScreen === 'object' && nonnegativeCount(titleScreen.screened) > 0) {
+    const failed = nonnegativeCount(titleScreen.failedPages) || 0;
+    parts.push(`page title screen: ${nonnegativeCount(titleScreen.mismatched) || 0} of ${nonnegativeCount(titleScreen.screened)} card(s) skipped before opening as a different kind of job, ${nonnegativeCount(titleScreen.unclear) || 0} unsure opened${failed > 0 ? `, ${failed} page(s) failed and opened unscreened` : ''}`);
+  }
   if (Array.isArray(source?.healthFailures) && source.healthFailures.length > 0) {
     const described = describeSourceHealthFailures(source.healthFailures);
     if (described) parts.push(`health: ${described}`);
   }
   return parts;
+}
+
+/**
+ * One line per off-target query slot the page title screen flagged. The receipt
+ * holds counts only; the query, example titles and the AI rewording are in the
+ * run log's `[PageTitleScreen] off-target query` warning line.
+ */
+export function offTargetQueryReceiptLines(sourceId, source) {
+  const entries = Array.isArray(source?.pageTitleScreen?.offTargetQueries) ? source.pageTitleScreen.offTargetQueries : [];
+  return entries.map(entry => {
+    const screened = nonnegativeCount(entry?.screened) || 0;
+    const mismatched = Math.min(nonnegativeCount(entry?.mismatched) || 0, screened);
+    if (!(screened > 0)) return null;
+    const share = Math.round((mismatched / screened) * 100);
+    const slot = Number.isSafeInteger(entry?.queryIndex) && entry.queryIndex >= 0 ? `query slot #${entry.queryIndex + 1}` : 'a query (slot not recorded)';
+    return `  - ⚠️ \`${receiptIdentifier(sourceId, 'unknown')}\` off-target search, ${slot}: ${mismatched} of ${screened} screened titles (${share}%) were a different kind of job. `
+      + 'The page title screen skipped them without opening their details, but every results page for this query was still loaded, so it costs scrape time on every run until the search is reworded. '
+      + `${entry?.suggested === true ? 'An AI rewording was suggested' : 'No AI rewording was suggested'}; nothing is applied automatically (the source card shows the warning; the user must edit the search). `
+      + 'Query text, example titles and the suggestion are in the run log line `[PageTitleScreen] off-target query`.';
+  }).filter(Boolean);
 }
 
 // Detail-block re-probing counts two different things: `attempt` is the
@@ -1019,7 +1045,29 @@ function attributableHubRecords(currentNodeIds, reportWindowId) {
   try { return getJobsResumeAttributionForReport(currentNodeIds, reportWindowId) || []; } catch { return []; }
 }
 
-function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label = 'Last terminal run receipt', attributionNote = null) {
+// Explains a receipt whose terminal score-ready count differs from the
+// initial-search funnel's kept count when no recovery merge was recorded. Only
+// the run's own live Job Preferences record (passed only when the live
+// pipeline run is this receipt's run) may explain it, and only when its
+// arithmetic balances exactly; otherwise the gap is stated without a cause.
+// Recovery is never named here: this branch only runs without a recorded merge.
+export function formatReceiptTerminalCountReconciliation({ terminalScoreReady, kept, recoveryNet = null, preferences = null } = {}) {
+  if (!Number.isFinite(terminalScoreReady) || !Number.isFinite(kept) || recoveryNet != null) return '';
+  const terminal = Math.max(0, Math.floor(terminalScoreReady));
+  if (terminal === kept) return '';
+  const filtered = nonnegativeCount(preferences?.filtered);
+  const backstop = nonnegativeCount(preferences?.roleScreenBackstopDropped) || 0;
+  if (filtered != null && kept - filtered - backstop === terminal) {
+    const parts = [
+      filtered > 0 ? `− ${filtered} removed by Job Preferences` : null,
+      backstop > 0 ? `− ${backstop} removed by the backstop role screen` : null,
+    ].filter(Boolean);
+    return ` · ${parts.join(' ')} = ${terminal} terminal score-ready`;
+  }
+  return ` · terminal score-ready ${terminal} differs from kept ${kept}; cause not recorded in this receipt`;
+}
+
+function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label = 'Last terminal run receipt', attributionNote = null, livePreferences = null) {
   if (!receiptState?.exists) {
     return `- ${label}: absent — completion of any prior-process run is **unknown**; this build has no durable terminal evidence for it.`;
   }
@@ -1111,7 +1159,14 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
       : '';
     const languageDropped = nonnegativeCount(funnel.languageDropped) || 0;
     const languageDropDetail = languageDropped > 0 ? `, non-English ${languageDropped}` : '';
-    lines.push(`  - Initial-search funnel: ${admissionFlow} · dropped: relevance ${funnel.relevanceDropped}, confirmed cross-border ${funnel.countryScopeDropped || 0}, age ${funnel.ageDropped}, role ${funnel.roleDropped}, history ${funnel.historyDropped}, description evidence ${funnel.descriptionEvidenceDropped}${languageDropDetail}${boardClosedDetail}${officialRetryDetail}${recoveryDetail}${Number.isFinite(terminalScoreReady) && terminalScoreReady !== funnel.kept && recoveryNet == null ? ' · later source recovery changed the terminal score-ready count shown above' : ''}`);
+    lines.push(`  - Initial-search funnel: ${admissionFlow} · dropped: relevance ${funnel.relevanceDropped}, confirmed cross-border ${funnel.countryScopeDropped || 0}, age ${funnel.ageDropped}, role ${funnel.roleDropped}, history ${funnel.historyDropped}, description evidence ${funnel.descriptionEvidenceDropped}${languageDropDetail}${boardClosedDetail}${officialRetryDetail}${recoveryDetail}${formatReceiptTerminalCountReconciliation({
+      terminalScoreReady,
+      kept: funnel.kept,
+      recoveryNet,
+      // Job Preferences telemetry is run-scoped but carries no run id; it may
+      // explain this receipt only when the live pipeline run IS this receipt.
+      preferences: liveRunId && liveRunId === receipt.runId ? livePreferences : null,
+    })}`);
     const evidenceBySource = Object.entries(funnel.descriptionEvidenceBySource || {});
     if (evidenceBySource.length > 0) {
       lines.push(`  - Description-evidence drops by site: ${evidenceBySource.map(([source, counts]) => `\`${source}\` ${counts.empty || 0} empty, ${counts.deferred || 0} deferred, ${counts.short || 0} brief`).join(' · ')}`);
@@ -1219,6 +1274,9 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
     });
     lines.push(`  - Sources (${sources.length}): ${rows.join('; ')}`);
     for (const [sourceId, source] of sources) {
+      for (const line of offTargetQueryReceiptLines(sourceId, source)) lines.push(line);
+    }
+    for (const [sourceId, source] of sources) {
       const reveal = revealCoverageFact(source);
       if (!reveal.retained) continue;
       lines.push(`  - \`${receiptIdentifier(sourceId, 'unknown')}\` scroll reveal: ${reveal.outcomes.map(revealOutcomeLabel).join('; ')} · ${reveal.proven ? '✅ every query reached the board end marker' : '⚠️ result-set coverage was not proven'}`);
@@ -1227,11 +1285,11 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
   return lines.join('\n');
 }
 
-function formatArtifactReceipts(artifacts, currentNodeIds, livePipeline, attributionNote = null) {
+function formatArtifactReceipts(artifacts, currentNodeIds, livePipeline, attributionNote = null, livePreferences = null) {
   const receiptArtifacts = artifacts.filter(artifact => artifact.receipt);
   if (receiptArtifacts.length === 0) return [formatLastRunReceipt({ exists: false }, currentNodeIds, livePipeline, undefined, attributionNote)];
   if (receiptArtifacts.length === 1) {
-    return [formatLastRunReceipt(readArtifactReceiptSnapshot(receiptArtifacts[0]), currentNodeIds, livePipeline, undefined, attributionNote)];
+    return [formatLastRunReceipt(readArtifactReceiptSnapshot(receiptArtifacts[0]), currentNodeIds, livePipeline, undefined, attributionNote, livePreferences)];
   }
   const lines = [`- Terminal run receipts: ${receiptArtifacts.length} retained across independently recoverable Job Search hubs.`];
   for (const [index, artifact] of receiptArtifacts.entries()) {
@@ -1241,6 +1299,7 @@ function formatArtifactReceipts(artifacts, currentNodeIds, livePipeline, attribu
       livePipeline,
       `Terminal run receipt ${index + 1}/${receiptArtifacts.length}`,
       attributionNote,
+      livePreferences,
     ));
   }
   return lines;
@@ -2986,6 +3045,27 @@ function recoveryMergeNet(telemetry) {
  * terminal receipt, and owned saved snapshot. Any missing or conflicting fact
  * is INDETERMINATE rather than a green completion claim.
  */
+export const SCORING_RECOVERY_SAVE_FAILURE_CAUSE = 'the scoring-time recovery save failed (over the 128 MiB limit); the saved score-ready count is the earlier save from before Job Preferences (previous snapshot kept)';
+
+// Returns the durable lifecycle row proving that a scoring-time recovery save
+// of THIS run and owner failed as too large after the saved snapshot was
+// written, or null. Lifecycle rows carry one-way digests, so the ids are
+// digested the same way before comparison.
+export function findScoringRecoverySaveFailure(events, { ownerId, runId, receiptRunId = null, savedSnapshotCreatedAtMs } = {}) {
+  if (!Array.isArray(events)) return null;
+  const digest = value => (typeof value === 'string' && value.trim() ? reportCorrelationDigest(value.trim(), null) : null);
+  const owner = digest(ownerId);
+  const run = digest(runId);
+  if (!owner || !run || !Number.isSafeInteger(savedSnapshotCreatedAtMs) || savedSnapshotCreatedAtMs <= 0) return null;
+  if (receiptRunId != null && digest(receiptRunId) !== run) return null;
+  return events.find(event => event?.operation === 'snapshot-save'
+    && event.result === 'failed'
+    && event.reason === 'artifact-too-large'
+    && event.owner === owner
+    && event.run === run
+    && Number.isSafeInteger(event.at) && event.at > savedSnapshotCreatedAtMs) || null;
+}
+
 export function buildJobCompletionAssessment(
   canvasFilePath,
   currentNodeIds = new Set(),
@@ -3678,6 +3758,34 @@ export function buildJobCompletionAssessment(
   )) || null;
 
   const gaps = [];
+  // A same-run, same-owner scoring-time recovery save that failed AFTER the
+  // saved snapshot was written explains why the saved score-ready count lags
+  // the scorer: the saved file is the earlier, pre-Job-Preferences save. Stated
+  // once (on the first count gap it explains) and only when the durable
+  // lifecycle row exists; the verdict stays non-green either way.
+  let savedSnapshotFailureCauseUsed = false;
+  let savedSnapshotFailureRow;
+  const savedSnapshotFailureCause = () => {
+    if (savedSnapshotFailureCauseUsed) return '';
+    if (savedSnapshotFailureRow === undefined) {
+      savedSnapshotFailureRow = null;
+      try {
+        const journal = readJobAnalysisRecoveryLifecycle(path.join(app.getPath('userData'), 'job-search', 'analysis-recovery-lifecycle.json'), {
+          canvasFilePath,
+          ownerIds: hubIds,
+        });
+        savedSnapshotFailureRow = findScoringRecoverySaveFailure(journal?.events, {
+          ownerId: snapshot?.nodeId,
+          runId: snapshot?.runId || receipt?.runId,
+          receiptRunId: receipt?.runId,
+          savedSnapshotCreatedAtMs: snapshot?.createdAtMs,
+        });
+      } catch { /* lifecycle evidence is optional; state no cause */ }
+    }
+    if (!savedSnapshotFailureRow) return '';
+    savedSnapshotFailureCauseUsed = true;
+    return ` — ${SCORING_RECOVERY_SAVE_FAILURE_CAUSE}`;
+  };
   if (historyWriteFailed) {
     gaps.push(`the board-displayed seen-history write failed for ${nonnegativeCount(historyWrite.input) ?? '?'} job(s)`);
   }
@@ -3745,7 +3853,7 @@ export function buildJobCompletionAssessment(
       gaps.push(`taxonomy missing ${taxonomyMissing || 0}, duplicated ${taxonomyDuplicated || 0}`);
     }
     if (snapshot.state === 'parseable' && scored != null && snapshot.jobs != null && scored !== snapshot.jobs) {
-      gaps.push(`scored ${scored} ≠ saved score-ready ${snapshot.jobs}`);
+      gaps.push(`scored ${scored} ≠ saved score-ready ${snapshot.jobs}${savedSnapshotFailureCause()}`);
     }
     if (receiptScoreReady != null && scored != null && receiptScoreReady !== scored && !postCompletionAppend) {
       gaps.push(`terminal score-ready ${receiptScoreReady} ≠ scored ${scored}`);
@@ -3753,7 +3861,7 @@ export function buildJobCompletionAssessment(
   }
   if (!completedPreferenceFiltered && !postCompletionAppend && receiptScoreReady != null
     && snapshot.state === 'parseable' && snapshot.jobs != null && receiptScoreReady !== snapshot.jobs) {
-    gaps.push(`terminal score-ready ${receiptScoreReady} ≠ saved score-ready ${snapshot.jobs}`);
+    gaps.push(`terminal score-ready ${receiptScoreReady} ≠ saved score-ready ${snapshot.jobs}${savedSnapshotFailureCause()}`);
   }
   if (distinctRunTokens.length > 1) {
     gaps.push(`run tokens disagree (${runTokens.map(([source, token]) => `${source} \`${token}\``).join(', ')})`);
@@ -5281,6 +5389,7 @@ export function buildJobRecoverySnapshot(canvasFilePath, currentNodeIds = new Se
   // at crash-recovery when nothing is wrong. The report already holds the
   // disambiguating fact (the pipeline's own phase); say which case this is.
   let livePipeline = null;
+  let livePreferences = null;
   try {
     const telemetry = getJobsTelemetryForReport(currentJobHubIds, reportWindowId);
     // jobsTelemetry is process-global. Attribute it only when its owning hub is
@@ -5288,6 +5397,7 @@ export function buildJobRecoverySnapshot(canvasFilePath, currentNodeIds = new Se
     // canvas's absent sidecars into a claimed clean finish.
     if (telemetry?.nodeId && currentNodeIds?.has?.(telemetry.nodeId)) {
       livePipeline = telemetry.pipeline || null;
+      livePreferences = telemetry.preferences || null;
     }
   } catch { /* telemetry may not be ready */ }
   // A null telemetry here has two very different causes and the sidecar note
@@ -5312,7 +5422,7 @@ export function buildJobRecoverySnapshot(canvasFilePath, currentNodeIds = new Se
   // The receipt is the sole durable answer for a prior-process run; render it
   // before the transient recovery artifacts so a reader does not mistake their
   // absence for either success or failure.
-  lines.push(...formatArtifactReceipts(artifacts, currentNodeIds, livePipeline, telemetryAmbiguity));
+  lines.push(...formatArtifactReceipts(artifacts, currentNodeIds, livePipeline, telemetryAmbiguity, livePreferences));
   lines.push(...formatRecoverySidecars(sidecarArtifacts, currentNodeIds, {
     absentNote,
     durableCleanFinish,
@@ -7002,6 +7112,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           flag = ' ⚠️ (NOT a user action — `user-done` is the abort-free early exit: repeated extractor failures including the site-changed/anti-bot give-up. The run stopped here, so later pages and later sources were never read.)';
         } else if (v.stopReason === 'browser-closed') {
           flag = ' ⚠️ (this source\'s browser window disconnected before the walk ended — a crash, a sleep/wake or a closed window all look the same here. Later pages and later queries of this source were never read; later sources still ran.)';
+        } else if (v.stopReason === 'page-unreadable') {
+          flag = ' ⚠️ (this source\'s results page stopped responding to the scraper (a detached page) and one fresh tab could not replace it; the browser itself was still running. Later pages and later queries of this source were never read; rows found before it are kept and later sources still ran.)';
         } else if (v.stopReason === 'detail-enrichment-failed') {
           // Distinct from the detailBlock note below, which does NOT stop the walk.
           flag = ' ⚠️ (the description/detail fetch failed hard and stopped this source mid-walk — later pages were not read, and the run ended here, so any source after it never ran.)';
@@ -7221,6 +7333,17 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         return parts.length > 0 ? ` — ${parts.join(' ')}` : '';
       };
       const expectedSkipCodes = new Set(['country-source-skipped', 'config-missing']);
+      // "Finish with saved listings" notes are the person's own choice, not a
+      // miss: give them their own line so a source that had already stopped on
+      // a block/error is neither hidden among "no retained warning" sources nor
+      // reported as an unexplained miss.
+      const finishedWithSavedLabels = {
+        'collection-finished-after-source-failure': 'had already stopped on a block or error earlier in this run; not retried after the finish',
+        'collection-finished-with-saved-listings': 'not resumed',
+      };
+      const finishedWithSaved = entries
+        .filter(([, v]) => v.warning && Object.hasOwn(finishedWithSavedLabels, v.warning.code))
+        .map(([k, v]) => `${k} (${v.count} row(s) kept — ${finishedWithSavedLabels[v.warning.code]})`);
       const zeroExpectedSkip = entries
         .filter(([, v]) => v.count === 0 && v.warning && expectedSkipCodes.has(v.warning.code))
         .map(([k, v]) => {
@@ -7228,6 +7351,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         });
       const zeroWarn = entries
         .filter(([sourceId, v]) => v.count === 0 && v.warning && !expectedSkipCodes.has(v.warning.code)
+          && !Object.hasOwn(finishedWithSavedLabels, v.warning.code)
           && !latestResolvedRecovery(t, sourceId, s.ts))
         .map(([k, v]) => {
           return `${k} (${v.warning.code})${warningDetail(v.warning, v)}`;
@@ -7244,6 +7368,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       if (zeroExpectedSkip.length) {
         lines.push(`  - ℹ️ intentionally not queried (scope/configuration): ${zeroExpectedSkip.join(', ')}`);
       }
+      if (finishedWithSaved.length) {
+        lines.push(`  - ℹ️ collection deliberately finished with saved listings; unfinished source(s): ${finishedWithSaved.join(', ')}`);
+      }
       if (zeroTitleFiltered.length) {
         lines.push(`  - 0 retained after the title relevance gate: ${zeroTitleFiltered.join(', ')}`);
       }
@@ -7258,6 +7385,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // line rather than reusing the "0 results" wording.
       const nonZeroWarn = entries
         .filter(([sourceId, v]) => v.count > 0 && v.warning && !expectedSkipCodes.has(v.warning.code)
+          && !Object.hasOwn(finishedWithSavedLabels, v.warning.code)
           && !latestResolvedRecovery(t, sourceId, s.ts))
         .map(([k, v]) => {
           return `${k} (${v.warning.code}${v.warning.severity ? `/${v.warning.severity}` : ''}, ${v.count} row(s) still returned)${warningDetail(v.warning, v)}`;
@@ -7960,17 +8088,23 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // ordinary event ring here. Classify by the retained phase contract instead
     // of rendering every detail anomaly twice (once bare in Recent phases and
     // once with its full diagnostic evidence below).
-    // Run-origin rows (source-start / query-start / the location resolution and
-    // host-redirect trail) are emitted at most once per source, so on a long run
-    // the 30-slot recency ring evicts them behind per-job chatter — taking the
-    // query, the requested location, and any geo-redirect with them. They are
-    // retained separately now; render them so the reader keeps the run's
+    // Run-origin rows (source-start / the location resolution and host-redirect
+    // trail, once per source; query-start / reveal-finished, once per query)
+    // are evicted from the 30-slot recency ring behind per-job chatter on a long
+    // run — taking the query, the requested location, and any geo-redirect with
+    // them. They are retained in their own bounded ring, where each source's
+    // first source-start and location rows are pinned and any eviction is
+    // counted (originsDropped); render them so the reader keeps the run's
     // identity no matter how long the walk got.
     const origins = Array.isArray(browserScrape.origins) ? browserScrape.origins : [];
     const recent = allScrapeEvents.filter(e => !isDetailAnomaly(e)).slice(-8);
     const originsNotInRecent = origins.filter(o => !recent.some(e => e.ts === o.ts && e.phase === o.phase));
+    const originsDropped = Math.max(0, Math.floor(Number(browserScrape.originsDropped) || 0));
+    if (originsNotInRecent.length === 0 && originsDropped > 0) {
+      lines.push(`- Source/query origin phases: ${originsDropped} earlier row${originsDropped === 1 ? '' : 's'} omitted (origin ring limit).`);
+    }
     if (originsNotInRecent.length > 0) {
-      lines.push('- Source/query origin phases (retained — these are emitted once per source and would otherwise age out of the ring below):');
+      lines.push(`- Source/query origin phases (retained — source and location rows once per source, query rows once per query; they would otherwise age out of the ring below)${originsDropped > 0 ? ` (${originsDropped} earlier row${originsDropped === 1 ? '' : 's'} omitted)` : ''}:`);
       for (const e of originsNotInRecent) {
         const ageMs = eventAgeMs(e.ts);
         const bits = [

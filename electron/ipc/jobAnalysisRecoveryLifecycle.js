@@ -19,7 +19,16 @@ const RECOVERY_MODES = new Set(['automatic', 'manual', 'direct', 'restart', 'rea
 const REASONS = new Set([
   'normal-save', 'reanalysis-save', 'description-recovery-save', 'current-unavailable',
   'corrupt-current', 'legacy-fallback', 'career-data-clear', 'scrape-clear', 'node-delete',
-  'run-discard', 'cleanup-failed', 'retired-before-write', 'reanalysis-score-complete', 'unknown',
+  'run-discard', 'cleanup-failed', 'retired-before-write', 'reanalysis-score-complete',
+  // A snapshot save refused because even the smallest lossless form (and the
+  // batch-job omission) exceeded the shared artifact limit. The previous
+  // snapshot on disk was kept unchanged.
+  'artifact-too-large',
+  // The same refusal for a Solve's rewrite of the saved scrape, and for the
+  // run-keyed description-recovery checkpoint. Kept apart from
+  // 'artifact-too-large' so the report never reads them as the scoring save.
+  'description-recovery-too-large', 'checkpoint-too-large',
+  'unknown',
 ]);
 const tails = new Map();
 

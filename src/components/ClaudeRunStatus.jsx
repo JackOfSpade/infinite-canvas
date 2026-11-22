@@ -55,7 +55,7 @@ function RunStatusChildLines({ entry }) {
     <div className="min-w-0 rounded-md border border-white/10 bg-white/[0.03] px-2 py-2">
       <div className="text-[10px] font-semibold uppercase tracking-wide text-violet-200/65">{entry.label}</div>
       <div className="mt-1 text-xs font-medium text-white/85">{entry.headline}</div>
-      {entry.lines.length > 0 && <div className="mt-0.5 break-words text-[11px] text-white/60">{entry.lines.join(' · ')}</div>}
+      {entry.lines.length > 0 && <div className="mt-0.5 whitespace-pre-line break-words text-[11px] text-white/60">{entry.lines.join('\n')}</div>}
       {time.lines.length > 0 && (
         <p className={`mt-1 text-[11px] tabular-nums ${time.stale ? 'font-medium text-amber-200' : 'text-white/50'}`}>{time.lines.join(' · ')}</p>
       )}
@@ -109,7 +109,7 @@ function RunStatusOwnerCard({ entry, childEntries, pauseFooter }) {
   if (entry.claudeRequestId) {
     return <ClaudeTaskProgress requestId={entry.claudeRequestId} contextPrefix={entry.label} region={`${entry.label} status`} footer={footer} />;
   }
-  return <RunStatusSummaryCard entry={entry} detail={entry.lines.join(' · ')} footer={footer} />;
+  return <RunStatusSummaryCard entry={entry} detail={entry.lines.join('\n')} footer={footer} />;
 }
 
 function RunStatusCard({ entry, childEntries = [], showPause }) {
@@ -127,7 +127,7 @@ function RunStatusCard({ entry, childEntries = [], showPause }) {
   if (entry.claudeRequestId) {
     return <ClaudeTaskProgress requestId={entry.claudeRequestId} contextPrefix={entry.label} region={`${entry.label} status`} footer={pauseFooter} />;
   }
-  return <RunStatusSummaryCard entry={entry} detail={entry.lines.join(' · ')} footer={pauseFooter} />;
+  return <RunStatusSummaryCard entry={entry} detail={entry.lines.join('\n')} footer={pauseFooter} />;
 }
 
 /** Every running module's status. pauseOwnedBy names the handoff whose row holds that run's Pause. */

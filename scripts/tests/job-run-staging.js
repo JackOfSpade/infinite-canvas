@@ -6684,4 +6684,21 @@ export default [
       }
     },
   },
+  {
+    name: 'running Job Search: the all-sites total names every site and sits on its own line (2026-11-22)',
+    run: async () => {
+      const { allSitesCollectedLine } = await import('../../src/utils/jobSourceCountLine.js');
+      const line = allSitesCollectedLine(11837, {
+        glassdoor: { count: 820 }, linkedin: { count: 3910 }, dice: { count: 5142 }, indeed: { count: 1438 }, google: { count: 476 },
+        remoteok: { count: 23 }, usajobs: { count: 14 }, weworkremotely: { count: 14 }, ziprecruiter: { count: 0 },
+      });
+      assert(line.startsWith('All sites: Dice 5,142, LinkedIn 3,910, Indeed 1,438, Glassdoor 820, Google for Jobs 476'), line);
+      assert(line.includes('11,837 listings found so far across all sites') && line.includes('a job listed on two sites counts twice'), line);
+      assert(!line.includes('ZipRecruiter 0'), 'a site with nothing yet is left out');
+      const processing = await fs.promises.readFile(path.resolve('src/nodes/jobsearch/JobSearchProcessingState.jsx'), 'utf8');
+      assert(processing.includes('activeDetailLine, collectedStatus, scoringStatus'), 'the active site line and the all-sites line are separate lines');
+      const dock = await fs.promises.readFile(path.resolve('src/components/ClaudeRunStatus.jsx'), 'utf8');
+      assert(!dock.includes("entry.lines.join(' · ')"), 'status lines are not run together with the same dot the breakdown uses');
+    },
+  },
 ];

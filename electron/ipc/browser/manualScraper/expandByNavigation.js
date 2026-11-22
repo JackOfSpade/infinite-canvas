@@ -152,6 +152,9 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
   // Glassdoor's panel fallback needs the list page intact, so its job pages
   // are only ever opened in the separate detail tab — never on the list page.
   if (glassdoorJobPage && !detailPage) {
+    // Recorded so a route that never opens a page says why (see 'no-reads').
+    jobPageRoute.detailTabFailed = true;
+    logger.info(`[BrowserScraper] ${overlayBase.srcName}: could not open the job-page tab; this batch goes to the panel`);
     return {
       jobs: enhanced, rows: enhanced, rowOutcomes, jobPageRoute,
       descError: null, descWarning: null, expandedCount: 0,
@@ -793,7 +796,9 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
                     ? 'terminal-hard-block-after-wait'
                     : detailWaitResult === 'skip'
                       ? 'session-blocked-after-wait'
-                      : 'aborted-during-wait',
+                      : detailWaitResult === 'page-detached'
+                        ? 'detail-page-detached'
+                        : 'aborted-during-wait',
                 waitResult: detailWaitResult,
                 navigationStatus,
                 finalUrl: fetchPage.url().slice(0, 240),
@@ -830,7 +835,8 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
 
             if (!detailChallengeResolved) {
               const hardBlock = detailChallengeAction === 'terminal-stop' || detailWaitResult === 'hard-block';
-              logger.warn(`[BrowserScraper] ${overlayBase.srcName}: detail enrichment ${hardBlock ? 'hard-blocked' : 'remained session-blocked'}; retaining list rows and stopping detail pass (${evidence})`);
+              const detailTabDetached = detailWaitResult === 'page-detached';
+              logger.warn(`[BrowserScraper] ${overlayBase.srcName}: detail enrichment ${hardBlock ? 'hard-blocked' : detailTabDetached ? 'stopped: the detail tab stopped responding during the check wait' : 'remained session-blocked'}; retaining list rows and stopping detail pass (${evidence})`);
               recordManualScraperTelemetry({
                 phase: 'desc-miss', srcName: overlayBase.srcName,
                 key: `${(job.title || job.url || '?').slice(0, 65)} | detail challenge`,
@@ -851,10 +857,14 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
                 } : {}),
                 evidence: hardBlock
                   ? `${overlayBase.srcName} returned a non-interactive human-verification hard block while fetching "${job.title || 'an untitled listing'}" (${challengeSignals?.title || 'untitled page'} at ${challengeSignals?.url || fetchPage.url()}). Detail requests stopped immediately.`
-                  : `${overlayBase.srcName} re-served a verification challenge while fetching "${job.title || 'an untitled listing'}" after the detail tab was presented for solving. Relevant listing rows were retained, but this and later rows may lack full descriptions.`,
+                  : detailTabDetached
+                    ? `The ${overlayBase.srcName} detail tab stopped responding to the scraper while it waited on a check for "${job.title || 'an untitled listing'}". Relevant listing rows were retained, but this and later rows may lack full descriptions.`
+                    : `${overlayBase.srcName} re-served a verification challenge while fetching "${job.title || 'an untitled listing'}" after the detail tab was presented for solving. Relevant listing rows were retained, but this and later rows may lack full descriptions.`,
                 suggestion: hardBlock
                   ? `Retry unlocks after the wait. Let the IP/session restriction on ${overlayBase.srcName} cool down, confirm the site opens normally in Chrome, then choose Retry. Skip continues without these listings.`
-                  : `Complete the site verification in normal Chrome, then rerun ${overlayBase.srcName} for full descriptions.`,
+                  : detailTabDetached
+                    ? `Rerun ${overlayBase.srcName} for full descriptions.`
+                    : `Complete the site verification in normal Chrome, then rerun ${overlayBase.srcName} for full descriptions.`,
               };
               // A terminal/session-level stop must remain visible for every
               // later row whose list-time description stays empty.

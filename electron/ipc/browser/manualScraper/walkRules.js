@@ -115,6 +115,27 @@ export function browserClosedWarning({ srcName, unreadQueries = 0, queryTotal = 
   };
 }
 
+/**
+ * Warning for a source whose results page stopped responding to the scraper
+ * and could not be reopened in a fresh tab. Same severity and recovery as a
+ * closed window (rows kept, source left retryable), but it says what was
+ * observed: the page stopped responding, the window did not close.
+ */
+export function pageUnreadableWarning({ srcName, queryIndex = null, pageNum = null, unreadQueries = 0, queryTotal = 0 } = {}) {
+  const where = queryIndex != null
+    ? ` (search ${queryIndex} of ${queryTotal}${pageNum != null ? `, page ${pageNum}` : ''})`
+    : '';
+  const unread = unreadQueries > 0
+    ? ` ${unreadQueries} of ${queryTotal} search${queryTotal === 1 ? '' : 'es'} had not started.`
+    : '';
+  return {
+    code: 'browser-closed',
+    severity: 'block',
+    evidence: `The ${srcName} results page stopped responding to the scraper${where} and could not be reopened, so its results are incomplete.${unread}`,
+    suggestion: `Run ${srcName} again to read the rest. The jobs found before the page stopped responding are kept.`,
+  };
+}
+
 // Keep terminal causes separate from the generic "completed" outcome.  In
 // particular, FAST mode can intentionally stop a source after its aggregate
 // result cap; reporting that as a normal completion makes a breadth-limited
@@ -123,6 +144,7 @@ export function resolveManualSourceStopReason({
   earlyExit = false,
   aborted = false,
   browserClosed = false,
+  pageUnreadable = false,
   sourceSkipped = false,
   detailEnrichmentFailed = false,
   hitPerSourceCap = false,
@@ -146,6 +168,10 @@ export function resolveManualSourceStopReason({
   // killed it, or the window being closed). Nothing here ran out of results,
   // so it must never share a reason with a finished walk.
   if (browserClosed) return 'browser-closed';
+  // The walk's results page stopped responding (Puppeteer "detached Frame")
+  // and one fresh tab could not take its place. The browser itself was still
+  // there, so this is not the window-closed case above.
+  if (pageUnreadable) return 'page-unreadable';
   // `earlyExit` has historically meant a user-done / source-local stop, not
   // necessarily an AbortSignal. Keep that public result enum stable; callers
   // pass `aborted` only for an actual cancelled signal.
@@ -308,6 +334,10 @@ export function composeDetailBlockReprobeResult(probeResult = {}, restResult = n
         + Math.max(0, Number(rest.attemptedCount) || 0),
       unavailableDetailDropped: probeUnavailable + Math.max(0, Number(rest.unavailableDetailDropped) || 0),
       boardClosedDetailKept: probeBoardClosed + Math.max(0, Number(rest.boardClosedDetailKept) || 0),
+      // Glassdoor's route summary: without it the source loop could not see a
+      // panel-only block armed inside the re-probe and left it running next
+      // to the source-wide block (two cooldown ladders).
+      ...((rest.descriptionRoute || probeResult.descriptionRoute) ? { descriptionRoute: rest.descriptionRoute || probeResult.descriptionRoute } : {}),
     };
   }
   return {
@@ -316,6 +346,8 @@ export function composeDetailBlockReprobeResult(probeResult = {}, restResult = n
       ...(Array.isArray(restJobs) ? restJobs : []).map(job => ({
         ...job,
         descriptionDeferredReason: reprobeOfCode,
+        // Never requested: the failed re-probe left the rest of the page waiting.
+        descriptionDeferredBy: 'block-cooldown',
       })),
     ],
     descError: null,
@@ -324,6 +356,7 @@ export function composeDetailBlockReprobeResult(probeResult = {}, restResult = n
     attemptedCount: Math.max(0, Number(probeResult.attemptedCount) || 0),
     unavailableDetailDropped: probeUnavailable,
     boardClosedDetailKept: probeBoardClosed,
+    ...(probeResult.descriptionRoute ? { descriptionRoute: probeResult.descriptionRoute } : {}),
   };
 }
 

@@ -58,15 +58,24 @@ export const GLASSDOOR_JOB_PAGE_SETTLE_MS = 2500;
  * 'unreadable' = the page probe failed twice; it ends only that batch's job
  * pages (like a first 429's batch fallback) without counting toward the 429
  * ladder or raising the gap, since nothing showed Glassdoor throttling.
+ * 'no-reads' = the route had rows it could open in GLASSDOOR_JOB_PAGE_MAX_ZERO_READ_BATCHES
+ * batches in a row and read none of them (no detail tab, every page unreadable
+ * or skipped); it turns the route off for the rest of the source run. Before
+ * this existed a route that read nothing stayed "on" all run, which kept a
+ * panel block panel-only and let the walk race past its cooldown (2026-11-22:
+ * 1 failed panel request left 841 listings never requested).
  */
-export const GLASSDOOR_JOB_PAGE_STOP_REASONS = Object.freeze(['none', 'unreadable', '429-first', '429-second', 'challenge']);
+export const GLASSDOOR_JOB_PAGE_STOP_REASONS = Object.freeze(['none', 'unreadable', 'no-reads', '429-first', '429-second', 'challenge']);
 
-const STOP_REASON_RANK = { none: 0, unreadable: 1, '429-first': 2, '429-second': 3, challenge: 4 };
+const STOP_REASON_RANK = { none: 0, unreadable: 1, 'no-reads': 2, '429-first': 3, '429-second': 4, challenge: 5 };
+
+/** Batches in a row with openable rows and nothing read before the route turns off. */
+export const GLASSDOOR_JOB_PAGE_MAX_ZERO_READ_BATCHES = 2;
 
 /** The source-run ladder state kept on walkPlan.detailPacing. */
 export function glassdoorJobPageState(detailPacing) {
   const pacing = detailPacing && typeof detailPacing === 'object' ? detailPacing : {};
-  pacing.glassdoorJobPage ||= { rateLimits: 0, off: false, stopReason: 'none', fromJobPage: 0, fromPanel: 0 };
+  pacing.glassdoorJobPage ||= { rateLimits: 0, off: false, stopReason: 'none', fromJobPage: 0, fromPanel: 0, zeroReadBatches: 0, lastBatchFromJobPage: null, lastBatchReadNothing: false };
   return pacing.glassdoorJobPage;
 }
 
@@ -216,6 +225,26 @@ export function noteGlassdoorJobPageRateLimit(state) {
   return { stopReason: '429-first', gapMs: GLASSDOOR_JOB_PAGE_RATE_LIMITED_GAP_MS };
 }
 
+/**
+ * Count a batch in which the route had rows it could open and read none of
+ * them. A batch that read a row (or stopped on a 429 or a challenge, which
+ * have their own ladder) resets the count. Returns true when the route has
+ * just been turned off.
+ */
+export function noteGlassdoorJobPageBatchReads(state, { eligible = 0, read = 0, closed = 0, stopReason = 'none' } = {}) {
+  if (state.off) return false;
+  if (count(read) > 0 || count(closed) > 0 || ['429-first', '429-second', 'challenge'].includes(stopReason)) {
+    state.zeroReadBatches = 0;
+    return false;
+  }
+  if (count(eligible) === 0) return false;
+  state.zeroReadBatches = count(state.zeroReadBatches) + 1;
+  if (state.zeroReadBatches < GLASSDOOR_JOB_PAGE_MAX_ZERO_READ_BATCHES) return false;
+  state.off = true;
+  state.stopReason = mostSevereStopReason(state.stopReason, 'no-reads');
+  return true;
+}
+
 /** A challenge turns the job-page route off for the rest of the source run. */
 export function noteGlassdoorJobPageChallenge(state) {
   state.off = true;
@@ -281,21 +310,29 @@ function combinePanelResults(a, b) {
 
 /**
  * True when a panel block in this Glassdoor batch result must arm the
- * source-wide detail block: only once the job-page route is off too.
- * While job pages are still on, the block stays panel-only (state.panelBlock).
+ * source-wide detail block: once the job-page route is off, or when the job
+ * page read nothing in the batch just walked. A panel-only block is only
+ * worth keeping while job pages are actually reading rows; when neither route
+ * reads, walking on defers every row without a request, so the walk must wait
+ * out the cooldown instead (the source-wide block does that). "Read nothing"
+ * means the route had rows it could open and neither read nor closed any of
+ * them; a batch with no openable rows, or one whose job pages found the
+ * listings closed, says nothing against a healthy route.
  */
 export function glassdoorPanelBlockIsSourceWide(detailPacing) {
-  return !!detailPacing?.glassdoorJobPage?.off;
+  const state = detailPacing?.glassdoorJobPage;
+  if (!state) return false;
+  return !!state.off || state.lastBatchReadNothing === true;
 }
 
 /**
- * Hand a panel-only block over to the source-wide block once the job-page route
- * has turned off. Returns { code, at } to arm, or null. Clears the panel-only
- * block so it is not applied twice.
+ * Hand a panel-only block over to the source-wide block once it is source-wide
+ * (see glassdoorPanelBlockIsSourceWide). Returns { code, at } to arm, or null.
+ * Clears the panel-only block so it is not applied twice.
  */
 export function takeGlassdoorPanelBlockForSource(detailPacing) {
   const state = detailPacing?.glassdoorJobPage;
-  if (!state?.off || !state.panelBlock?.code) return null;
+  if (!glassdoorPanelBlockIsSourceWide(detailPacing) || !state.panelBlock?.code) return null;
   const { code, at } = state.panelBlock;
   state.panelBlock = null;
   return { code, at: Number(at) || Date.now() };
@@ -358,8 +395,9 @@ export async function expandGlassdoorDescriptions(page, jobs, sourceId, overlayB
     }
     return result;
   };
+  // These rows were never requested: the block's cooldown deferred them.
   const deferPanelRows = (indexes, code) => {
-    for (const index of indexes) rows[index] = { ...rows[index], descriptionDeferredReason: code };
+    for (const index of indexes) rows[index] = { ...rows[index], descriptionDeferredReason: code, descriptionDeferredBy: 'block-cooldown' };
   };
   if (panelIndexes.length > 0 && !signal?.aborted) {
     const block = state.panelBlock;
@@ -404,14 +442,24 @@ export async function expandGlassdoorDescriptions(page, jobs, sourceId, overlayB
 
   const fromJobPage = count(navResult?.expandedCount);
   const fromPanel = count(panelResult?.expandedCount);
+  const jobPageClosed = count(navResult?.unavailableDetailDropped) + count(navResult?.boardClosedDetailKept);
   state.fromJobPage = count(state.fromJobPage) + fromJobPage;
   state.fromPanel = count(state.fromPanel) + fromPanel;
+  // null = the route was off before this batch; 0 = it was on and read nothing.
+  state.lastBatchFromJobPage = routeOffAtStart ? null : fromJobPage;
+  // The route was on, had rows to open, and neither read nor closed any of
+  // them. A 429 or a challenge counts too: then no route is reading.
+  state.lastBatchReadNothing = !routeOffAtStart && eligible.length > 0 && fromJobPage === 0 && jobPageClosed === 0;
+  noteGlassdoorJobPageBatchReads(state, {
+    eligible: eligible.length, read: fromJobPage, closed: jobPageClosed, stopReason: batchStopReason,
+  });
   const route = {
     jobPageEligible: eligible.length,
     jobPageOpened: count(navResult?.jobPageRoute?.opened),
     silentMisses: count(navResult?.jobPageRoute?.silentMisses),
+    detailTabFailed: navResult?.jobPageRoute?.detailTabFailed === true,
     fromJobPage,
-    jobPageClosed: count(navResult?.unavailableDetailDropped) + count(navResult?.boardClosedDetailKept),
+    jobPageClosed,
     panelFallback: panelIndexes.length,
     fromPanel,
     stopReason: batchStopReason,

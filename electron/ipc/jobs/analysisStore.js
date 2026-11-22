@@ -588,7 +588,11 @@ function buildJobAnalysisReportMetadata(snapshot) {
 // Serialize the durable envelope WITHOUT the size assertion. The recovery
 // writer retries a smaller form before it fails the whole save, so the assert
 // lives in serializeJobAnalysisSnapshot and in prepareJobAnalysisSnapshotForWrite.
-function serializeJobAnalysisSnapshotText(snapshot) {
+// `compact` drops indentation only (a lossless size fallback). The envelope
+// stays the physically first property either way, so the bounded-prefix
+// readers (bug report and checkpoint metadata) that skip JSON whitespace keep
+// reading `reportMetadata` from the start of the file.
+function serializeJobAnalysisSnapshotText(snapshot, { compact = false } = {}) {
   const payload = snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)
     ? snapshot
     : {};
@@ -596,6 +600,15 @@ function serializeJobAnalysisSnapshotText(snapshot) {
   // incoming copy rather than spreading it through as stale or spoofed state.
   const { reportMetadata: _ignoredReportMetadata, ...rest } = payload;
   const reportMetadata = buildJobAnalysisReportMetadata(rest);
+  if (compact) {
+    if (!reportMetadata) return `${JSON.stringify(rest)}\n`;
+    const parts = [`${JSON.stringify('reportMetadata')}:${JSON.stringify(reportMetadata)}`];
+    for (const key of Object.keys(rest)) {
+      const encoded = JSON.stringify(rest[key]);
+      if (encoded !== undefined) parts.push(`${JSON.stringify(key)}:${encoded}`);
+    }
+    return `{${parts.join(',')}}\n`;
+  }
   if (!reportMetadata) return `${JSON.stringify(rest, null, 2)}\n`;
 
   // Object-property enumeration promotes array-index keys ahead of ordinary
@@ -653,23 +666,143 @@ function jobAnalysisSnapshotWithOmittedPreviewBatchJobs(persisted) {
   };
 }
 
+// Job Preferences writes every assessment twice: on the candidate row
+// (`jobs[i].preferenceAssessment`, read by scoring, the Board, history and
+// research) and again inside `preferenceEvaluation.audits[k]` (the audit row is
+// `{ index, title, company, listingIdentity, ...preferenceAssessment }`). On a
+// 5102-row pool that copy alone can push the snapshot past the artifact limit.
+// The size ladder may store an audit as its non-assessment fields plus a
+// pointer to the row whose assessment it repeats; every snapshot read restores
+// the exact audit before any caller sees it. The ROW copy is the one kept
+// because more readers depend on it, including bounded/bug-report readers that
+// never run the restore.
+const PREFERENCE_AUDIT_ASSESSMENT_REF = 'preferenceAssessmentFromJobIndex';
+const PREFERENCE_AUDITS_DEDUPLICATED_FLAG = 'preferenceAuditAssessmentsDeduplicated';
+const PREFERENCE_AUDIT_HEADER_KEYS = new Set(['index', 'title', 'company', 'listingIdentity']);
+
+function isPlainJsonObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function restoredPreferenceAudit(audit, jobs) {
+  const ref = audit[PREFERENCE_AUDIT_ASSESSMENT_REF];
+  const assessment = Number.isSafeInteger(ref) && ref >= 0 && ref < jobs.length
+    ? jobs[ref]?.preferenceAssessment
+    : null;
+  if (!isPlainJsonObject(assessment)) return null;
+  const header = Object.fromEntries(Object.entries(audit).filter(([key]) => key !== PREFERENCE_AUDIT_ASSESSMENT_REF));
+  // A deep copy: before the write the audit and the row held independent
+  // objects, so a reader mutating one must not change the other.
+  return { ...header, ...structuredClone(assessment) };
+}
+
+function jobAnalysisSnapshotWithDeduplicatedPreferenceAudits(persisted) {
+  const jobs = persisted?.jobs;
+  const evaluation = persisted?.preferenceEvaluation;
+  const audits = isPlainJsonObject(evaluation) ? evaluation.audits : null;
+  if (!Array.isArray(jobs) || !Array.isArray(audits) || audits.length === 0) return null;
+  if (Object.hasOwn(persisted, PREFERENCE_AUDITS_DEDUPLICATED_FLAG)) return null;
+  const rowByAssessment = new Map();
+  jobs.forEach((job, index) => {
+    if (!isPlainJsonObject(job?.preferenceAssessment)) return;
+    const key = JSON.stringify(job.preferenceAssessment);
+    if (!rowByAssessment.has(key)) rowByAssessment.set(key, index);
+  });
+  if (rowByAssessment.size === 0) return null;
+  let deduplicated = 0;
+  const nextAudits = audits.map((audit) => {
+    if (!isPlainJsonObject(audit) || Object.hasOwn(audit, PREFERENCE_AUDIT_ASSESSMENT_REF)) return audit;
+    const candidates = [];
+    if (Number.isSafeInteger(audit.index) && audit.index >= 0 && audit.index < jobs.length) candidates.push(audit.index);
+    // Merged or re-ordered evaluations can carry an index that no longer
+    // names the same row; fall back to an exact assessment match.
+    const assessmentPart = Object.fromEntries(Object.entries(audit).filter(([key]) => !PREFERENCE_AUDIT_HEADER_KEYS.has(key)));
+    const byContent = rowByAssessment.get(JSON.stringify(assessmentPart));
+    if (byContent !== undefined && !candidates.includes(byContent)) candidates.push(byContent);
+    const original = JSON.stringify(audit);
+    for (const ref of candidates) {
+      const assessment = jobs[ref]?.preferenceAssessment;
+      if (!isPlainJsonObject(assessment)) continue;
+      const compact = Object.fromEntries([
+        ...Object.entries(audit).filter(([key]) => !Object.hasOwn(assessment, key)),
+        [PREFERENCE_AUDIT_ASSESSMENT_REF, ref],
+      ]);
+      // Only store the pointer when the read-side restore reproduces the
+      // exact serialized audit (values and key order); otherwise keep it.
+      const restored = restoredPreferenceAudit(compact, jobs);
+      if (restored && JSON.stringify(restored) === original) {
+        deduplicated += 1;
+        return compact;
+      }
+    }
+    return audit;
+  });
+  if (deduplicated === 0) return null;
+  return {
+    ...persisted,
+    [PREFERENCE_AUDITS_DEDUPLICATED_FLAG]: true,
+    preferenceEvaluation: { ...evaluation, audits: nextAudits },
+  };
+}
+
+// Every reader of a written snapshot artifact (current, success generations,
+// description-recovery checkpoints) passes the parsed JSON through here, so a
+// de-duplicated file reads back exactly as the snapshot that was saved. A flag
+// with an unresolvable pointer means the file is malformed: fail like a parse
+// error rather than hand callers audits with missing assessments.
+export function restoreJobAnalysisSnapshotAfterRead(snapshot) {
+  if (!isPlainJsonObject(snapshot) || !Object.hasOwn(snapshot, PREFERENCE_AUDITS_DEDUPLICATED_FLAG)) return snapshot;
+  const { [PREFERENCE_AUDITS_DEDUPLICATED_FLAG]: flag, ...rest } = snapshot;
+  const evaluation = rest.preferenceEvaluation;
+  if (flag !== true || !Array.isArray(rest.jobs) || !isPlainJsonObject(evaluation) || !Array.isArray(evaluation.audits)) {
+    throw new SyntaxError('Saved job analysis has an unreadable preference audit de-duplication record.');
+  }
+  const audits = evaluation.audits.map((audit) => {
+    if (!isPlainJsonObject(audit) || !Object.hasOwn(audit, PREFERENCE_AUDIT_ASSESSMENT_REF)) return audit;
+    const restored = restoredPreferenceAudit(audit, rest.jobs);
+    if (!restored) throw new SyntaxError('Saved job analysis has a preference audit that points at no saved assessment.');
+    return restored;
+  });
+  return { ...rest, preferenceEvaluation: { ...evaluation, audits } };
+}
+
+function parseJobAnalysisSnapshotText(text) {
+  return restoreJobAnalysisSnapshotAfterRead(JSON.parse(text));
+}
+
+// Size ladder, lossless steps first: pretty JSON, then compact JSON, then
+// compact JSON with the duplicated preference assessments stored once. Only
+// then the existing lossy step (omit preview batch jobs). Only throw when
+// none fits.
 function prepareJobAnalysisSnapshotForWrite(snapshot, { maxBytes = MAX_JOB_ANALYSIS_ARTIFACT_BYTES } = {}) {
   const limit = Number.isFinite(maxBytes) && maxBytes >= 0 ? maxBytes : MAX_JOB_ANALYSIS_ARTIFACT_BYTES;
+  const fits = text => Buffer.byteLength(text, 'utf8') <= limit;
   const persisted = jobAnalysisSnapshotWithoutPreviewBatchPrompts(snapshot);
-  const serialized = serializeJobAnalysisSnapshotText(persisted);
-  if (Buffer.byteLength(serialized, 'utf8') <= limit) return { snapshot: persisted, serialized };
-  const omitted = jobAnalysisSnapshotWithOmittedPreviewBatchJobs(persisted);
+  // Each rejected serialization is dropped before the next one is built: on
+  // this path every candidate is over 128 MiB, and holding all of them at once
+  // would multiply the main process's memory peak.
+  let serialized = serializeJobAnalysisSnapshotText(persisted);
+  if (fits(serialized)) return { snapshot: persisted, serialized };
+  serialized = null;
+  let smallest = { snapshot: persisted, serialized: serializeJobAnalysisSnapshotText(persisted, { compact: true }) };
+  if (fits(smallest.serialized)) return smallest;
+  const deduplicated = jobAnalysisSnapshotWithDeduplicatedPreferenceAudits(persisted);
+  if (deduplicated) {
+    smallest = null;
+    smallest = { snapshot: deduplicated, serialized: serializeJobAnalysisSnapshotText(deduplicated, { compact: true }) };
+    if (fits(smallest.serialized)) return smallest;
+  }
+  const omitted = jobAnalysisSnapshotWithOmittedPreviewBatchJobs(smallest.snapshot);
   if (omitted) {
-    const omittedSerialized = serializeJobAnalysisSnapshotText(omitted);
-    if (Buffer.byteLength(omittedSerialized, 'utf8') <= limit) {
-      return { snapshot: omitted, serialized: omittedSerialized };
-    }
+    smallest = null;
+    smallest = { snapshot: omitted, serialized: serializeJobAnalysisSnapshotText(omitted, { compact: true }) };
+    if (fits(smallest.serialized)) return smallest;
   }
   // Still too large. The default limit keeps reporting through the shared
   // assertion (single source of the message and code); an explicit test limit
   // gets an identical error without depending on the real 128 MiB threshold.
   if (limit === MAX_JOB_ANALYSIS_ARTIFACT_BYTES) {
-    assertJobAnalysisArtifactSize(serializeJobAnalysisSnapshotText(omitted || persisted));
+    assertJobAnalysisArtifactSize(smallest.serialized);
   }
   const error = new Error('Saved job analysis exceeds the 128 MiB recovery limit. The previous saved analysis was preserved.');
   error.code = 'JOB_ANALYSIS_ARTIFACT_TOO_LARGE';
@@ -911,7 +1044,7 @@ async function attachCollectionEvidence(snapshot, jsonPath) {
   if (!evidence) {
     // Only now pay for parsing the file being replaced.
     try {
-      evidence = collectionEvidenceForSnapshot(snapshot, null, JSON.parse(await fs.promises.readFile(jsonPath, 'utf8')));
+      evidence = collectionEvidenceForSnapshot(snapshot, null, parseJobAnalysisSnapshotText(await fs.promises.readFile(jsonPath, 'utf8')));
     } catch { /* first save, or an unreadable predecessor */ }
   }
   if (!evidence) {
@@ -922,6 +1055,29 @@ async function attachCollectionEvidence(snapshot, jsonPath) {
 }
 
 export async function saveJobAnalysisSnapshot(snapshot) {
+  return saveJobAnalysisSnapshotWithLimit(snapshot);
+}
+
+// `maxBytes` exists only for the test seam; production always uses the shared
+// artifact limit.
+// A save refused for size writes nothing, so the previous file stays the
+// recovery point; leave a durable record of the refusal (once per error) and
+// let the caller see the same error it always did.
+async function recordOversizeSaveRefusal(error, snapshot, ownerId, reason) {
+  if (error?.code !== 'JOB_ANALYSIS_ARTIFACT_TOO_LARGE' || error.oversizeRefusalRecorded) return;
+  error.oversizeRefusalRecorded = true;
+  await recordAnalysisRecoveryLifecycle({
+    operation: 'snapshot-save', result: 'failed', reason,
+    canvasFilePath: snapshot?.canvasFilePath,
+    ownerId,
+    runId: snapshot?.runId,
+    recoveryMode: snapshot?.snapshotContext?.recoveryMode,
+    gatheredJobCount: snapshot?.gatheredJobCount,
+    candidatePoolJobCount: Array.isArray(snapshot?.jobs) ? snapshot.jobs.length : null,
+  });
+}
+
+async function saveJobAnalysisSnapshotWithLimit(snapshot, { maxBytes } = {}) {
   const paths = analysisPathsForCanvas(
     snapshot.canvasFilePath,
     null,
@@ -942,7 +1098,30 @@ export async function saveJobAnalysisSnapshot(snapshot) {
     }
     if (!snapshot.canvasFilePath) await fs.promises.mkdir(dir, { recursive: true });
     snapshot = await attachCollectionEvidence(snapshot, jsonPath);
-    const { snapshot: persisted, serialized } = prepareJobAnalysisSnapshotForWrite(snapshot);
+    const lifecycle = {
+      canvasFilePath: snapshot.canvasFilePath,
+      ownerId: jobAnalysisSnapshotOwner(snapshot),
+      runId: snapshot.runId,
+      recoveryMode: snapshot?.snapshotContext?.recoveryMode,
+      gatheredJobCount: snapshot.gatheredJobCount,
+      candidatePoolJobCount: Array.isArray(snapshot.jobs) ? snapshot.jobs.length : null,
+    };
+    let prepared;
+    try {
+      prepared = prepareJobAnalysisSnapshotForWrite(snapshot, maxBytes === undefined ? undefined : { maxBytes });
+    } catch (error) {
+      // Nothing was written: the previous snapshot stays the recovery point.
+      // Leave a durable record of the refused save before the caller sees the
+      // same error it always did.
+      if (error?.code === 'JOB_ANALYSIS_ARTIFACT_TOO_LARGE') {
+        error.oversizeRefusalRecorded = true;
+        await recordAnalysisRecoveryLifecycle({
+          ...lifecycle, operation: 'snapshot-save', result: 'failed', reason: 'artifact-too-large',
+        });
+      }
+      throw error;
+    }
+    const { snapshot: persisted, serialized } = prepared;
     const rotationPlan = await planSuccessfulJobAnalysisGenerations(paths, snapshot, serialized, authorityRecord);
     await stagePublication({
       publications: [
@@ -958,14 +1137,6 @@ export async function saveJobAnalysisSnapshot(snapshot) {
     // will correctly suppress from future reruns.
     const rotation = await rotateSuccessfulJobAnalysisGenerations(rotationPlan);
     await writeJobAnalysisFileAtomically(promptPath, formatPromptFile(persisted));
-    const lifecycle = {
-      canvasFilePath: snapshot.canvasFilePath,
-      ownerId: jobAnalysisSnapshotOwner(snapshot),
-      runId: snapshot.runId,
-      recoveryMode: snapshot?.snapshotContext?.recoveryMode,
-      gatheredJobCount: snapshot.gatheredJobCount,
-      candidatePoolJobCount: Array.isArray(snapshot.jobs) ? snapshot.jobs.length : null,
-    };
     const lifecycleReason = snapshot?.snapshotContext?.recoveryMode === 'reanalyze-saved-jobs'
       ? 'reanalysis-save'
       : 'normal-save';
@@ -1039,7 +1210,7 @@ export async function readAnalysisArtifact(filePath) {
       throw new Error('analysis artifact changed while read');
     }
     return {
-      state: 'present', snapshot: JSON.parse(serialized), serialized,
+      state: 'present', snapshot: parseJobAnalysisSnapshotText(serialized), serialized,
       identity: { dev: before.dev, ino: before.ino, size: before.size },
     };
   } catch (error) {
@@ -1438,7 +1609,7 @@ export async function __discardCancelledBoardRunArtifactsForTests(canvasFilePath
   return discardCancelledBoardRunArtifacts(canvasFilePath, nodeId, runId, authority);
 }
 
-export async function __saveJobAnalysisSnapshotForTests(snapshot, { allowLegacyFixtureUpgrade = false } = {}) {
+export async function __saveJobAnalysisSnapshotForTests(snapshot, { allowLegacyFixtureUpgrade = false, maxBytes } = {}) {
   // The production-shaped seam rejects a missing receipt. Historical fixtures
   // can opt into a real claim/publication transaction through the private
   // test-only option; neither production IPC nor direct authority tests may
@@ -1474,7 +1645,7 @@ export async function __saveJobAnalysisSnapshotForTests(snapshot, { allowLegacyF
     if (!claimed.admitted) return { retired: true, reason: claimed.reason || 'operation-superseded' };
     snapshot = { ...snapshot, careerSnapshotId, operationAuthority: claimed.receipt };
   }
-  return saveJobAnalysisSnapshot(snapshot);
+  return saveJobAnalysisSnapshotWithLimit(snapshot, { maxBytes });
 }
 
 export function __getJobAnalysisRetirementStateForTests() {
@@ -1543,7 +1714,13 @@ export async function saveDescriptionRecoveryCheckpoint(snapshot, { create = fal
     // The payload is still the exact recovery snapshot, but a bounded reader
     // can now establish safe ownership/count metadata without parsing its job
     // bodies when a normal checkpoint grows past 512 KiB.
-    const content = serializeJobAnalysisSnapshot(snapshot);
+    let content;
+    try {
+      content = serializeJobAnalysisSnapshot(snapshot);
+    } catch (error) {
+      await recordOversizeSaveRefusal(error, snapshot, snapshot.nodeId, 'checkpoint-too-large');
+      throw error;
+    }
     const token = path.basename(checkpointPath).match(/description-recovery-([a-f0-9]{24})\.json$/)?.[1];
     if (!token) return { saved: false, reason: 'checkpoint-path-invalid', checkpointPath };
     await stagePublication({ publications: [{ slot: `checkpoint:${token}`, digest: jobAnalysisArtifactDigest(content) }] });
@@ -1566,7 +1743,7 @@ export async function loadDescriptionRecoveryCheckpoint(canvasFilePath, nodeId, 
   let serialized;
   try {
     serialized = await fs.promises.readFile(checkpointPath, 'utf8');
-    snapshot = JSON.parse(serialized);
+    snapshot = parseJobAnalysisSnapshotText(serialized);
   } catch (error) {
     throw Object.assign(error, { checkpointPath });
   }
@@ -2346,7 +2523,17 @@ export function listDescriptionRecoveryCheckpointsSync(canvasFilePath) {
 // A long-running Solve can outlive Reset/re-run. Re-check the *current* record
 // while holding the same bundle lock immediately before writing, so an old
 // recovery transaction never resurrects its snapshot over the replacement run.
-export async function saveDescriptionRecoverySnapshotIfCurrent(snapshot, { nodeId, jobRunId, continuation = null, sender = null } = {}) {
+export async function saveDescriptionRecoverySnapshotIfCurrent(snapshot, options = {}) {
+  try {
+    return await saveDescriptionRecoverySnapshotIfCurrentUnrecorded(snapshot, options);
+  } catch (error) {
+    // A checkpoint refusal is already recorded as 'checkpoint-too-large'.
+    await recordOversizeSaveRefusal(error, snapshot, options?.nodeId, 'description-recovery-too-large');
+    throw error;
+  }
+}
+
+async function saveDescriptionRecoverySnapshotIfCurrentUnrecorded(snapshot, { nodeId, jobRunId, continuation = null, sender = null } = {}) {
   const authority = snapshotOperationAuthority(snapshot);
   const paths = analysisPathsForCanvas(
     snapshot.canvasFilePath,
@@ -2363,7 +2550,7 @@ export async function saveDescriptionRecoverySnapshotIfCurrent(snapshot, { nodeI
   if (!(snapshot?.collectionEvidence?.runId === snapshot?.runId && snapshot?.runId)) {
     try {
       const carried = collectionEvidenceForSnapshot(
-        snapshot, null, JSON.parse(await fs.promises.readFile(jsonPath, 'utf8')),
+        snapshot, null, parseJobAnalysisSnapshotText(await fs.promises.readFile(jsonPath, 'utf8')),
       );
       if (carried) snapshot = { ...snapshot, collectionEvidence: carried };
     } catch { /* no readable saved scrape: the publish step reports that */ }
@@ -2374,7 +2561,7 @@ export async function saveDescriptionRecoverySnapshotIfCurrent(snapshot, { nodeI
     return withJobAnalysisSnapshotLock(jsonPath, async () => {
     let current;
     try {
-      current = JSON.parse(await fs.promises.readFile(jsonPath, 'utf8'));
+      current = parseJobAnalysisSnapshotText(await fs.promises.readFile(jsonPath, 'utf8'));
     } catch (error) {
       return { saved: true, globalSaved: false, checkpointPath: checkpoint.checkpointPath, reason: 'current-snapshot-unavailable', error };
     }
@@ -2607,7 +2794,7 @@ export async function loadJobAnalysisSnapshot(canvasFilePath, nodeId = null, job
   const readJson = async (filePath) => {
     try {
       const serialized = await fs.promises.readFile(filePath, 'utf8');
-      return { kind: 'ok', snapshot: JSON.parse(serialized), serialized };
+      return { kind: 'ok', snapshot: parseJobAnalysisSnapshotText(serialized), serialized };
     } catch (error) {
       if (error?.code === 'ENOENT') return { kind: 'missing', error };
       if (error instanceof SyntaxError) return { kind: 'malformed', error };
@@ -2854,6 +3041,10 @@ export function __formatJobAnalysisPromptForTests(snapshot) {
 }
 
 /** Test seam for the durable-write size ladder (prompts, then omitted jobs). */
+export function __recordOversizeSaveRefusalForTests(error, snapshot, ownerId, reason) {
+  return recordOversizeSaveRefusal(error, snapshot, ownerId, reason);
+}
+
 export function __prepareJobAnalysisSnapshotForWriteForTests(snapshot, options) {
   return prepareJobAnalysisSnapshotForWrite(snapshot, options);
 }

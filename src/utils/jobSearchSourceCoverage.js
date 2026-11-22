@@ -363,7 +363,8 @@ function finishedQueryList(value) {
 
 const MAX_READ_KEYS_PER_SOURCE = 2000;
 const MAX_READ_KEY_LENGTH = 400;
-const MAX_UNREAD_LISTINGS_PER_SOURCE = 200;
+// Matches listingReadProgress's cap in electron/ipc/jobs/sourceRules.js.
+const MAX_UNREAD_LISTINGS_PER_SOURCE = 1000;
 const MAX_UNREAD_FIELD_LENGTH = 500;
 
 /**

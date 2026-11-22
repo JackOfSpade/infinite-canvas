@@ -2,6 +2,7 @@ import { jobsTelemetry, getScopedJobsTelemetry, jobsTelemetryRegistry, boardTele
 import { getCurrentIpcRequestContext } from '../ipcUtils.js';
 import path from 'path';
 import { ALL_SOURCE_IDS } from './sourceRules.js';
+import { sanitizePageTitleScreenReceipt } from './pageTitleScreen.js';
 import { normalizeCareerSnapshotIdentifier } from './analysisStore.js';
 import { jobAnalysisOperationAuthorityReceipt } from '../jobAnalysisOperationAuthorityStore.js';
 import { readRunState, providerGatheredAtForManifest } from '../jobRunStaging.js';
@@ -526,6 +527,9 @@ export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), te
         // dropped, and which field checks failed.
         windowDropped: source?.windowDropped,
         alreadyReadSkipped: source?.alreadyReadSkipped,
+        ...(sanitizePageTitleScreenReceipt(source?.pageTitleScreen) ? {
+          pageTitleScreen: sanitizePageTitleScreenReceipt(source.pageTitleScreen),
+        } : {}),
         healthFailures: Array.isArray(source?.healthFailures)
           ? source.healthFailures.slice(0, 8).map(({ field, rows, missing }) => ({ field, rows, missing }))
           : undefined,

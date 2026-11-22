@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { JSDOM, VirtualConsole } from 'jsdom';
 import {
   DESC_CONFIGS,
+  composeDetailBlockReprobeResult,
   descriptionExpansionStrategy,
   descriptionNavigationDecision,
 } from '../../electron/ipc/browser/manualScraper/walkRules.js';
@@ -18,6 +19,8 @@ import {
   glassdoorJobPageState,
   glassdoorJobPageVerdict,
   noteGlassdoorJobPageRateLimit,
+  noteGlassdoorJobPageBatchReads,
+  GLASSDOOR_JOB_PAGE_MAX_ZERO_READ_BATCHES,
 } from '../../electron/ipc/browser/manualScraper/glassdoorJobPage.js';
 import { expandDescriptionsByNavigation } from '../../electron/ipc/browser/manualScraper/expandByNavigation.js';
 import { setScrapeMeasurementOverrides } from '../../electron/ipc/browser/scrapeMeasurement.js';
@@ -382,7 +385,7 @@ export default [
       assert.equal(result.boardClosedDetailKept, 1);
       assert.equal(result.descWarning.code, 'description-rate-limited', 'only the panel warning describes still-missing rows');
       assert.deepEqual(recorded[0], {
-        jobPageEligible: 4, jobPageOpened: 4, silentMisses: 0, fromJobPage: 1, jobPageClosed: 2,
+        jobPageEligible: 4, jobPageOpened: 4, silentMisses: 0, detailTabFailed: false, fromJobPage: 1, jobPageClosed: 2,
         panelFallback: 2, fromPanel: 1, stopReason: '429-first', routeOffAtStart: false, sourceStopReason: 'none',
         panelBlock: 'armed',
       });
@@ -734,6 +737,100 @@ export default [
         assert.notEqual(result.jobPageRoute.stopReason, 'none');
         assert.equal(fake2.observed.navigations.length, 2);
       } finally { fake2.close(); }
+    },
+  },
+  {
+    name: 'Glassdoor job-page route that reads nothing turns off, and a panel block then waits instead of racing (2026-11-22)',
+    async run() {
+      // The 2026-11-22 run: the job-page route stayed "on" all run but read no
+      // row, so one failed panel request kept the block panel-only and the walk
+      // deferred 841 listings without a request in 2 minutes.
+      let clock = 5_000_000;
+      const pacing = {};
+      const state = glassdoorJobPageState(pacing);
+      const navNothing = async (_p, jobs) => ({
+        rows: jobs, rowOutcomes: jobs.map(() => 'pending'),
+        jobPageRoute: { stopReason: 'none', opened: 0, silentMisses: 0, detailTabFailed: true }, expandedCount: 0,
+      });
+      const panelHttpError = async (_p, jobs) => ({
+        jobs: jobs.map((j, k) => (k === 0 ? { ...j, snippet: LONG } : { ...j, descriptionDeferredReason: 'description-panel-http-error' })),
+        expandedCount: 1, attemptedCount: 2, panelHttpFailureCount: 1,
+        descWarning: { code: 'description-panel-http-error', severity: 'warn' },
+      });
+      let panelCalls = 0;
+      const deps = { byNavigation: navNothing, byPanel: async (...args) => { panelCalls += 1; return panelHttpError(...args); }, now: () => clock };
+      const run = () => expandGlassdoorDescriptions({ url: () => LIST_URL }, [row(1), row(2), row(3)], 'glassdoor', overlayBase, 3, null, { detailPacing: pacing }, null, cfg, deps);
+      let result = await run();
+      assert.equal(result.descriptionRoute.detailTabFailed, true, 'the tab failure is recorded on the route');
+      assert.equal(state.off, false, 'one empty batch does not turn the route off');
+      assert.equal(glassdoorPanelBlockIsSourceWide(pacing), true,
+        'a panel block in a batch where job pages read nothing is source-wide, so the walk waits out the cooldown');
+      assert.deepEqual(takeGlassdoorPanelBlockForSource(pacing), { code: 'description-panel-http-error', at: clock });
+      assert.equal(state.panelBlock, null, 'handed over once, never run as two cooldown ladders');
+      // A panel-only block armed earlier (job pages were reading then) whose
+      // later batch reads nothing is handed over too, keeping its clock; the
+      // batch's rows are marked as never requested.
+      state.zeroReadBatches = 0;
+      state.panelBlock = { code: 'description-rate-limited', at: clock - 10_000, reprobes: 0 };
+      panelCalls = 0;
+      result = await run();
+      assert.equal(panelCalls, 0, 'inside the cooldown no panel request is sent');
+      assert(result.jobs.every(j => j.descriptionDeferredReason === 'description-rate-limited' && j.descriptionDeferredBy === 'block-cooldown'));
+      assert.deepEqual(takeGlassdoorPanelBlockForSource(pacing), { code: 'description-rate-limited', at: clock - 10_000 });
+      // Two batches in a row with openable rows and nothing read: route off.
+      state.zeroReadBatches = 1;
+      await run();
+      assert.equal(state.off, true);
+      assert.equal(state.stopReason, 'no-reads');
+      assert.ok(describeCardWalkDescriptionRoute({ ...result.descriptionRoute, stopReason: 'none', sourceStopReason: 'no-reads' })
+        .includes('source job-page-stop no-reads'));
+    },
+  },
+  {
+    name: 'Glassdoor job-page zero-read counter resets on a read and ignores throttling stops',
+    run() {
+      const state = { off: false, zeroReadBatches: 0, stopReason: 'none' };
+      assert.equal(noteGlassdoorJobPageBatchReads(state, { eligible: 0, read: 0 }), false, 'nothing openable is not evidence');
+      assert.equal(state.zeroReadBatches, 0);
+      assert.equal(noteGlassdoorJobPageBatchReads(state, { eligible: 3, read: 0 }), false);
+      assert.equal(noteGlassdoorJobPageBatchReads(state, { eligible: 3, read: 1 }), false);
+      assert.equal(state.zeroReadBatches, 0, 'a read resets the count');
+      assert.equal(noteGlassdoorJobPageBatchReads(state, { eligible: 3, read: 0, stopReason: '429-first' }), false);
+      assert.equal(state.zeroReadBatches, 0, 'a 429 has its own ladder');
+      for (let i = 0; i < GLASSDOOR_JOB_PAGE_MAX_ZERO_READ_BATCHES - 1; i++) noteGlassdoorJobPageBatchReads(state, { eligible: 2, read: 0 });
+      assert.equal(state.off, false);
+      assert.equal(noteGlassdoorJobPageBatchReads(state, { eligible: 2, read: 0 }), true);
+      assert.equal(state.off, true);
+      assert.equal(state.stopReason, 'no-reads');
+      const ladder = { rateLimits: 0, off: false, stopReason: 'no-reads' };
+      noteGlassdoorJobPageRateLimit(ladder);
+      assert.equal(ladder.stopReason, '429-first', 'a later 429 outranks no-reads');
+    },
+  },
+  {
+    name: 'Glassdoor panel block stays panel-only when the job page closed a listing or had nothing to open',
+    async run() {
+      const pacing = {};
+      const state = glassdoorJobPageState(pacing);
+      const closedNav = async (_p, jobs) => ({
+        rows: jobs, rowOutcomes: jobs.map(() => 'closed'),
+        jobPageRoute: { stopReason: 'none', opened: jobs.length }, expandedCount: 0, unavailableDetailDropped: jobs.length,
+      });
+      const deps = { byNavigation: closedNav, byPanel: async (_p, jobs) => ({ jobs, expandedCount: 0, attemptedCount: 0 }), now: () => 1000 };
+      state.panelBlock = { code: 'description-rate-limited', at: 900, reprobes: 0 };
+      await expandGlassdoorDescriptions({ url: () => LIST_URL }, [row(1)], 'glassdoor', overlayBase, 1, null, { detailPacing: pacing }, null, cfg, deps);
+      assert.equal(glassdoorPanelBlockIsSourceWide(pacing), false, 'a closed listing is the job page working');
+      assert.equal(takeGlassdoorPanelBlockForSource(pacing), null);
+      // No eligible rows (other-country URL): says nothing against the route.
+      const deps2 = { byNavigation: async () => { throw new Error('not called'); }, byPanel: deps.byPanel, now: () => 1000 };
+      await expandGlassdoorDescriptions({ url: () => LIST_URL }, [row(2, { url: 'https://www.glassdoor.com/Job/x.htm?jl=2' })], 'glassdoor', overlayBase, 1, null, { detailPacing: pacing }, null, cfg, deps2);
+      assert.equal(glassdoorPanelBlockIsSourceWide(pacing), false);
+      // A re-probe page keeps the route summary, so the source loop can see a panel block armed inside it.
+      const route = { panelBlock: 'armed' };
+      assert.equal(composeDetailBlockReprobeResult({ jobs: [], expandedCount: 1, descriptionRoute: route }, { jobs: [], expandedCount: 1 }).descriptionRoute, route);
+      const failed = composeDetailBlockReprobeResult({ jobs: [], expandedCount: 0, descWarning: { code: 'description-rate-limited' }, descriptionRoute: route }, null, [row(3)], 'description-rate-limited');
+      assert.equal(failed.descriptionRoute, route);
+      assert.equal(failed.jobs[0].descriptionDeferredBy, 'block-cooldown');
     },
   },
 ];

@@ -769,6 +769,10 @@ export async function screenJobRolesByTitle({
   callText,
   verdictStore = null,
   meta = {},
+  // The page screen (pageTitleScreen.js) runs the title pass under its own
+  // task id, before any description exists, so it has no snippet pass.
+  titleTask = 'job-role-screen-batch',
+  snippetPass = true,
 } = {}) {
   const pool = Array.isArray(jobs) ? jobs : [];
   const targetTitles = cleanArray(titles, MAX_TITLES);
@@ -860,7 +864,7 @@ export async function screenJobRolesByTitle({
     for (let start = 0; start < uniqueRows.length; start += ROLE_SCREEN_BATCH_SIZE) batches.push(uniqueRows.slice(start, start + ROLE_SCREEN_BATCH_SIZE));
     await runBatches({
       batches,
-      task: 'job-role-screen-batch',
+      task: titleTask,
       schema: JOB_ROLE_SCREEN_SCHEMA,
       validator: value => validateJobRoleScreenSubmission(value),
       // ONLY {index, title, company} per row — never the description.
@@ -886,7 +890,7 @@ export async function screenJobRolesByTitle({
   // ── Step 2: snippet pass, for unsure jobs that have a usable description ──
   const snippetRows = [];
   pool.forEach((job, index) => {
-    if (verdictsByIndex[index]?.outcome !== 'unclear') return;
+    if (!snippetPass || verdictsByIndex[index]?.outcome !== 'unclear') return;
     const snippet = roleScreenSnippet(job);
     if (snippet) snippetRows.push({ index, title: cleanText(job?.title, 300), company: cleanText(job?.company || job?.employer, 300), snippet });
   });

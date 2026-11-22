@@ -218,17 +218,30 @@ export const applyFinalJobTitleRelevanceGate = acceptProviderSearchResults;
  * list card carries before its description is opened, so the next scan can
  * recognise the card without opening it.
  */
+// Matches MAX_UNREAD_LISTINGS_PER_SOURCE in src/utils/jobSearchSourceCoverage.js.
+// It was 200: one 2026-11-22 Glassdoor block left 842 listings unread, so most
+// of them could not be kept as owed for the next scan.
+export const MAX_UNREAD_LISTINGS_PER_SOURCE = 1000;
+
 export function listingReadProgress(jobs, readElsewhereKeys = null) {
   const readKeys = [];
   const unreadListings = [];
   const seen = new Set();
-  for (const job of Array.isArray(jobs) ? jobs : []) {
+  const rows = Array.isArray(jobs) ? jobs : [];
+  // A resumed run holds a listing's saved copy and the copy it read again; the
+  // listing counts as read when any copy was.
+  const readCopyKeys = new Set();
+  for (const job of rows) {
+    const key = sourceJobKey(job);
+    if (key && !job?.descriptionDeferredReason && hasResolvedJobDescription(job)) readCopyKeys.add(key);
+  }
+  for (const job of rows) {
     const key = sourceJobKey(job);
     if (!key || seen.has(key)) continue;
     seen.add(key);
-    if (!job?.descriptionDeferredReason && hasResolvedJobDescription(job)) readKeys.push(key);
+    if (readCopyKeys.has(key)) readKeys.push(key);
     else if (readElsewhereKeys?.has(key)) readKeys.push(key);
-    else if (unreadListings.length < 200) {
+    else if (unreadListings.length < MAX_UNREAD_LISTINGS_PER_SOURCE) {
       unreadListings.push({
         key,
         title: String(job?.title || ''),
@@ -238,6 +251,40 @@ export function listingReadProgress(jobs, readElsewhereKeys = null) {
     }
   }
   return { readKeys, unreadListings };
+}
+
+/**
+ * The query slots (indexes into `queries`) of one platform that a saved run's
+ * rows left with a listing still unread. A resumed run keeps no per-query
+ * tally for rows it did not scrape itself, so this reads them from the saved
+ * rows instead: each row names the query text it came from, and a listing is
+ * unread when no copy of it in `cardRows` has a readable description. A row
+ * whose query text matches no planned query marks every slot, so an
+ * unplaceable row can never let a query count as finished.
+ */
+export function stagedUnreadQueryIndexes(sourceId, queries, stagedRows, cardRows) {
+  const out = new Set();
+  const planned = Array.isArray(queries) ? queries : [];
+  const readKeys = new Set(listingReadProgress(cardRows).readKeys);
+  // The final checkpoint re-saves every kept listing with no query. Such a copy
+  // holds back every query only when no copy of that listing names one.
+  const unplaced = new Set();
+  const placedKeys = new Set();
+  for (const row of Array.isArray(stagedRows) ? stagedRows : []) {
+    if (row?.sourceId !== sourceId || !row.job) continue;
+    const key = sourceJobKey({ ...row.job, source: sourceId });
+    if (!key || readKeys.has(key)) continue;
+    let placed = false;
+    planned.forEach((query, index) => {
+      if (query === row.query) { out.add(index); placed = true; }
+    });
+    if (placed) placedKeys.add(key);
+    else unplaced.add(key);
+  }
+  for (const key of unplaced) {
+    if (!placedKeys.has(key)) planned.forEach((_query, index) => out.add(index));
+  }
+  return out;
 }
 
 /**

@@ -39,7 +39,7 @@ export function ClaudeProgressCard({
           {toneLabel ? <span className="mr-1.5 text-[10px] font-semibold uppercase tracking-wide opacity-75">{toneLabel}</span> : null}
           <span className="min-w-0">{headline}</span>
         </div>
-        {detail && <div className="mt-1 break-words text-white/70">{detail}</div>}
+        {detail && <div className="mt-1 whitespace-pre-line break-words text-white/70">{detail}</div>}
       </div>
 
       {count && (

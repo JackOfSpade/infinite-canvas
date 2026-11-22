@@ -2149,12 +2149,13 @@ function buildRecentMainProcessLogLines({ filter } = {}) {
         // may itself be behind anti-bot walls). These lines are rare (a handful
         // of ERROR entries, not the whole 60-line buffer), so raising just their
         // cap cannot dominate the section the way raising the default for every
-        // retained line would.
+        // retained line would. An off-target query warning is one line per
+        // flagged query and carries the query, examples and AI rewording.
         // Logger messages can contain redirect/challenge URLs with OAuth,
         // Cloudflare, or tracking tokens. The path is useful diagnostic
         // evidence; query and fragment values are not safe to export.
         const raw = redactReportOpaqueIds(redactReportLogSecrets(redactReportLocalPathsInText(redactReportUrlsInText(l.message || '')).replace(/\r?\n/g, ' ⏎ ')));
-        const cap = /SITE_CHANGED|\[diag |\[timeout-state | failed: .* stack: at /i.test(raw) ? 1400 : 500;
+        const cap = /SITE_CHANGED|\[diag |\[timeout-state |\[PageTitleScreen\] off-target query| failed: .* stack: at /i.test(raw) ? 1400 : 500;
         const msg = truncateDiagnosticText(raw, cap);
         return `[${t}] ${lvl} ${msg}`;
       });

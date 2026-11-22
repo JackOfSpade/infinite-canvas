@@ -6414,7 +6414,7 @@ export default [
           'the warning states how many searches were never read');
         const source = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
         assert(/onCrash: \(\) => \{ earlyExit = true; browserClosedUnexpectedly = true; \}/.test(source)
-          && /if \(browserClosed\) earlyExit = false;/.test(source),
+          && /if \(browserClosed \|\| pageUnreadable\) earlyExit = false;/.test(source),
         'the scrape loop records the close per source and lets later sources run');
       }
       assert(resolveManualSourceStopReason({}) === 'completed',

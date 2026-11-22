@@ -13,6 +13,7 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import path from 'path';
 import electronPkg from 'electron';
 import { logger } from '../logger.js';
+import { partitionByPageTitleScreen } from '../ipc/jobs/pageTitleScreen.js';
 import { measurementPacingOff, measurementPacingScale } from '../ipc/browser/scrapeMeasurement.js';
 import { scrapeFingerprintPolicy } from '../ipc/browser/manualScraper/scrapeBrowser.js';
 import { findChromePath, findSystemChromePath, getUserDataDir, getSharedProfileReservationInfo, launchWithProfileLockRetry, reserveSharedProfile } from '../ipc/stealthBrowser.js';
@@ -521,7 +522,7 @@ async function readIndeedPanel(page) {
 // to its own job by the Indeed job key the card itself carries — the page also
 // renders cards for rows already collected on an earlier page, so a card's
 // position says nothing about which entry of `pageJobs` it belongs to.
-async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null, totalSoFar = 0) {
+async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null, totalSoFar = 0, skipJob = null) {
   await page.waitForSelector(CARD_SELECTOR, { timeout: 5000 }).catch(() => {});
   const cardKeys = await page.evaluate((sel) => Array.prototype.map.call(
     document.querySelectorAll(sel),
@@ -561,6 +562,10 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
   for (let t = 0; t < limit; t++) {
     if (signal?.aborted) break;
     const { job } = targets[t];
+    // The page title screen's verdict is already in and says this is a
+    // different kind of job: skip the click. A card whose verdict is still
+    // pending is opened as before (Indeed never waits for the screen).
+    if (skipJob?.(job)) continue;
     if (overlayBase) {
       await updateOverlay(page, {
         ...overlayBase,
@@ -977,9 +982,10 @@ export function resolveIndeedPageBudgets(queryCount, collectionLimits, resumePag
  * @param {number|null} [collectionStartTimestamp] — posted-since cutoff for this run
  * @param {Function|null} [isAlreadyRead] — 'read'/'shown' for a card an earlier run already handled
  * @param {Function|null} [isOwed] — true for a card still owed from before Indeed's date moved
+ * @param {Function|null} [screenTitles] — the run's page title screen for Indeed (pageTitleScreen.js)
  * @returns {Promise<{ items: object[], warning: object|null, gathered: number }>}
  */
-export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0, onPageJobs = null, location = '', collectionLimits = null, resumePageBudgets = null, isResume = false, originalQueryIndexes = null, collectionStartTimestamp = null, isAlreadyRead = null, isOwed = null) {
+export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0, onPageJobs = null, location = '', collectionLimits = null, resumePageBudgets = null, isResume = false, originalQueryIndexes = null, collectionStartTimestamp = null, isAlreadyRead = null, isOwed = null, screenTitles = null) {
   if (isBackgroundE2E()) {
     const disabled = backgroundE2EDisabledError('Indeed browser extraction');
     return {
@@ -1425,9 +1431,9 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           } catch { return null; }
         }).catch(() => null);
         const rawPageJobs = extractIndeedJobsFromHtml(html, windowMosaicResults);
-        // Indeed already ranks and fuzzily matches this page for the issued
-        // search query. Keep every distinct returned row instead of applying a
-        // second local title gate that can discard legitimate adjacent titles.
+        // Every distinct returned row is a candidate. The AI page title
+        // screen (pageTitleScreen.js) may skip a card's click below; it is a
+        // semantic judgement, not the old local word-match gate.
         const newProviderCandidates = [];
         const pageProviderKeys = new Set();
         for (const job of rawPageJobs) {
@@ -1447,7 +1453,16 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         );
         alreadyReadSkipped += alreadyRead.readEarlier + alreadyRead.shownEarlier;
         readEarlierSkipped += alreadyRead.readEarlier;
-        const pageJobs = alreadyRead.open.slice(0, Math.max(0, resultCap - queryCollected));
+        let pageJobs = alreadyRead.open.slice(0, Math.max(0, resultCap - queryCollected));
+        // Start the page title screen now; the card loop skips a card only if
+        // its verdict is already in, so Indeed's pace never waits on it.
+        const titleScreen = typeof screenTitles === 'function' && pageJobs.length > 0
+          ? screenTitles(pageJobs, { query: q, queryIndex: queryIndexes[qi], page: p + 1 })
+          : null;
+        const titleScreenIndex = new Map(pageJobs.map((job, index) => [job, index]));
+        const skipByTitle = titleScreen
+          ? job => titleScreen.verdictAt(titleScreenIndex.get(job) ?? -1) === 'mismatch'
+          : null;
 
         // Soft block: Indeed returns a tiny near-empty page instead of a hard challenge.
         // Normal search pages are ~1500KB; anything under 150KB with 0 jobs is suspect.
@@ -1494,7 +1509,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         });
         let enrichResult;
         try {
-          enrichResult = await enrichWithDescriptions(page, pageJobs, signal, overlayBase, allJobs.length);
+          enrichResult = await enrichWithDescriptions(page, pageJobs, signal, overlayBase, allJobs.length, skipByTitle);
         } catch (e) {
           logger.warn(`[Indeed/Browser] Description enrichment failed p=${p + 1}: ${e.message}`);
           enrichResult = { enriched: 0, cfBlankAt: null };
@@ -1529,6 +1544,15 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         // every card look like a duplicate and silently skip its second attempt.
         for (const { key } of newProviderCandidates) {
           providerSeenKeys.add(key);
+        }
+        // Rows the title screen removed are neither kept nor staged, whether
+        // their click was skipped or the verdict came in after it was read.
+        if (titleScreen) {
+          const screened = partitionByPageTitleScreen(pageJobs, titleScreen);
+          if (screened.skipped.length > 0) {
+            logger.info(`[Indeed/Browser] q="${q}" p=${p + 1}: title screen removed ${screened.skipped.length} of ${pageJobs.length} card(s)`);
+          }
+          pageJobs = screened.open;
         }
 
         const pageAdded = [];

@@ -565,6 +565,8 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
     alreadyReadBySource = null,
     // sourceId → test for "this listing is still owed from an earlier scan".
     owedBySource = null,
+    // sourceId → the run's AI page title screen (pageTitleScreen.js).
+    titleScreenBySource = null,
   } = opts;
   const limits = normalizeJobCollectionLimits(collectionLimits);
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
@@ -771,6 +773,7 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
           collectionStartTimestamp: sourceCollectionStartTimestamp,
           ...(typeof alreadyReadBySource?.[sourceId] === 'function' ? { isAlreadyRead: alreadyReadBySource[sourceId] } : {}),
           ...(typeof owedBySource?.[sourceId] === 'function' ? { isOwed: owedBySource[sourceId] } : {}),
+          ...(typeof titleScreenBySource?.[sourceId] === 'function' ? { screenTitles: titleScreenBySource[sourceId] } : {}),
           startPageNum: startPage,
           nextUrl: (page) => urlFn(q, page, sourceDays),
           onPageScraped,

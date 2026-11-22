@@ -317,10 +317,21 @@ export function pinGlassdoorDetailUrlToListHost(rawDetailUrl, rawListUrl) {
   }
 }
 
-/** A detached Puppeteer main frame cannot recover by navigating the next row. */
-export function isDetachedDetailFrameError(error) {
+/**
+ * Puppeteer's "Attempted to use detached Frame" family: the page object's main
+ * frame is gone, so every later evaluate/navigate on that SAME page throws the
+ * same error. It is never transient and never evidence about the site's markup
+ * or a solved check — the caller needs a live page, not a retry. Shared by the
+ * detail walk, the list readiness probe and the list extractor.
+ */
+export function isDetachedFrameError(error) {
   return /detached\s+frame|frame\s+was\s+detached|navigating\s+frame\s+was\s+detached/i
     .test(String(error?.message || error || ''));
+}
+
+/** A detached Puppeteer main frame cannot recover by navigating the next row. */
+export function isDetachedDetailFrameError(error) {
+  return isDetachedFrameError(error);
 }
 
 /**

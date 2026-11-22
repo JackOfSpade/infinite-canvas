@@ -21,6 +21,7 @@ import { currentJobAnalysisOperationAuthority, jobAnalysisOperationAuthorityRece
 import { validateJobBoardRunExecution } from '../jobBoardRunLease.js';
 import { parsePostedDate } from '../jobDateFilter.js';
 import { normalizeJobPreferencePlan, screenJobRolesByTitle } from '../jobPreferences.js';
+import { PAGE_TITLE_SCREEN_SOURCE_IDS, createPageTitleScreen, offTargetQueries, offTargetQueryLogLine, offTargetQueryWarning, suggestQueryRewordings } from './pageTitleScreen.js';
 import { getJobRoleScreenVerdictStore } from '../jobRoleScreenVerdicts.js';
 import { activateRunForResume, clearRunWithResult, collectionCompletedAtForManifest, computeResumeStartPagesByQuery, finishRunWithSavedListings, isJobRunAutomaticRecoveryEligible, isRunCollectionFinishedWithSavedListings, markProviderGathered, markSourceStatus, normalizeJobRunProfileFingerprint, pauseRunForManualResume, readRunState, rebindRunOperationAuthority, recordSourcePage, setStage as setJobRunStage, startRun as startJobRun } from '../jobRunStaging.js';
 import { SOURCE_HEALTH_WARNING_CODE, assessSourceHealth, descriptionsNotFetchedWarning, sourceHealthWarning } from '../jobSourceHealth.js';
@@ -33,12 +34,34 @@ import { getJobsSettings } from '../settings.js';
 import { CANCEL_CAUSE_LABELS, CHECKPOINT_PRESERVING_ABORT_CAUSES, JobOperationSupersededError, admitContinuationProviderWork, checkpointContinuationBeforeReply, claimExactJobRunExecution, isJobOperationSupersededError, normalizeCareerSnapshotIdentifier, requireSavedJobRecoveryCanvas, shouldDiscardJobRunAfterAbort } from './analysisStore.js';
 import { abortableDelay, authoritativeFreshJobSearchWindow, buildJobTasks, completedJobSourceIds, effectiveJobSearchWindow, enrichLinkedInDescriptionsLocked, getEgressIp, glassdoorPostedBucket, listWalkStoppedByProviderBlock, manualAiPreSearchRecoveryWindow, narrowJobSearchSourceWindows, runCooldownProbe, selectIndeedResumePlan, withFreshManualScraperTelemetry } from './collection.js';
 import { reconcileSearchFunnel, validateExactResumeRun } from './scoring.js';
-import { ACTIVE_SOURCE_IDS, ACTIVE_SOURCE_ID_SET, BACKGROUND_PROVIDER_ONLY_SOURCE_IDS, BROWSER_SCRAPE_ORDER, EXACT_RESUME_PROVIDER_ONLY_SOURCE_IDS, JOB_SOURCE_DISPLAY_NAMES, WALK_GUARD_WARNING_CODE, acceptProviderSearchResults, boundedDedupProvenance, boundedRecoveryBlockedUrls, canRecoverGatheredRunDirectly, capPlatformJobsAfterWindow, dedupByTitleCompany, extractExecutedGoogleQueryStrings, filterAndDedupJobsByPostedSince, filterJobsByDescriptionEvidence, getCompletedQueriesFromDetail, getEffectiveSourceWarning, getQueryProgressTotal, hasResolvedJobDescription, jobSourceAuthPreflightScope, jobSourceRecoveryDisposition, linkedInBrowserUnavailableWarning, linkedInShortDescriptionWarning, linkedInWalkComplete, listingReadProgress, listingsReadElsewhere, mergeJobSourceCollectionCap, mergeRoleScreenedJobs, orderedBlockedManualSourceUrls, reconcileTitleRelevanceFunnel, refreshManualSourceUrlIndex, sanitizeWalkGuards, synthScrapeWarning, walkGuardWarning } from './sourceRules.js';
+import { ACTIVE_SOURCE_IDS, ACTIVE_SOURCE_ID_SET, BACKGROUND_PROVIDER_ONLY_SOURCE_IDS, BROWSER_SCRAPE_ORDER, EXACT_RESUME_PROVIDER_ONLY_SOURCE_IDS, JOB_SOURCE_DISPLAY_NAMES, WALK_GUARD_WARNING_CODE, acceptProviderSearchResults, boundedDedupProvenance, boundedRecoveryBlockedUrls, canRecoverGatheredRunDirectly, capPlatformJobsAfterWindow, dedupByTitleCompany, extractExecutedGoogleQueryStrings, filterAndDedupJobsByPostedSince, filterJobsByDescriptionEvidence, getCompletedQueriesFromDetail, getEffectiveSourceWarning, getQueryProgressTotal, hasResolvedJobDescription, jobSourceAuthPreflightScope, jobSourceRecoveryDisposition, linkedInBrowserUnavailableWarning, linkedInShortDescriptionWarning, linkedInWalkComplete, listingReadProgress, listingsReadElsewhere, stagedUnreadQueryIndexes, mergeJobSourceCollectionCap, mergeRoleScreenedJobs, orderedBlockedManualSourceUrls, reconcileTitleRelevanceFunnel, refreshManualSourceUrlIndex, sanitizeWalkGuards, synthScrapeWarning, walkGuardWarning } from './sourceRules.js';
 import { clearLinkedInCeiling, jobsTelemetry, linkedinCeiling, rememberLinkedInCeiling } from './state.js';
 import { canWriteJobResolveTelemetry, indeedPreflightObservationNote, indeedWarningRequiresManualVerification, recordHistoryWrite, recordJobSourceDispatch, recordJobSourceProgress, recordJobsSourceScope, recordLinkedinEnrichPass, restoreJobsTelemetryIfCurrentRun, syncIndeedSessionStatusFromScrape } from './telemetry.js';
 import electronPkg from 'electron';
 
 const { shell } = electronPkg;
+
+// "Finish with saved listings" note for one deliberately-unfinished source.
+// A source whose manifest already said `blocked` had stopped on a block or an
+// extractor error earlier in the run, which is a different fact from a source
+// that was simply still pending. Never `block` severity: the person chose to
+// finish, so neither note may gate the run or the card.
+export function finishedWithSavedSourceWarning(priorStatus) {
+  if (priorStatus === 'blocked') {
+    return {
+      code: 'collection-finished-after-source-failure',
+      severity: 'warn',
+      evidence: 'This source had already stopped on a block or error earlier in this run; collection was then deliberately finished with saved listings, so it was not retried.',
+      suggestion: 'Solve or retry this source in a later Job Search to collect its listings.',
+    };
+  }
+  return {
+    code: 'collection-finished-with-saved-listings',
+    severity: 'info',
+    evidence: 'Provider collection was deliberately stopped; this source was not resumed.',
+    suggestion: 'Run a later full Job Search to collect the remaining source coverage.',
+  };
+}
 
 export function registerSearchHandlers(ctx) {
   const { handleSafe, resolveRequiredPinnedCareerInputForHandler, runHttpSources, beforeSearchStageWrite, afterSearchProviderResult, settleScrapedRowsForScoring } = ctx;
@@ -320,12 +343,14 @@ export function registerSearchHandlers(ctx) {
     let resumeScope = null;       // Set<sourceId> to re-scrape (null = all = fresh run)
     let resumeStartPages = null;  // { [sourceId]: [{ startPage, durable }] }, aligned with exact queries
     let recoveredStaged = [];     // jobs recovered from the prior (crashed) run's staging
+    let recoveredStagedRows = []; // the same rows as saved, each naming the query it came from
     let priorRunStartedAt = null; // crashed run's start — scopes the history exemption below
     // Durable, trusted source facts from providers that have already completed
     // and therefore must not be fetched again during this recovery.
     let resumedCollectionScopeCaveats = [];
     let resumedPageShapeFailures = {};
     let resumedWindowDropped = {};
+    let resumedTitleScreenSkipped = {};
     // compare-and-clear token returned to the renderer (allocated above so
     // preflight source progress remains correlated).
     let resumeSourceIds = null;   // persisted source breadth; never take it from a changed UI selection
@@ -342,6 +367,10 @@ export function registerSearchHandlers(ctx) {
     let skipProviderCollection = false;
     let collectionDisposition = null;
     let intentionallyUnfinishedSourceIds = [];
+    // Each deliberately-unfinished source's manifest status from BEFORE the
+    // finish, so a source that had already stopped on a block/error is not
+    // described as merely "not resumed" (see finishedWithSavedSourceWarning).
+    let intentionallyUnfinishedPriorStatuses = {};
     // A gathered-only recovery must report the original provider-settled
     // boundary, not the later time at which staged rows are resumed/scored.
     // Otherwise a midnight-crossing resume could advance the next scan past
@@ -509,8 +538,12 @@ export function registerSearchHandlers(ctx) {
         resumedWindowDropped = Object.fromEntries(Object.entries(priorSources)
           .filter(([sid, source]) => ACTIVE_SOURCE_ID_SET.has(sid) && source?.status === 'done' && Number.isSafeInteger(source.windowDropped) && source.windowDropped > 0)
           .map(([sid, source]) => [sid, source.windowDropped]));
+        resumedTitleScreenSkipped = Object.fromEntries(Object.entries(priorSources)
+          .filter(([sid, source]) => ACTIVE_SOURCE_ID_SET.has(sid) && source?.status === 'done' && Number.isSafeInteger(source.titleScreenSkipped) && source.titleScreenSkipped > 0)
+          .map(([sid, source]) => [sid, source.titleScreenSkipped]));
         resumeSourceIds = Object.keys(priorSources).filter(sourceId => ACTIVE_SOURCE_ID_SET.has(sourceId));
         recoveredStaged = prior.stagedJobs.map(s => ({ ...s.job, source: s.sourceId }));
+        recoveredStagedRows = prior.stagedJobs;
         if (finishSavedRecoveryRequested && recoveredStaged.length === 0) {
           const error = 'There are no saved listings to finish. Resume the remaining sources instead.';
           retirePipeline('preflight-rejected', error);
@@ -561,12 +594,16 @@ export function registerSearchHandlers(ctx) {
           intentionallyUnfinishedSourceIds = Array.isArray(finishReceipt.unfinishedSourceIds)
             ? finishReceipt.unfinishedSourceIds
             : [];
+          intentionallyUnfinishedPriorStatuses = Object.fromEntries(intentionallyUnfinishedSourceIds
+            .map(sourceId => [sourceId, priorSources[sourceId]?.status || null]));
         } else if (alreadyFinishedWithSavedListings) {
           collectionDisposition = prior.manifest.collectionDisposition;
           resumedCollectionCompletedAt = collectionCompletedAtForManifest(prior.manifest);
           intentionallyUnfinishedSourceIds = Object.entries(priorSources)
             .filter(([, source]) => source?.status !== 'done' && source?.status !== 'skipped')
             .map(([sourceId]) => sourceId);
+          intentionallyUnfinishedPriorStatuses = Object.fromEntries(intentionallyUnfinishedSourceIds
+            .map(sourceId => [sourceId, priorSources[sourceId]?.status || null]));
         }
         // Keep this narrowly tied to a naturally clean gathered checkpoint.
         // Forced partial finish uses the same local/no-network branch below,
@@ -852,10 +889,42 @@ export function registerSearchHandlers(ctx) {
         logger.info(`[Jobs][${nodeId}] ${sourceId}: ${owedKeys.size} listing(s) still owed from an earlier scan will be opened if they turn up`);
       }
     }
+    // AI title screen on each results page before its details are opened
+    // (pageTitleScreen.js). The same judgement as the post-gather title pass
+    // below, so it changes when an off-target job is dropped, not which. It
+    // needs the run's target titles; an exploratory run without any opens
+    // every card as before.
+    let pageTitleScreenSignal = null;
+    const pageScreenTargetTitles = Array.isArray(activeJobPreferencePlan?.titles)
+      ? activeJobPreferencePlan.titles.filter(t => typeof t === 'string' && t.trim())
+      : [];
+    const pageTitleScreen = !skipProviderCollection && pageScreenTargetTitles.length > 0
+      ? createPageTitleScreen({
+        signal: () => pageTitleScreenSignal,
+        screenTitles: (jobs, { signal: callSignal }) => screenJobRolesByTitle({
+          jobs,
+          titles: pageScreenTargetTitles,
+          signal: callSignal,
+          callText: callLLMText,
+          verdictStore: getJobRoleScreenVerdictStore(),
+          titleTask: 'job-role-screen-page',
+          snippetPass: false,
+          meta: {},
+        }),
+      })
+      : null;
+    const titleScreenBySource = {};
+    if (pageTitleScreen) {
+      for (const sourceId of PAGE_TITLE_SCREEN_SOURCE_IDS) {
+        const screen = pageTitleScreen.forSource(sourceId);
+        if (screen) titleScreenBySource[sourceId] = screen;
+      }
+    }
     const candidateTasks = buildJobTasks(queries, ageDays, {
       onlySources: requestedRunnableSourceScope,
       alreadyReadBySource,
       owedBySource,
+      titleScreenBySource,
       ...(queryPlans ? { startPageBySourceQuery: queryPlans } : {}),
       collectionStartTimestamp: activeSearchWindow.startTimestamp,
       maxAgeDaysBySource: ageDaysBySource(),
@@ -949,6 +1018,10 @@ export function registerSearchHandlers(ctx) {
     for (const [sid, dropped] of Object.entries(resumedWindowDropped)) {
       const result = sourceResults[sid] || (sourceResults[sid] = { jobs: [], errors: 0, warnings: [], pagesWalked: 0, stopReasons: new Set() });
       result.windowDropped = (result.windowDropped || 0) + dropped;
+    }
+    for (const [sid, skipped] of Object.entries(resumedTitleScreenSkipped)) {
+      const result = sourceResults[sid] || (sourceResults[sid] = { jobs: [], errors: 0, warnings: [], pagesWalked: 0, stopReasons: new Set() });
+      result.titleScreenSkipped = (result.titleScreenSkipped || 0) + skipped;
     }
 
     // Resume: seed the gathered set with jobs recovered from the prior run's
@@ -1139,6 +1212,7 @@ export function registerSearchHandlers(ctx) {
     // the caller did not provide one.
     const pipelineAbort = new AbortController();
     const combinedSignal = AbortSignal.any([pipelineAbort.signal, signal].filter(s => s instanceof AbortSignal));
+    pageTitleScreenSignal = combinedSignal;
     const throwIfSearchAborted = async () => {
       if (!combinedSignal.aborted) return;
       const reason = combinedSignal.reason instanceof Error
@@ -1228,7 +1302,8 @@ export function registerSearchHandlers(ctx) {
           emitProgress({ nodeId, sourceId: 'indeed', status: 'searching', count: 0, detail, completed: getCompletedQueriesFromDetail(detail, queryTotal), total: queryTotal });
         }, indeedPlan.startPages, stageOnPage, location, normalizedCollectionLimits, indeedPlan.pageBudgets, true, activeIndeedIndexes, postedSinceFor('indeed'), alreadyReadBySource.indeed || null,
           // Listings still owed from before Indeed's date moved are opened whatever their date.
-          owedBySource.indeed || null);
+          owedBySource.indeed || null,
+          titleScreenBySource.indeed || null);
         await afterSearchProviderResult('indeed', r);
         await assertSearchCurrent();
         // Observation of the session the scrape actually ran with — survives
@@ -1349,6 +1424,7 @@ export function registerSearchHandlers(ctx) {
             [sourceId]: { locationScopeUnenforced: rows.some(row => row?.locationScopeUnenforced === true) },
           }),
           pageShapeFailures: rows.reduce((sum, row) => sum + (Number.isSafeInteger(row?.pageShapeFailures) && row.pageShapeFailures > 0 ? row.pageShapeFailures : 0), 0),
+          titleScreenSkipped: Math.max(0, Math.floor(Number(pageTitleScreen?.stats?.()?.[sourceId]?.mismatched) || 0)),
         },
       );
       await assertSearchCurrent();
@@ -1793,6 +1869,48 @@ export function registerSearchHandlers(ctx) {
       }
     }
 
+    // Rows the AI page title screen left unopened (pageTitleScreen.js) never
+    // reached allJobs. They count as relevance drops before the cap, so the
+    // funnel's raw total is still what the platforms returned.
+    const pageTitleScreenStats = pageTitleScreen ? pageTitleScreen.stats() : {};
+    for (const [sourceId, stats] of Object.entries(pageTitleScreenStats)) {
+      const result = sourceResults[sourceId];
+      if (!result) continue;
+      const mismatched = Math.max(0, Number(stats?.mismatched) || 0);
+      result.pageTitleScreen = {
+        pages: stats.pages, screened: stats.screened, mismatched, matched: stats.matched,
+        unclear: stats.unclear, pendingAtOpen: stats.pendingAtOpen, failedPages: stats.failedPages,
+      };
+      if (mismatched > 0) {
+        result.titleScreenSkipped = (Number(result.titleScreenSkipped) || 0) + mismatched;
+        result.preCapRelevanceDropped = (Number(result.preCapRelevanceDropped) || 0) + mismatched;
+      }
+      logger.info(`[Jobs][${nodeId}] ${sourceId}: page title screen checked ${stats.screened} title(s) on ${stats.pages} page(s) before opening them: skipped ${mismatched}, opened ${stats.matched} match(es) and ${stats.unclear} unsure${stats.failedPages ? `; ${stats.failedPages} page(s) failed and were opened unscreened` : ''}`);
+    }
+    // A query whose screened titles were mostly a different kind of job: say
+    // so on its source card, with an AI-suggested rewording for that site.
+    const offTarget = offTargetQueries(pageTitleScreenStats);
+    if (offTarget.length > 0) {
+      await assertSearchCurrent();
+      const withSuggestions = await suggestQueryRewordings(offTarget, {
+        targetTitles: pageScreenTargetTitles, callText: callLLMText, signal: combinedSignal,
+      });
+      await assertSearchCurrent();
+      for (const entry of withSuggestions) {
+        const result = sourceResults[entry.sourceId];
+        if (!result) continue;
+        (result.warnings ||= []).push(offTargetQueryWarning(entry));
+        // Counts go to the receipt; the text goes to a warn-level log line,
+        // which the bug report's log section keeps through a long scrape.
+        if (result.pageTitleScreen) {
+          (result.pageTitleScreen.offTargetQueries ||= []).push({
+            queryIndex: entry.queryIndex, screened: entry.screened, mismatched: entry.mismatched, suggested: !!entry.suggestion,
+          });
+        }
+        logger.warn(`[Jobs][${nodeId}] ${offTargetQueryLogLine(entry)}`);
+      }
+    }
+
     // Preserve provider-ranked search results except for a conservative
     // country-level backstop: never score a listing that affirmatively names a
     // different country. Ambiguous, remote, and city/province-target rows stay.
@@ -1932,6 +2050,7 @@ export function registerSearchHandlers(ctx) {
             collectionScopeCaveats: collectionScopeCaveatsFromSourceResults({ [sourceId]: data }),
             pageShapeFailures: data?.pageShapeFailures || 0,
             windowDropped: data?.windowDropped || 0,
+            titleScreenSkipped: data?.titleScreenSkipped || 0,
           },
         );
         await assertSearchCurrent();
@@ -1954,16 +2073,16 @@ export function registerSearchHandlers(ctx) {
         });
       }
     }
+    // Telemetry-only copy of each unfinished source's finish note. It is kept
+    // OUT of sourceResults[sid].warnings on purpose: those drive card status,
+    // effective-warning selection and the source-health gate, and a deliberate
+    // finish must not change any of them.
+    const finishedWithSavedWarningsBySource = {};
     if (collectionDisposition === 'user-finished-partial') {
       for (const sourceId of intentionallyUnfinishedSourceIds) {
-        scrapeWarnings.push({
-          sourceId,
-          url: null,
-          code: 'collection-finished-with-saved-listings',
-          severity: 'info',
-          evidence: 'Provider collection was deliberately stopped; this source was not resumed.',
-          suggestion: 'Run a later full Job Search to collect the remaining source coverage.',
-        });
+        const warning = finishedWithSavedSourceWarning(intentionallyUnfinishedPriorStatuses[sourceId]);
+        finishedWithSavedWarningsBySource[sourceId] = warning;
+        scrapeWarnings.push({ sourceId, url: null, ...warning });
       }
     }
 
@@ -2593,7 +2712,9 @@ export function registerSearchHandlers(ctx) {
       // earlier run) returned rows; it is not silent.
       silentlyEmptySourceIds: skipProviderCollection ? [] : activeSourceIds.filter(sid => countryApplicableSourceIds.has(sid)
         && !(sourceResults[sid]?.jobs?.length) && !(sourceResults[sid]?.warnings?.length)
-        && !(Number(sourceResults[sid]?.alreadyReadSkipped) > 0)),
+        && !(Number(sourceResults[sid]?.alreadyReadSkipped) > 0)
+        // Every card left unopened by the page title screen is not silence either.
+        && !(Number(sourceResults[sid]?.titleScreenSkipped) > 0)),
       // Cards an earlier blocked run of the same platform read. They passed
       // this check then, so they still count as measured rows; without them a
       // re-walk would be judged on the few cards it had to open, which are the
@@ -2749,7 +2870,8 @@ export function registerSearchHandlers(ctx) {
         || (data.warnings || []).find(x => x?.code === SOURCE_HEALTH_WARNING_CODE)
         || (data.warnings || []).find(x => x?.code === WALK_GUARD_WARNING_CODE)
         || (data.warnings || []).find(x => x?.severity === 'info')
-        || (data.warnings || [])[0] || null;
+        || (data.warnings || [])[0]
+        || finishedWithSavedWarningsBySource[sid] || null;
       bySource[sid] = {
         count: data.jobs.length,
         unique: uniqueBySource[sid] || 0,
@@ -2776,6 +2898,9 @@ export function registerSearchHandlers(ctx) {
       }
       if (Number(data.alreadyReadSkipped) > 0) {
         bySource[sid].alreadyReadSkipped = Math.max(0, Math.floor(Number(data.alreadyReadSkipped)));
+      }
+      if (data.pageTitleScreen && typeof data.pageTitleScreen === 'object') {
+        bySource[sid].pageTitleScreen = { ...data.pageTitleScreen };
       }
       if (Array.isArray(data.healthFailures) && data.healthFailures.length > 0) {
         bySource[sid].healthFailures = data.healthFailures
@@ -3223,7 +3348,10 @@ export function registerSearchHandlers(ctx) {
             loginBlockedSourceIds,
             countryApplicableSourceIds,
           });
-          if (!resume && !skipProviderCollection) {
+          // A resumed run reports this too. "Finish with saved listings" after
+          // Pause & save scrapes nothing, so without it the platform it stopped
+          // lost the queries it had finished and the listings it had read.
+          {
             const jobsBySource = Object.fromEntries(Object.entries(sourceResults || {})
               .map(([sourceId, result]) => [sourceId, result?.jobs]));
             for (const sourceId of activeSourceIds) {
@@ -3232,7 +3360,10 @@ export function registerSearchHandlers(ctx) {
               // step need reading, so its read and unread listings come from
               // that pool rather than from the raw result rows.
               const isLinkedIn = sourceId === 'linkedin';
-              const readsCards = isLinkedIn || sourceId === 'indeed' || tasks.some(task => task?.sourceId === sourceId);
+              // A resume that scrapes nothing builds no tasks; its browser
+              // platforms read cards all the same.
+              const readsCards = isLinkedIn || sourceId === 'indeed' || tasks.some(task => task?.sourceId === sourceId)
+                || (resume && BROWSER_SCRAPE_ORDER.includes(sourceId));
               const cardRows = isLinkedIn
                 ? descriptionRecoveryJobs.filter(job => job?.source === 'linkedin')
                 : sourceResults[sourceId]?.jobs;
@@ -3262,8 +3393,13 @@ export function registerSearchHandlers(ctx) {
                 finished = Array.isArray(linkedIn?.finishedQueries) ? linkedIn.finishedQueries : [];
               } else if (BROWSER_SCRAPE_ORDER.includes(sourceId)) {
                 const ledger = finalState.manifest.sources?.[sourceId]?.queries || {};
+                // Rows saved before a resume are not in this run's own tally.
+                const savedUnread = resume
+                  ? stagedUnreadQueryIndexes(sourceId, queries, recoveredStagedRows, cardRows)
+                  : null;
                 finished = queries.filter((_query, index) => ledger[`#${index}`]?.terminal === true
-                  && !(unreadRowsByQuery[`${sourceId}#${index}`] > 0));
+                  && !(unreadRowsByQuery[`${sourceId}#${index}`] > 0)
+                  && !savedUnread?.has(index));
               }
               finished = finished.filter(query => typeof query === 'string' && query);
               // Listing-level progress for a platform read card by card: what

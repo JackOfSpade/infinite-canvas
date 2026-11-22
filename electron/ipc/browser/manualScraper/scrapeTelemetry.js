@@ -10,6 +10,35 @@ const EVENT_RING_MAX = 30;
 
 const ORIGIN_RING_MAX = 24;
 
+// Origin rows that are pinned in the origin ring: each source's FIRST
+// source-start and the first row of each location-* phase. Per-query rows
+// (query-start, reveal-finished) and source-finished can be evicted on a long
+// run; pinned rows only when every retained row is pinned. Keys are
+// `${sourceId}\u0000${phase}`, reset with the rest of the run telemetry.
+const pinnedOriginKeys = new Set();
+const pinnedOriginEntries = new WeakSet();
+
+function isPinnableOriginPhase(phase) {
+  return phase === 'source-start' || (typeof phase === 'string' && phase.startsWith('location-'));
+}
+
+function pushOriginRow(entry) {
+  const origins = manualScraperTelemetry.origins;
+  if (isPinnableOriginPhase(entry.phase)) {
+    const key = `${String(entry.sourceId || 'unknown')}\u0000${entry.phase}`;
+    if (!pinnedOriginKeys.has(key)) {
+      pinnedOriginKeys.add(key);
+      pinnedOriginEntries.add(entry);
+    }
+  }
+  origins.push(entry);
+  while (origins.length > ORIGIN_RING_MAX) {
+    const evictAt = origins.findIndex(row => !pinnedOriginEntries.has(row));
+    origins.splice(evictAt >= 0 ? evictAt : 0, 1);
+    manualScraperTelemetry.originsDropped = (Number(manualScraperTelemetry.originsDropped) || 0) + 1;
+  }
+}
+
 const ANOMALY_RING_MAX = 20;
 
 // ── Per-source scrape pace ────────────────────────────────────────────────────
@@ -125,7 +154,7 @@ export function notePaceDetailOpened(sourceId, meta = {}) {
 // Glassdoor's description route (glassdoorJobPage.js): running source totals of
 // descriptions read from job pages vs the panel fallback, and the fixed code
 // for why the job-page route stopped. Counts and codes only.
-const DESCRIPTION_ROUTE_STOP_CODES = new Set(['none', 'unreadable', '429-first', '429-second', 'challenge']);
+const DESCRIPTION_ROUTE_STOP_CODES = new Set(['none', 'unreadable', 'no-reads', '429-first', '429-second', 'challenge']);
 export function notePaceDescriptionRoute(sourceId, meta = {}) {
   return updateScrapePace(sourceId, meta, pace => {
     pace.descriptionRoute = {
@@ -172,6 +201,17 @@ export function notePaceChallengeEnd(sourceId, meta = {}) {
       pace.checkInput[kind] = (Number(pace.checkInput[kind]) || 0) + 1;
     }
     logScrapePaceSummary(pace);
+  });
+}
+
+// Glassdoor panel request-limit waits (expandByPanel waitForPanelWindow): the
+// walk paused to keep panel requests under the site's 5-minute limit. Counted
+// per source so the pace line shows the time even when no batch summary
+// survives in the recency ring.
+export function notePacePanelWindowWait(sourceId, meta = {}) {
+  return updateScrapePace(sourceId, meta, pace => {
+    pace.panelWindowWaits = (Number(pace.panelWindowWaits) || 0) + 1;
+    pace.panelWindowWaitMs = (Number(pace.panelWindowWaitMs) || 0) + Math.max(0, Number(meta.waitMs) || 0);
   });
 }
 
@@ -234,6 +274,10 @@ export function formatScrapePaceLine(pace, now = Date.now()) {
       return parts.length ? [`panel walk interruptions: ${parts.join(', ')}`] : [];
     })(),
     ...(() => {
+      const waits = Math.max(0, Number(pace.panelWindowWaits) || 0);
+      return waits ? [`panel request limit waits ${waits} (${duration(pace.panelWindowWaitMs)})`] : [];
+    })(),
+    ...(() => {
       const route = pace.descriptionRoute;
       if (!route || typeof route !== 'object') return [];
       const stop = DESCRIPTION_ROUTE_STOP_CODES.has(route.stopReason) ? route.stopReason : 'none';
@@ -256,10 +300,14 @@ const ACTIVITY_SINK_MIN_INTERVAL_MS = 1000;
 // NAMED long before the protocol gives up on it and the retry loop restarts it.
 const IN_FLIGHT_WARN_MS = 30_000;
 
-// Rows that establish the identity and setup of a source's walk. Each is emitted
-// at most once per source, so they are the first casualties of the 30-slot
-// recency ring on a long run — and the last thing a reader can afford to lose,
-// since they carry the query, the requested location, and any host redirect.
+// Rows that establish the identity and setup of a source's walk. source-start,
+// source-finished and the location-* rows are normally once per source, while
+// query-start and reveal-finished are once per QUERY — so on a long run they
+// are the first casualties of the 30-slot recency ring and the last thing a
+// reader can afford to lose (query, requested location, any host redirect).
+// They get their own bounded ring; each source's first source-start and
+// location-* rows are pinned there (pushOriginRow) and every other eviction is
+// counted in `originsDropped`.
 const ORIGIN_PHASES = new Set([
   'source-start', 'query-start', 'source-finished', 'reveal-finished',
   'location-nation-tier-unenforced', 'location-resolution-failed',
@@ -394,10 +442,7 @@ export function recordManualScraperTelemetry(event, { updateActive = true } = {}
   // the source every subsequent overlay paint belongs to. This is what lets the
   // beat below carry a sourceId without threading one through ~30 call sites.
   if (entry.sourceId) manualScraperTelemetry.currentSourceId = entry.sourceId;
-  if (ORIGIN_PHASES.has(entry.phase)) {
-    manualScraperTelemetry.origins.push(entry);
-    if (manualScraperTelemetry.origins.length > ORIGIN_RING_MAX) manualScraperTelemetry.origins.shift();
-  }
+  if (ORIGIN_PHASES.has(entry.phase)) pushOriginRow(entry);
   // The 30-slot `events` ring is a recency window: after a source-wide detail
   // block, every later page emits two rows, so 18 pages of skip chatter evicted
   // the single `detail-panel-rate-limit` event that explained the whole run.
@@ -474,6 +519,9 @@ export function getManualScraperTelemetry() {
     active: manualScraperTelemetry.active ? { ...manualScraperTelemetry.active } : null,
     events: manualScraperTelemetry.events.map(e => ({ ...e })),
     origins: manualScraperTelemetry.origins.map(e => ({ ...e })),
+    // Origin rows evicted from the bounded origin ring this run (pinned rows
+    // are never among them unless every retained row is pinned).
+    originsDropped: Math.max(0, Number(manualScraperTelemetry.originsDropped) || 0),
     fieldAnomalies: manualScraperTelemetry.fieldAnomalies.map(e => ({ ...e })),
     consoleLogs: manualScraperTelemetry.consoleLogs.map(e => ({ ...e })),
     networkErrors: manualScraperTelemetry.networkErrors.map(e => ({ ...e })),
@@ -588,6 +636,8 @@ export function resetManualScraperTelemetry() {
   manualScraperTelemetry.active = null;
   manualScraperTelemetry.events = [];
   manualScraperTelemetry.origins = [];
+  manualScraperTelemetry.originsDropped = 0;
+  pinnedOriginKeys.clear();
   // A new run must not report the previous run's pace. Per-source dispatch uses
   // resetScrapePace (source start) and keeps sibling sources' records.
   manualScraperTelemetry.pace = {};

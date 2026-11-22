@@ -4,11 +4,13 @@ import { JOB_SOURCE_BY_ID } from '../../utils/constants';
 import { useCareerCompilationProgress } from '../../hooks/useCareerCompilationProgress';
 import { usePublishJobRunStatus } from '../../hooks/usePublishJobRunStatus';
 import { deriveCareerCompilationProgress } from '../../utils/careerCompilationProgress';
+import { allSitesCollectedLine, formatSourceCount as formatCount } from '../../utils/jobSourceCountLine.js';
 
 export function JobSearchProcessingState({
   statusLabel,
   hubState,
   totalSourceJobs,
+  sourceCounts = null,
   scoringProgress,
   activeSourceId,
   activeSourceDetail,
@@ -48,7 +50,14 @@ export function JobSearchProcessingState({
     ? `${queuedRun?.label || 'Job search'} · Position ${queuedRun?.position || 1}`
     : null;
   const collectedStatus = hubState === 'searching' && totalSourceJobs > 0
-    ? `${totalSourceJobs} listing${totalSourceJobs === 1 ? '' : 's'} currently reported by sources (before de-duplication)`
+    ? allSitesCollectedLine(totalSourceJobs, sourceCounts)
+    : null;
+  // The active site's own detail line names the site and its own count, so
+  // it can never be read as describing the all-sites total (2026-11-22: a
+  // Glassdoor pause line followed by "11837 listings…" read as Glassdoor's).
+  const activeSourceCount = Number(activeSourceProgress?.count);
+  const activeDetailLine = hubState === 'searching' && activeSourceDetail
+    ? `${activeSourceName}${Number.isFinite(activeSourceCount) && activeSourceCount > 0 ? ` (${formatCount(activeSourceCount)} found)` : ''}: ${activeSourceDetail}`
     : null;
   const checkpointSourceSummary = Array.isArray(resumeCheckpoint?.sourceSummary)
     ? resumeCheckpoint.sourceSummary
@@ -87,7 +96,7 @@ export function JobSearchProcessingState({
     headline: careerView?.label || primaryStatus,
     lines: careerView ? [careerView.detail, careerView.countLabel] : [
       ...checkpointLines, queuedStatus, descriptionProgress,
-      hubState === 'searching' ? activeSourceDetail : null, collectedStatus, scoringStatus,
+      activeDetailLine, collectedStatus, scoringStatus,
     ],
     pauseKeys: nodeId ? [`node:${nodeId}`] : [],
     onPause: queuedRun ? null : onPauseAndSave,

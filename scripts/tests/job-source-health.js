@@ -4,7 +4,7 @@ import { assessSourceHealth, DESCRIPTIONS_NOT_FETCHED_CODE, descriptionsNotFetch
 import { collectionScopeCaveatsFromSourceResults, describeSourceHealthFailures, normalizeCollectionScopeCaveats, sourceHealthCaveats } from '../../src/utils/jobCollectionScopeCaveats.js';
 import { AUTOMATIC_DESCRIPTION_SOLVE_WAIT_MS, automaticDescriptionSolveDue, EMPLOYER_POSTING_READ_SOURCE_IDS, employerPostingReadOnSkip, isJobSourceWarningGating } from '../../src/utils/jobSourceWarningPolicy.js';
 import { EMPLOYER_POSTING_READ_MAX_LISTINGS, readListingsFromEmployerPostings } from '../../electron/ipc/jobs/employerPostingRead.js';
-import { indeedResumeWalkComplete, linkedInWalkComplete, listingReadProgress, listingsReadElsewhere } from '../../electron/ipc/jobs/sourceRules.js';
+import { indeedResumeWalkComplete, linkedInWalkComplete, listingReadProgress, listingsReadElsewhere, stagedUnreadQueryIndexes } from '../../electron/ipc/jobs/sourceRules.js';
 import { applyResolvedListingsToPendingCoverage, applySourceSolveToPendingCoverage, buildSourceCoverageCommitPatch, sourceOwedKeysForRun, sourcesWithoutDateProgress } from '../../src/utils/jobSearchSourceCoverage.js';
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { filterJobsByPostedSince } from '../../electron/ipc/jobDateFilter.js';
@@ -552,7 +552,7 @@ export default [
       assert.deepEqual(selectIndeedPageRows(fresh(), windowStart, null, () => { throw new Error('x'); }).open.map(job => job.title), ['new1']);
 
       const search = fs.readFileSync('electron/ipc/jobs/searchHandlers.js', 'utf8');
-      assert.match(search, /fetchIndeedListingsBrowser\(indeedPlan\.queries,[\s\S]{0,800}alreadyReadBySource\.indeed \|\| null,[\s\S]{0,200}owedBySource\.indeed \|\| null\);/,
+      assert.match(search, /fetchIndeedListingsBrowser\(indeedPlan\.queries,[\s\S]{0,800}alreadyReadBySource\.indeed \|\| null,[\s\S]{0,200}owedBySource\.indeed \|\| null,[\s\S]{0,80}titleScreenBySource\.indeed \|\| null\);/,
         'runIndeed passes the owed hook');
       assert.doesNotMatch(search, /readsCards && sourceId !== 'indeed'/, 'Indeed can be recorded as fully walked like any card-reading platform');
       const extractor = fs.readFileSync('electron/extractors/indeedBrowser.js', 'utf8');
@@ -645,6 +645,57 @@ export default [
       assert.equal(result.unread.length, EMPLOYER_POSTING_READ_MAX_LISTINGS - 1);
       assert.equal(result.unread[0].descriptionDeferredReason, 'description-rate-limited', 'an unread listing comes back unchanged');
       assert.deepEqual((await readListingsFromEmployerPostings([], { resolve: async () => { throw new Error('not called'); } })).read, []);
+    },
+  },
+  {
+    name: 'Finishing a paused run keeps the stopped platform\'s finished queries and read listings',
+    run() {
+      const queries = ['product engineer', 'frontend engineer', 'full stack engineer'];
+      const gd = (id, over = {}) => row('glassdoor', { title: `Job ${id}`, url: `https://glassdoor.test/${id}`, ...over });
+      // Query 0 walked and read; query 1 walked, one listing unread; query 2 cut by the pause.
+      const staged = [
+        { sourceId: 'glassdoor', query: queries[0], job: gd('a') },
+        { sourceId: 'glassdoor', query: queries[1], job: gd('b') },
+        { sourceId: 'glassdoor', query: queries[1], job: gd('c', { snippet: '' }) },
+        { sourceId: 'glassdoor', query: queries[2], job: gd('d') },
+        { sourceId: 'ziprecruiter', query: queries[0], job: row('ziprecruiter', { snippet: '' }) },
+      ];
+      const cardRows = staged.filter(item => item.sourceId === 'glassdoor').map(item => ({ ...item.job, source: 'glassdoor' }));
+      assert.deepEqual([...stagedUnreadQueryIndexes('glassdoor', queries, staged, cardRows)], [1],
+        'only the query with an unread listing is held back; another platform\'s rows do not count');
+
+      // A later copy that was read clears the saved unread copy, in either order.
+      const reread = { ...cardRows[2], snippet: TEXT };
+      assert.equal(stagedUnreadQueryIndexes('glassdoor', queries, staged, [...cardRows, reread]).size, 0);
+      const progress = listingReadProgress([cardRows[2], reread]);
+      assert.equal(progress.readKeys.length, 1, 'a listing with any read copy counts as read');
+      assert.equal(progress.unreadListings.length, 0, 'and is not also owed');
+
+      // An unread row whose query text matches no planned query holds every query back.
+      const stray = [{ sourceId: 'glassdoor', query: 'renamed query', job: gd('e', { snippet: '' }) }];
+      assert.deepEqual([...stagedUnreadQueryIndexes('glassdoor', queries, stray, [stray[0].job])], [0, 1, 2]);
+
+      // The final checkpoint's untagged copy of a listing a query already names holds back only that query.
+      const resaved = [...staged, ...staged.filter(row => row.sourceId === 'glassdoor').map(row => ({ ...row, query: '', page: 0 }))];
+      assert.deepEqual([...stagedUnreadQueryIndexes('glassdoor', queries, resaved, cardRows)], [1]);
+
+      // The commit then keeps them: finished queries for the next run, read listings in the ledger.
+      const start = Date.UTC(2026, 10, 21, 5);
+      const ledger = { '#0': { terminal: true }, '#1': { terminal: true }, '#2': { lastPage: 3 } };
+      const held = stagedUnreadQueryIndexes('glassdoor', queries, staged, cardRows);
+      const finishedQueries = queries.filter((_query, index) => ledger[`#${index}`]?.terminal === true && !held.has(index));
+      const read = listingReadProgress(cardRows);
+      const patch = buildSourceCoverageCommitPatch({ sourceCoverage: { glassdoor: { coverageStartedAt: start - 86_400_000, completedAt: start - 86_400_000, runId: null } } }, {
+        runId: 'paused', collectionStartedAt: start, collectionCompletedAt: start + 1000,
+        completedSourceIds: ['ziprecruiter'],
+        sourceQueryProgress: { glassdoor: { finishedQueries, unreadListings: read.unreadListings } },
+        readKeysBySource: { glassdoor: read.readKeys },
+        locationKey: 'United States',
+      }, 'hub');
+      assert.deepEqual(patch.sourceQueryProgress.glassdoor.finishedQueries, [queries[0]]);
+      assert.equal(patch.sourceReadLedger.glassdoor.keys.length, 3, 'the three read Glassdoor listings are not opened again');
+      assert.equal(patch.sourceCoverage.glassdoor.coverageStartedAt, start - 86_400_000, 'the stopped platform keeps its date');
+      assert.equal(patch.sourceCoverage.ziprecruiter.coverageStartedAt, start, 'a platform that finished before the pause moves');
     },
   },
 ];

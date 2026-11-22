@@ -57,6 +57,7 @@ import { rawCanvasRecoveryPath, resolveCanvasRecoveryPath, withCanvasRecoveryRea
 import { getJobDescriptionRecoveryCheckpointPath } from './jobAnalysisPaths.js';
 import { jobAnalysisOperationAuthorityReceipt, withCurrentJobAnalysisOperationAuthority } from './jobAnalysisOperationAuthorityStore.js';
 import { fsyncDirectory } from '../utils/pathSafety.js';
+import { sanitizePageTitleScreenReceipt } from './jobs/pageTitleScreen.js';
 
 const MANIFEST_VERSION = 2;
 // A Solve checkpoint can contain the full saved candidate universe; it is not
@@ -676,6 +677,10 @@ function sanitizeReceiptSource(rawSource) {
     ...(receiptNumber(source.windowDropped) > 0 ? { windowDropped: receiptNumber(source.windowDropped) } : {}),
     // Cards left unopened because an earlier run already read or showed them.
     ...(receiptNumber(source.alreadyReadSkipped) > 0 ? { alreadyReadSkipped: receiptNumber(source.alreadyReadSkipped) } : {}),
+    // Counts and off-target query slots only (pageTitleScreen.js).
+    ...(sanitizePageTitleScreenReceipt(source.pageTitleScreen) ? {
+      pageTitleScreen: sanitizePageTitleScreenReceipt(source.pageTitleScreen),
+    } : {}),
     // Which field checks failed, as known field names and counts only.
     ...(healthFailures.length > 0 ? { healthFailures } : {}),
     ...(receiptNumber(source.sponsoredDropped) > 0 ? { sponsoredDropped: receiptNumber(source.sponsoredDropped) } : {}),
@@ -1716,6 +1721,9 @@ async function markSourceStatusRaw(canvasFilePath, sourceId, status, now, {
   pageShapeFailures = undefined,
   // Dated cards the collection window dropped. Saved so a resumed run keeps the posted-date check's denominator.
   windowDropped = undefined,
+  // Cards the page title screen left unopened. Saved so a resumed run does not
+  // judge a platform whose every card was off-target as silently empty.
+  titleScreenSkipped = undefined,
 } = {}) {
   const located = await locateRun(canvasFilePath, nodeId);
   const { files } = located;
@@ -1730,6 +1738,10 @@ async function markSourceStatusRaw(canvasFilePath, sourceId, status, now, {
     if (windowDropped !== undefined) {
       if (Number.isSafeInteger(windowDropped) && windowDropped > 0) src.windowDropped = Math.min(windowDropped, 100_000);
       else delete src.windowDropped;
+    }
+    if (titleScreenSkipped !== undefined) {
+      if (Number.isSafeInteger(titleScreenSkipped) && titleScreenSkipped > 0) src.titleScreenSkipped = Math.min(titleScreenSkipped, 100_000);
+      else delete src.titleScreenSkipped;
     }
     if (status === 'done' || status === 'skipped') {
       delete src.recoveryDisposition;
@@ -2299,7 +2311,10 @@ async function completeRunWithReceiptRaw(canvasFilePath, receipt, { trashItem = 
           // is this run's durable owner and safely fills identity/timing only
           // when the receipt builder could not match in-memory telemetry.
           nodeId: receipt?.nodeId || manifest?.inputs?.nodeId || null,
-          startedAt: receipt?.startedAt ?? manifest?.startedAt,
+          // The manifest's durable start wins: after a crash-resume the
+          // in-memory telemetry start is the RESUME moment, which would make
+          // the receipt understate the run. Telemetry only fills a missing one.
+          startedAt: manifestTimestamp(manifest?.startedAt) ?? receipt?.startedAt,
           // Collection evidence comes only from the owned host manifest, not
           // a renderer terminal receipt or a completed-status inference.
           collectionDiagnostics: manifest?.collectionDiagnostics,

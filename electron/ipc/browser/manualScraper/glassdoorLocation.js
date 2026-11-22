@@ -321,6 +321,8 @@ export function describeGlassdoorLocationFailure({ location, failure, failureKin
         + 'Check the preferred location spelling, or use a more specific form (e.g. "Toronto, Ontario, Canada").'
       : failureKind === 'cancelled'
         ? 'The search was stopped before this lookup finished — nothing to correct. Glassdoor will resolve the location on the next run.'
+      : failureKind === 'page-detached'
+        ? 'The Glassdoor tab stopped responding to the scraper during the lookup; this says nothing about the location text. Retry Glassdoor.'
         : 'Check the preferred location spelling and retry Glassdoor. '
           + 'If its location autocomplete is unavailable, use the other country-scoped sources for this run.';
   return { evidence, suggestion };
@@ -437,6 +439,11 @@ export async function resolveGlassdoorLocId(page, location, signal, runCache = n
       );
       if (originReady === 'abort' || signal?.aborted) {
         return { failure: 'search was cancelled during location verification', failureKind: 'cancelled', attempts };
+      }
+      if (originReady === 'page-detached') {
+        // The page object can no longer be read; nothing about the origin or
+        // its check is known, so do not go on as if it had loaded.
+        return { failure: 'the Glassdoor page stopped responding during location verification', failureKind: 'page-detached', attempts };
       }
       if (originReady === 'hard-block' || originReady === 'skip') {
         return {

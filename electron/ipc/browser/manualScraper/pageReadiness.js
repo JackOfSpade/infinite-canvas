@@ -13,6 +13,7 @@ import { markManualSolveRequired } from '../../scrapeVerification.js';
 import { logger } from '../../../logger.js';
 import { humanDelay } from '../../../utils/humanDelay.js';
 import { overlayTabLayout } from '../scraperOverlay.js';
+import { isDetachedFrameError } from './detailParsing.js';
 
 // We wait INDEFINITELY for the user to solve a real (solvable) challenge — never
 // skip a source out from under someone mid-solve. The escape hatches are an abort
@@ -183,7 +184,8 @@ export function classifyManualChallengeSignals(signals = {}) {
   // it: a widget the user could actually solve, a document small enough to BE
   // an interstitial, or the specific post-solve "verification successful"
   // transient (a real challenge state that must not be read as clean).
-  const bodyTextLength = Number(signals.bodyTextLength);
+  // null/undefined is "not measured" — Number(null) would read it as 0 chars.
+  const bodyTextLength = signals.bodyTextLength == null ? NaN : Number(signals.bodyTextLength);
   // An unmeasured length (legacy caller, failed probe) keeps the prior
   // behaviour rather than silently widening what counts as a challenge.
   const interstitialSized = Number.isFinite(bodyTextLength)
@@ -291,6 +293,22 @@ export function resolveManualDetailChallengeDisposition({
     ...transition,
     disposition: transition.disposition === 'hard-block' ? 'terminal-stop' : 'foreground-wait',
   };
+}
+
+function safeProbeUrl(page) {
+  try { return page.url(); } catch { return ''; }
+}
+
+/**
+ * True when this page object can no longer be read at all: its main frame
+ * detached, the tab closed, or its browser disconnected. Retrying a probe on it
+ * can only fail again, so the wait hands it back to the caller instead.
+ */
+export function isUnreadablePage(page, signals = null) {
+  if (signals?.pageDetached) return true;
+  try { if (page?.isClosed?.()) return true; } catch { /* treat as readable; the probe decides */ }
+  try { if (page?.browser?.()?.isConnected?.() === false) return true; } catch { /* same */ }
+  return false;
 }
 
 export async function getChallengeSignals(page) {
@@ -404,9 +422,13 @@ export async function getChallengeSignals(page) {
     isChallenge: false,
     isHardBlock: false,
     verificationCompleted: false,
+    // 'evaluate-failed' means the page was NOT read: it is neither a challenge
+    // nor a clean page. waitForReady must never count it as clean.
     reason: 'evaluate-failed',
     evaluationError: String(error?.message || error || '').replace(/\s+/g, ' ').slice(0, 180),
-    url: page.url(),
+    // A detached main frame cannot be read again through this page object.
+    pageDetached: isDetachedFrameError(error),
+    url: safeProbeUrl(page),
     title: '',
     bodyHead: '',
     // null, not 0: the document was never measured. Reporting it as an empty
@@ -518,7 +540,12 @@ export async function recoverFromChallengeHomeLanding(page, overlayBase, signal,
 
 // ── waitForReady ──────────────────────────────────────────────────────────────
 // Waits for real page content to appear, handling challenge pages.
-// Returns 'ok' | 'skip' (challenge timed out) | 'abort' (signal aborted).
+// Returns 'ok' | 'recovered' | 'skip' (session blocked) | 'hard-block' |
+// 'abort' (signal aborted) | 'page-detached' (this page object can no longer be
+// read — detached main frame, closed tab or disconnected browser; nothing was
+// observed about the site, and only 'ok'/'recovered' mean the page is usable).
+// A probe that could not read the page ('evaluate-failed') is never counted as
+// a clean page: it neither starts the stable-clean timer nor resolves a check.
 export async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = null, {
   challengeOnly = false,
   initialChallengeState = null,
@@ -554,10 +581,33 @@ export async function waitForReady(page, sourceId, overlayBase, signal, resumeUr
     notePaceChallengeEnd(sourceId, { srcName: overlayBase.srcName, input: challengeInputVerdict(inputProbe?.summary() || null) });
   };
 
+  // The page object is dead: report exactly that and hand it back. Nothing is
+  // claimed about the site, the check, or whether it was solved.
+  const leaveDetached = (signals) => {
+    const wasInChallenge = inChallenge;
+    closeOpenChallenge();
+    const evaluationError = signals?.evaluationError || null;
+    recordManualScraperTelemetry({
+      phase: 'page-detached',
+      srcName: overlayBase.srcName,
+      during: wasInChallenge ? 'challenge-wait' : (challengeOnly ? 'challenge-gate' : 'content-wait'),
+      url: signals?.url || safeProbeUrl(page),
+      ...(evaluationError ? { error: evaluationError } : {}),
+    }, { updateActive: false });
+    logger.warn(`[BrowserScraper] ${overlayBase.srcName}: page can no longer be read${wasInChallenge ? ' while waiting on a verification check' : ''}${evaluationError ? ` (${evaluationError})` : ''} — handing it back instead of treating it as a clean page`);
+    return 'page-detached';
+  };
+
   while (true) {
     if (signal?.aborted) { closeOpenChallenge(); return 'abort'; }
 
     const signals     = await getChallengeSignals(page);
+    if (isUnreadablePage(page, signals)) {
+      return leaveDetached(signals);
+    }
+    // The probe could not read the page (context destroyed mid-navigation,
+    // protocol hiccup). That is not an observation of a clean page.
+    const probeFailed = signals?.reason === 'evaluate-failed';
     if (inputProbe) await inputProbe.poll();
     const isChallenge = !!signals?.isChallenge;
     if (signals?.suppressedReason && !recordedTextSuppression) {
@@ -821,6 +871,17 @@ export async function waitForReady(page, sourceId, overlayBase, signal, resumeUr
       continue;
     }
 
+    // An unreadable probe is neither a challenge nor a clean page. Keep the
+    // stable-clean timer cleared and poll again; a check stays open until a
+    // probe actually reads a clean page. It also proves nothing about an
+    // earlier terminal page, so the terminal timer below is left as it is.
+    if (probeFailed) {
+      cleanSince = null;
+      if (!inChallenge && Date.now() > contentDL) return 'ok';
+      await new Promise(r => setTimeout(r, CONTENT_POLL_MS));
+      continue;
+    }
+
     // A clean poll proves the earlier terminal DOM did not remain stable. Keep
     // the fact that this challenge was interactive, but never carry its old
     // terminal timestamp through a redirect/clean settle into a later block.
@@ -849,6 +910,15 @@ export async function waitForReady(page, sourceId, overlayBase, signal, resumeUr
       // A 3-5s human-like pause reduces the chance of an instant re-challenge.
       await new Promise(r => setTimeout(r, humanDelay(4000)));
       const postSettleSignals = await getChallengeSignals(page);
+      if (isUnreadablePage(page, postSettleSignals)) {
+        return leaveDetached(postSettleSignals);
+      }
+      if (postSettleSignals?.reason === 'evaluate-failed') {
+        // The settle re-check could not read the page, so the solve is not
+        // confirmed. Restart the stable-clean window rather than resolve.
+        cleanSince = null;
+        continue;
+      }
       if (postSettleSignals?.isChallenge) {
         repeatedChallengeCount++;
         cleanSince = null;

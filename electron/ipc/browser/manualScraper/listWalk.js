@@ -9,6 +9,7 @@ import {
 } from './walkRules.js';
 import { updateOverlay, safePageUrl } from './scrapeBrowser.js';
 import { recordManualScraperTelemetry } from './scrapeTelemetry.js';
+import { isDetachedFrameError } from './detailParsing.js';
 import { logger } from '../../../logger.js';
 import { humanDelay } from '../../../utils/humanDelay.js';
 import { sourceJobKey } from '../../../../src/utils/jobIdentity.js';
@@ -36,13 +37,22 @@ export function countDistinctJobs(jobs) {
 // indistinguishable from "the page briefly navigated" and silently degrades
 // to "0 jobs, done" with no diagnostic trail. The caller tracks a consecutive
 // streak (mirroring siteChangedStreak) and only warns once it persists.
+//
+// detachedError is Puppeteer's "Attempted to use detached Frame": the page
+// object itself is dead, so retrying evaluate on it can only throw again and a
+// streak of those says nothing about the extractor. It is kept out of evalError
+// so the caller recovers a live page instead of blaming the extractor.
 export async function runExtractor(page, extractorJS) {
   try {
     const raw = await page.evaluate(extractorJS);
-    return { jobs: Array.isArray(raw) ? raw : [], siteChangedError: null, evalError: null };
+    return { jobs: Array.isArray(raw) ? raw : [], siteChangedError: null, evalError: null, detachedError: null };
   } catch (err) {
-    if (/SITE_CHANGED/i.test(err?.message)) return { jobs: [], siteChangedError: err, evalError: null };
-    return { jobs: [], siteChangedError: null, evalError: err }; // context destroyed / transient — retry next tick, unless it persists
+    if (/SITE_CHANGED/i.test(err?.message)) return { jobs: [], siteChangedError: err, evalError: null, detachedError: null };
+    // A closed tab is equally unreadable through this page object.
+    let pageClosed = false;
+    try { pageClosed = !!page?.isClosed?.(); } catch { pageClosed = false; }
+    if (isDetachedFrameError(err) || pageClosed) return { jobs: [], siteChangedError: null, evalError: null, detachedError: err };
+    return { jobs: [], siteChangedError: null, evalError: err, detachedError: null }; // context destroyed / transient — retry next tick, unless it persists
   }
 }
 

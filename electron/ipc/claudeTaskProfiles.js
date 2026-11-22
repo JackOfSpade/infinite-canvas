@@ -26,6 +26,11 @@ export const profile = (model, effort, tools = '', options = {}) => Object.freez
 
 export const CLAUDE_TASK_PROFILES = Object.freeze({
   'job-role-screen-batch': profile('haiku', 'low'),
+  // 2026-11-22: placeholder chosen by analogy, NOT tested. Same prompt and evidence (title + company) as
+  // job-role-screen-batch, run on one results page (about 20-30 titles) before its details are opened. Smaller
+  // batches make the task easier, so the proven Haiku low setting carries over until the owner asks for a test;
+  // stronger settings removed MORE real jobs on the batch screen (docs/ai-model-selection.md).
+  'job-role-screen-page': profile('haiku', 'low'),
   // 2026-11-21: Haiku low (was Haiku medium). Confirmed on all 11 real snippet prompts x 2 runs after the test-posting rule:
   // 90.0% agreement with production vs 89.9% (48/20 vs 47/22 extra/missed removals), within the rep-to-rep spread, at
   // $0.0049 vs $0.0053 a call; the two blind judges (11-12, 11-20) split on which Haiku arm drops more real jobs (docs/ai-model-selection.md).
@@ -109,6 +114,9 @@ export const CLAUDE_TASK_PROFILES = Object.freeze({
   // Sonnet medium was worse at 7x the cost and DeepSeek failed; its output cap already allows for reasoning
   // (docs/ai-model-selection.md).
   'job-query-generation': profile('haiku', 'medium'),
+  // 2026-11-22: placeholder chosen by analogy, NOT tested. Rewords a search query whose page title screen found it
+  // mostly off-target (pageTitleScreen.js); the nearest task is writing search queries, so it takes that profile.
+  'job-query-rewording': profile('haiku', 'medium'),
   // Its own id since 2026-11-20 (it ran under job-query-generation with a different prompt and schema). Placeholder chosen
   // by reasoning 2026-11-21, not yet tested (it calls the model only when a typed location does not resolve locally): it
   // corrects a typo and fills a six-field place object, general knowledge with no judgement over the brief, so the

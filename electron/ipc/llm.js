@@ -88,6 +88,7 @@ const TASK_MAX_TOKENS = {
   // mid-output. 4096 gives ~3000 headroom over
   // typical use (3 short query arrays ≈ 500 tokens visible + ~1000 thinking).
   'job-query-generation':      4096,  // 3 query arrays — small JSON, thinking-heavy
+  'job-query-rewording':       4096,  // a few short suggestions — small JSON
   // One canonicalLocation object; sized like query generation, whose prompt it was split from.
   'job-search-location':       4096,
   // Whole-record scoring needs room for the complete professional-gap audit.
@@ -174,6 +175,10 @@ const TASK_MAX_TOKENS = {
   // never truncated. The flat 'default' 2048 this task once fell through to
   // truncated the reply and failed the whole screen.
   'job-role-screen-batch':     ({ itemCount = 0 } = {}) =>
+    Math.min(BATCH_OUTPUT_TOKEN_BUDGET, 1024 + Math.max(0, itemCount) * 48),
+  // The same title screen run on one results page before its details are
+  // opened (pageTitleScreen.js): a page's worth of rows, same reply shape.
+  'job-role-screen-page':      ({ itemCount = 0 } = {}) =>
     Math.min(BATCH_OUTPUT_TOKEN_BUDGET, 1024 + Math.max(0, itemCount) * 48),
   // At most ROLE_SNIPPET_SCREEN_MAX_ROWS rows, same grouped-removal reply.
   'job-role-snippet-screen-batch': ({ itemCount = 0 } = {}) =>

@@ -7,6 +7,7 @@ import { buildJobTasks, collectionEvidenceForSnapshot, listingReadProgress } fro
 import { createSeenListingMatcher, dedupAgainstHistory } from '../../electron/ipc/jobsHistory.js';
 import { sanitizeJobRunCollectionDiagnostics } from '../../electron/ipc/jobRunStaging.js';
 import { sanitizeJobSearchDateDiagnostics } from '../../src/utils/jobSearchDateDiagnostics.js';
+import { normalizeSourceQueryProgress } from '../../src/utils/jobSearchSourceCoverage.js';
 import fs from 'node:fs';
 import { didDetailBlockReprobeRecover, partitionAlreadyReadJobs, selectManualSourcePageJobs, withoutAlreadyReadJobs } from '../../electron/ipc/browser/manualScraper.js';
 import { filterJobsByAge, filterJobsByPostedSince } from '../../electron/ipc/jobDateFilter.js';
@@ -1050,6 +1051,23 @@ export default [
         participatingSourceIds: ['indeed'], locationKey: 'Canada', readContextKey: 'p', readKeysBySource: { indeed: owedKeys },
       }, 'hub') };
       assert(data.sourceOwedListings.indeed === undefined, 'an owed Indeed listing that is read is no longer owed');
+    },
+  },
+  {
+    name: 'a platform can keep up to 1,000 unread listings owed, in the scraper and in the hub (2026-11-22)',
+    run() {
+      // One Glassdoor block left 842 listings unread; the old 200 cap kept 200.
+      const rows = Array.from({ length: 1100 }, (_, i) => ({
+        source: 'glassdoor', title: `Engineer ${i}`, company: 'Co',
+        url: `https://www.glassdoor.com/job-listing/x?jl=${1000 + i}`,
+        descriptionDeferredReason: 'description-panel-http-error',
+      }));
+      const progress = listingReadProgress(rows);
+      assert(progress.unreadListings.length === 1000, `scraper kept ${progress.unreadListings.length}`);
+      const saved = normalizeSourceQueryProgress({
+        glassdoor: { finishedQueries: [], oldestStartedAt: Date.parse('2026-11-22T07:00:00.000Z'), unreadListings: progress.unreadListings },
+      });
+      assert(saved.glassdoor.unreadListings.length === 1000, 'the hub keeps what the scraper reports');
     },
   },
 ];

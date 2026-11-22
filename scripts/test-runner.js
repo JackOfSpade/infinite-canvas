@@ -180,6 +180,9 @@ import auth_cookie_checkpoint from './tests/auth-cookie-checkpoint.js';
 import browser_launch_lock_regression from './tests/browser-launch-lock-regression.js';
 import scrape_fingerprint_policy from './tests/scrape-fingerprint-policy.js';
 import glassdoor_job_page_route from './tests/glassdoor-job-page-route.js';
+import page_title_screen from './tests/page-title-screen.js';
+import manual_scraper_detached_frame from './tests/manual-scraper-detached-frame.js';
+import bugreport_2026_11_22_fixes from './tests/bugreport-2026-11-22-fixes.js';
 import browser_tab_restore from './tests/browser-tab-restore.js';
 import schema_validation from './tests/schema-validation.js';
 import validation_failure from './tests/validation-failure.js';
@@ -468,6 +471,9 @@ const testGroups = [
   ['browser-launch-lock-regression.js', browser_launch_lock_regression],
   ['scrape-fingerprint-policy.js', scrape_fingerprint_policy],
   ['glassdoor-job-page-route.js', glassdoor_job_page_route],
+  ['page-title-screen.js', page_title_screen],
+  ['manual-scraper-detached-frame.js', manual_scraper_detached_frame],
+  ['bugreport-2026-11-22-fixes.js', bugreport_2026_11_22_fixes],
   ['browser-tab-restore.js', browser_tab_restore],
   ['schema-validation.js', schema_validation],
   ['validation-failure.js', validation_failure],
