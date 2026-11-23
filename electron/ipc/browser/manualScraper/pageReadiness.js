@@ -49,9 +49,16 @@ export const CHALLENGE_STABLE_MS    = 1_500;
 // that for 27 minutes (its answer was refused with HTTP 400 and the page
 // reloaded into the same check), and waiting only kept the refusal alive. After
 // this many refused attempts the wait ends as 'skip' (the source's collected
-// jobs are kept by every caller). A wait nobody has touched is still never
-// ended on a timer.
+// jobs are kept by every caller). A check that stands still and waits for a
+// person is never ended on a timer.
 export const CHALLENGE_LOOP_MAX_ATTEMPTS = 3;
+
+// A check page that keeps reloading itself, untouched and seconds apart, is the
+// site's automatic test failing over and over. It never offers a box to tick,
+// so a person has nothing to solve, and every reload renews the site's refusal
+// (on 2026-11-23 ZipRecruiter did this every 17 s for as long as the tab stayed
+// open). After this many reloads in a row the wait ends the same way as above.
+export const CHALLENGE_SELF_RELOAD_MAX = 5;
 
 // Once a source has refused solved checks, a new check from it is not shown to
 // the person again for this long within the same source run (a new run, or a
@@ -65,15 +72,25 @@ export function resetChallengeLoopMemory(sourceId = null) {
   else challengeLoopSeenAt.delete(sourceId);
 }
 function challengeLoopRemembered(sourceId, now = Date.now()) {
-  const at = challengeLoopSeenAt.get(sourceId);
+  const at = challengeLoopSeenAt.get(sourceId)?.at;
   if (!Number.isFinite(at)) return false;
   if (now - at < CHALLENGE_LOOP_MEMORY_MS) return true;
   challengeLoopSeenAt.delete(sourceId);
   return false;
 }
 /** For a wait outside waitForReady that reached the same refusal count. */
-export function noteSourceRefusedSolvedChecks(sourceId, now = Date.now()) {
-  challengeLoopSeenAt.set(sourceId, now);
+export function noteSourceRefusedSolvedChecks(sourceId, now = Date.now(), cause = 'refused-after-input') {
+  challengeLoopSeenAt.set(sourceId, { at: now, cause });
+}
+/**
+ * What the site did, as a clause that follows the source's name. Two cases:
+ * it took solved attempts and served the check again, or its check page kept
+ * reloading by itself and never offered anything to solve.
+ */
+export function describeRefusedChecks(sourceId) {
+  return challengeLoopSeenAt.get(sourceId)?.cause === 'reloading-without-a-check'
+    ? `kept reloading its verification page by itself (${CHALLENGE_SELF_RELOAD_MAX} times in a row) and never offered a check to solve`
+    : `served its verification check again after ${CHALLENGE_LOOP_MAX_ATTEMPTS} solved attempts`;
 }
 /** True when this source's last check wait ended because the site kept refusing solved checks. */
 export function sourceRefusedSolvedChecks(sourceId) {
@@ -578,8 +595,9 @@ export async function recoverFromChallengeHomeLanding(page, overlayBase, signal,
 
 // ── waitForReady ──────────────────────────────────────────────────────────────
 // Waits for real page content to appear, handling challenge pages.
-// Returns 'ok' | 'recovered' | 'skip' (session blocked, or the site kept serving
-// its check again after CHALLENGE_LOOP_MAX_ATTEMPTS solved attempts) | 'hard-block' |
+// Returns 'ok' | 'recovered' | 'skip' (session blocked, the site kept serving
+// its check again after CHALLENGE_LOOP_MAX_ATTEMPTS solved attempts, or its
+// check page reloaded itself CHALLENGE_SELF_RELOAD_MAX times untouched) | 'hard-block' |
 // 'abort' (signal aborted) | 'page-detached' (this page object can no longer be
 // read — detached main frame, closed tab or disconnected browser; nothing was
 // observed about the site, and only 'ok'/'recovered' mean the page is usable).
@@ -617,6 +635,7 @@ export async function waitForReady(page, sourceId, overlayBase, signal, resumeUr
   let challengeStatus          = CHALLENGE_WAIT_STATUS; // what the overlay should say while the check is open
   let paintedDocumentId        = null; // the document the overlay status was last painted on
   let reportedRefusals         = 0;    // refused attempts already logged for the current wait
+  let reportedSelfReloads      = 0;    // untouched self-reloads already acted on for the current wait
   // A check that was counted as open must be closed on every way out of the wait, or the pace record keeps it open.
   const closeOpenChallenge = () => {
     if (!inChallenge) return;
@@ -807,7 +826,7 @@ export async function waitForReady(page, sourceId, overlayBase, signal, resumeUr
       // This source already refused solved checks a short while ago. Showing the
       // person another one would only repeat that, so the check is not opened.
       if (!inChallenge && challengeLoopRemembered(sourceId)) {
-        logger.warn(`[BrowserScraper] ${overlayBase.srcName}: another verification check, and this site already served its check again after ${CHALLENGE_LOOP_MAX_ATTEMPTS} solved attempts — not asking for another solve`);
+        logger.warn(`[BrowserScraper] ${overlayBase.srcName}: another verification check, and this site already ${describeRefusedChecks(sourceId)} — not asking for another solve`);
         recordManualScraperTelemetry({
           phase: 'challenge-loop',
           srcName: overlayBase.srcName,
@@ -906,7 +925,7 @@ export async function waitForReady(page, sourceId, overlayBase, signal, resumeUr
           reportedRefusals = refusedAttempts;
           logger.warn(`[BrowserScraper] ${overlayBase.srcName}: the site served its check again after input (refused attempt ${refusedAttempts} of ${CHALLENGE_LOOP_MAX_ATTEMPTS})`);
           if (refusedAttempts >= CHALLENGE_LOOP_MAX_ATTEMPTS) {
-            challengeLoopSeenAt.set(sourceId, Date.now());
+            noteSourceRefusedSolvedChecks(sourceId);
             recordManualScraperTelemetry({
               phase: 'challenge-loop',
               srcName: overlayBase.srcName,
@@ -935,6 +954,39 @@ export async function waitForReady(page, sourceId, overlayBase, signal, resumeUr
           status: challengeStatus,
           challenge: true,
         }).catch(() => {});
+      }
+      // The check page keeps replacing itself with nobody touching it: the
+      // site's automatic test is failing and nothing to solve is being offered.
+      const selfReloads = inputProbe ? inputProbe.selfReloads() : 0;
+      if (selfReloads > reportedSelfReloads) {
+        reportedSelfReloads = selfReloads;
+        const inputSoFar = inputProbe?.summary() || null;
+        if (selfReloads >= CHALLENGE_SELF_RELOAD_MAX) {
+          noteSourceRefusedSolvedChecks(sourceId, Date.now(), 'reloading-without-a-check');
+          recordManualScraperTelemetry({
+            phase: 'challenge-loop',
+            srcName: overlayBase.srcName,
+            reason: signals.reason,
+            title: signals.title,
+            url: signals.url,
+            closeCause: 'reloading-without-a-check',
+            selfReloads,
+            inputCounts: inputSoFar,
+            waitedFor: formatWaitDuration(Date.now() - challengeStartedAt),
+          });
+          await updateOverlay(page, {
+            ...overlayBase,
+            status: `${overlayBase.srcName} keeps reloading its check and offers nothing to solve — stopping here and keeping what was collected`,
+            challenge: true,
+          }).catch(() => {});
+          logger.warn(`[BrowserScraper] ${overlayBase.srcName}: the check page reloaded itself ${selfReloads} times in a row over ${formatWaitDuration(Date.now() - challengeStartedAt)} with no input and no check to solve — ending the wait; collected jobs are kept`);
+          closeOpenChallenge();
+          return 'skip';
+        }
+        if (selfReloads >= 2 && reportedRefusals === 0) {
+          challengeStatus = `⚠️ The site is reloading its check by itself and has not offered anything to click (${selfReloads} of ${CHALLENGE_SELF_RELOAD_MAX} reloads before this source is skipped)`;
+          await updateOverlay(page, { ...overlayBase, status: challengeStatus, challenge: true }).catch(() => {});
+        }
       }
       // Wait INDEFINITELY for the user to solve — never skip a solvable challenge
       // on a timer. The escape hatches are the abort check at the top of the loop

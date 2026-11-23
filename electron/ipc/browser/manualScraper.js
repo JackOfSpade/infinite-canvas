@@ -177,8 +177,8 @@ import {
 } from './manualScraper/scrapeBrowser.js';
 import { createBackgroundScrapePage } from './backgroundScrapeBrowser.js';
 import {
-  CHALLENGE_LOOP_MAX_ATTEMPTS,
   CHALLENGE_LOOP_MEMORY_MS,
+  describeRefusedChecks,
   resetChallengeLoopMemory,
   sourceRefusedSolvedChecks,
   waitForReady,
@@ -195,6 +195,7 @@ export {
   challengeHeartbeatIntervalMs,
   resolveManualDetailChallengeDisposition,
   CHALLENGE_LOOP_MAX_ATTEMPTS,
+  CHALLENGE_SELF_RELOAD_MAX,
   resetChallengeLoopMemory,
   sourceRefusedSolvedChecks,
 } from './manualScraper/pageReadiness.js';
@@ -2691,7 +2692,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         warning:     (sourceSiteChangedWarning?.code === 'session-blocked' && sourceRefusedSolvedChecks(sourceId)
           ? {
             ...sourceSiteChangedWarning,
-            evidence: `${srcName} served its verification check again after ${CHALLENGE_LOOP_MAX_ATTEMPTS} solved attempts, so it could not be passed from the scraper's browser. Every listing collected before that was kept and the rest of this source was skipped.`,
+            evidence: `${srcName} ${describeRefusedChecks(sourceId)}, so it could not be passed from the scraper's browser. Every listing collected before that was kept and the rest of this source was skipped.`,
             suggestion: `The site's refusal usually clears within about an hour of the last attempt. Retry unlocks after that wait; Skip continues now with the listings already collected, and the next search resumes ${srcName} at its unfinished queries.`,
             // An earlier retry is refused again and renews the site's refusal,
             // so the card counts this wait down before it offers Retry.

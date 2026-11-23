@@ -208,9 +208,9 @@ function formatChallengeInputEvidence(e) {
   if (e?.phase === 'challenge-loop') {
     // The wait ended because the site kept serving its check again.
     const c = e.inputCounts && typeof e.inputCounts === 'object' ? e.inputCounts : null;
-    const cause = ['refused-after-input', 'refused-earlier-this-hour'].includes(e.closeCause) ? e.closeCause : 'unknown';
+    const cause = ['refused-after-input', 'refused-earlier-this-hour', 'reloading-without-a-check'].includes(e.closeCause) ? e.closeCause : 'unknown';
     const counts = c ? ` (clicks ${Number(c.clicks) || 0}, keys ${Number(c.keys) || 0}, into-check focus ${Number(c.frameFocus) || 0}, check page loads ${Number(c.documents) || 0})` : '';
-    return `ended=${cause}${Number(e.refusedAttempts) > 0 ? ` served-again-after-input=${Number(e.refusedAttempts)}` : ''}${typeof e.waitedFor === 'string' ? ` waited=${e.waitedFor.slice(0, 16)}` : ''}${counts}`;
+    return `ended=${cause}${Number(e.refusedAttempts) > 0 ? ` served-again-after-input=${Number(e.refusedAttempts)}` : ''}${Number(e.selfReloads) > 0 ? ` reloaded-itself-untouched=${Number(e.selfReloads)}` : ''}${typeof e.waitedFor === 'string' ? ` waited=${e.waitedFor.slice(0, 16)}` : ''}${counts}`;
   }
   if (!e || e.phase !== 'challenge-resolved') return null;
   const c = e.inputCounts && typeof e.inputCounts === 'object' ? e.inputCounts : null;
@@ -4351,7 +4351,7 @@ function sourceConsumptionFacts(source) {
     ? consumption
     : null;
   const origin = boardDiagnosticValue(receipt, 'origin');
-  const safeOrigin = ['job-board', 'standalone', 'board-cancelled', 'saved-jobs-rescore'].includes(origin) ? origin : null;
+  const safeOrigin = ['job-board', 'standalone', 'board-cancelled', 'saved-jobs-rescore', 'saved-jobs-rescore-skipped'].includes(origin) ? origin : null;
   const admissionVersion = boardDiagnosticValue(receipt, 'admissionVersion');
   const version = Number.isSafeInteger(admissionVersion) && admissionVersion >= 0 && admissionVersion <= 100
     ? String(admissionVersion)

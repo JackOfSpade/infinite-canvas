@@ -21,7 +21,13 @@
 // a check, the site took the person's input and served the check again. The
 // wait uses that count to stop asking a person to solve a check the site will
 // not let them pass. A reload with no input before it (Cloudflare refreshes its
-// own page every few minutes) is never counted.
+// own page every few minutes) is never counted as a refused attempt.
+//
+// A second pattern is counted separately: the check page replacing itself again
+// and again, seconds apart, with no input at all. That is the site's automatic
+// test failing and starting over; no box to tick is ever offered, so there is
+// nothing a person can do on the page. On 2026-11-23 ZipRecruiter's Cloudflare
+// page did this every 17 s (each load answered 403 cf-mitigated=challenge).
 
 // Installs once per document, then returns that document's counts. Pure reads
 // and passive listeners: it never changes the page or any event.
@@ -52,11 +58,20 @@ const FIELDS = ['clicks', 'keys', 'moves', 'frameFocus'];
 // check's own transition (CHALLENGE_TERMINAL_TRANSITION_GRACE_MS).
 export const REFUSAL_SETTLE_MS = 10_000;
 
+// A check page that replaces itself with no input within this long of its own
+// load is reloading by itself. Cloudflare's ordinary refresh of an untouched
+// check comes minutes apart and is not part of such a run.
+export const SELF_RELOAD_MAX_GAP_MS = 60_000;
+
 /**
  * One probe per open check. poll() after each wait-loop read; summary() when it
  * ends. Every failure is swallowed: diagnostics must never break a scrape.
  */
-export function createChallengeInputProbe(page, { now = () => Date.now(), refusalSettleMs = REFUSAL_SETTLE_MS } = {}) {
+export function createChallengeInputProbe(page, {
+  now = () => Date.now(),
+  refusalSettleMs = REFUSAL_SETTLE_MS,
+  selfReloadMaxGapMs = SELF_RELOAD_MAX_GAP_MS,
+} = {}) {
   const perDocument = new Map();
   const startedAt = now();
   let polls = 0;
@@ -65,6 +80,9 @@ export function createChallengeInputProbe(page, { now = () => Date.now(), refusa
   let currentDocumentId = null;
   let replacedAfterInputAt = null; // when a document that had input was seen replaced
   let failedAttempts = 0;
+  let currentDocumentSince = null; // when the current document was first read
+  let selfReloadPending = false;   // an untouched document was replaced quickly; not yet read as still a check
+  let selfReloads = 0;             // such replacements in a row
   const attempted = counts => !!counts && counts.clicks + counts.keys + counts.frameFocus > 0;
   return {
     async poll() {
@@ -76,6 +94,17 @@ export function createChallengeInputProbe(page, { now = () => Date.now(), refusa
         if (currentDocumentId !== null && counts.id !== currentDocumentId
           && attempted(perDocument.get(currentDocumentId))) {
           replacedAfterInputAt = now();
+        }
+        if (counts.id !== currentDocumentId) {
+          const untouched = currentDocumentId !== null && !attempted(perDocument.get(currentDocumentId));
+          if (untouched && now() - currentDocumentSince <= selfReloadMaxGapMs) {
+            selfReloadPending = true;
+          } else {
+            // A touched page, or one that stood for minutes: the run is broken.
+            selfReloadPending = false;
+            selfReloads = 0;
+          }
+          currentDocumentSince = now();
         }
         currentDocumentId = counts.id;
         const next = Object.fromEntries(FIELDS.map(field => [field, Math.max(0, Number(counts[field]) || 0)]));
@@ -99,10 +128,20 @@ export function createChallengeInputProbe(page, { now = () => Date.now(), refusa
         failedAttempts += 1;
         replacedAfterInputAt = null;
       }
+      if (selfReloadPending) {
+        selfReloadPending = false;
+        selfReloads += 1;
+      }
       return failedAttempts;
     },
+    /**
+     * How many times in a row the check page has replaced itself, untouched and
+     * seconds apart, and been read as still an unsolved check. Updated by
+     * confirmStillChallenged(); back to 0 on any input, slow reload or clean read.
+     */
+    selfReloads: () => selfReloads,
     /** The page left the check, or says it was solved: the replacement was the solve itself. */
-    noteCleanRead() { replacedAfterInputAt = null; },
+    noteCleanRead() { replacedAfterInputAt = null; selfReloadPending = false; selfReloads = 0; },
     documentId: () => currentDocumentId,
     summary() {
       const totals = { clicks: 0, keys: 0, moves: 0, frameFocus: 0 };
@@ -111,6 +150,7 @@ export function createChallengeInputProbe(page, { now = () => Date.now(), refusa
         ...totals,
         documents: perDocument.size,
         failedAttempts,
+        selfReloads,
         polls,
         failedPolls,
         firstInputAfterMs: firstInputAt === null ? null : Math.max(0, firstInputAt - startedAt),

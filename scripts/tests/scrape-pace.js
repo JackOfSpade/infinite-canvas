@@ -17,6 +17,7 @@ import {
   sourceRefusedSolvedChecks,
   waitForReady,
 } from '../../electron/ipc/browser/manualScraper.js';
+import { describeRefusedChecks } from '../../electron/ipc/browser/manualScraper/pageReadiness.js';
 import { buildJobsPipelineSnapshot, renderScrapePaceLines } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { challengeInputVerdict, createChallengeInputProbe, describeChallengeInput } from '../../electron/ipc/browser/challengeInputProbe.js';
 
@@ -311,6 +312,80 @@ export default [{
     assert.equal(again, 'skip');
     resetChallengeLoopMemory();
     assert.equal(sourceRefusedSolvedChecks(SOURCE), false);
+  },
+}, {
+  name: 'a check page that keeps reloading itself untouched is counted, and input, a slow reload or a clean read breaks the run',
+  async run() {
+    const doc = (id, clicks = 0) => ({ id, clicks, keys: 0, moves: 0, frameFocus: 0 });
+    let t = 0;
+    const step = async (probe, at) => { t = at; await probe.poll(); probe.confirmStillChallenged(); return probe.selfReloads(); };
+
+    // Reloads 17 s apart with nobody touching the page (ZipRecruiter, 2026-11-23).
+    const fast = ['a', 'a', 'b', 'c', 'c', 'd'].map(id => doc(id));
+    const looping = createChallengeInputProbe({ evaluate: async () => fast.shift() }, { now: () => t });
+    const seen = [];
+    for (const at of [0, 8_000, 17_000, 34_000, 40_000, 51_000]) seen.push(await step(looping, at));
+    assert.deepEqual(seen, [0, 0, 1, 2, 2, 3]);
+    assert.equal(looping.summary().failedAttempts, 0, 'nobody clicked, so no attempt was refused');
+    assert.equal(looping.summary().selfReloads, 3);
+
+    // Cloudflare's ordinary refresh of a waiting check comes minutes apart.
+    const slowReads = ['a', 'b', 'c'].map(id => doc(id));
+    const slow = createChallengeInputProbe({ evaluate: async () => slowReads.shift() }, { now: () => t });
+    assert.equal(await step(slow, 0), 0);
+    assert.equal(await step(slow, 240_000), 0);
+    assert.equal(await step(slow, 480_000), 0);
+
+    // A click belongs to the refused-attempt count, and ends the run.
+    const mixedReads = [doc('a'), doc('b'), doc('b', 1), doc('c')];
+    const mixed = createChallengeInputProbe({ evaluate: async () => mixedReads.shift() }, { now: () => t });
+    assert.equal(await step(mixed, 0), 0);
+    assert.equal(await step(mixed, 5_000), 1);
+    assert.equal(await step(mixed, 6_000), 1);
+    assert.equal(await step(mixed, 9_000), 0);
+
+    // The page passing by itself after one reload is not a run.
+    const passReads = [doc('a'), doc('b')];
+    const passing = createChallengeInputProbe({ evaluate: async () => passReads.shift() }, { now: () => t });
+    await step(passing, 0);
+    t = 5_000; await passing.poll(); passing.noteCleanRead();
+    assert.equal(passing.selfReloads(), 0);
+  },
+}, {
+  name: 'the verification wait ends, keeping the source, once the check page has reloaded itself five times with nothing to solve',
+  async run() {
+    startPace();
+    resetChallengeLoopMemory();
+    const challenge = {
+      isChallenge: true, isHardBlock: false, reason: 'just-a-moment-title',
+      url: 'https://example.test/jobs-search', title: 'Just a moment...', bodyHead: '',
+      bodyTextLength: 300, matchedVerificationMarkers: [], hasNormalContent: false,
+    };
+    let turn = 0;
+    const painted = [];
+    const page = {
+      evaluate: async (script, ...args) => {
+        // Every read is a new, untouched copy of the check page.
+        if (typeof script === 'string' && script.includes('__icChallengeInput')) return { id: `doc-${turn++}`, clicks: 0, keys: 0, moves: 0, frameFocus: 0 };
+        const state = args.find(arg => arg && typeof arg === 'object' && typeof arg.status === 'string');
+        if (state) { painted.push(state); return undefined; }
+        return challenge;
+      },
+      url: () => 'https://example.test/jobs-search', isClosed: () => false, mouse: {}, on() {}, off() {}, frames: () => [], mainFrame: () => ({}),
+    };
+    const outcome = await waitForReady(page, SOURCE, { srcName: 'ZipRecruiter', count: 0 }, { aborted: false }, null, { challengeOnly: true });
+    assert.equal(outcome, 'skip');
+    assert.equal(paceOf().openChallengeSince, null, 'the check is closed in the pace record');
+    assert.equal(sourceRefusedSolvedChecks(SOURCE), true, 'the platform ends as blocked with the one-hour wait, like a refused solve');
+    const loop = getManualScraperTelemetry().events.find(e => e.phase === 'challenge-loop');
+    assert.equal(loop.closeCause, 'reloading-without-a-check');
+    assert.equal(loop.selfReloads, 5);
+    assert.equal(loop.inputCounts.clicks, 0);
+    assert(painted.some(state => /reloading its check by itself and has not offered anything to click \(2 of 5 reloads/u.test(state.status)), 'the person is told there is nothing to click');
+    assert.match(describeRefusedChecks(SOURCE), /kept reloading its verification page by itself \(5 times in a row\) and never offered a check to solve/u);
+    assert.match(JSON.stringify(report()), /challenge-loop ZipRecruiter.*ended=reloading-without-a-check reloaded-itself-untouched=5/u);
+    resetChallengeLoopMemory();
+    assert.match(describeRefusedChecks(SOURCE), /served its verification check again after 3 solved attempts/u);
   },
 }, {
   name: 'a report written during an open check says what input the page has seen so far',
