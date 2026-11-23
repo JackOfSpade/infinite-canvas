@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { isMainProcessExternal } from '../../vite.main-externals.js';
 import { createStealthPlugins, GuardedUserAgentOverride, isTargetClosedError } from '../../electron/ipc/browser/stealthPlugins.js';
 
 function fakePage({ reject }) {
@@ -61,5 +62,13 @@ export default [{
     assert.equal(unexpected.length, 1);
     assert.equal(isTargetClosedError(new Error('Session closed. Most likely the page has been closed.')), true);
     assert.equal(isTargetClosedError(new Error('Invalid parameters')), false);
+  },
+}, {
+  name: 'main-process build leaves deep stealth imports to node_modules (bundled, main.cjs throws n.typeOf at load)',
+  run() {
+    assert.equal(isMainProcessExternal('puppeteer-extra-plugin-stealth/evasions/user-agent-override/index.js'), true);
+    assert.equal(isMainProcessExternal('puppeteer-extra-plugin-stealth'), true);
+    assert.equal(isMainProcessExternal('puppeteer-extra'), true);
+    assert.equal(isMainProcessExternal('puppeteer-extra-plugin-user-preferences'), false, 'prefix of another name is not a match');
   },
 }];

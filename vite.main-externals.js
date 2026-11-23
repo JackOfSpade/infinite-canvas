@@ -19,3 +19,12 @@ export const MAIN_PROCESS_EXTERNALS = [
   // node_modules at runtime like the other externals.
   'pdf-lib',
 ]
+
+// Rollup's array form matches exact ids only, so a deep import such as
+// 'puppeteer-extra-plugin-stealth/evasions/user-agent-override/index.js'
+// would be bundled. Bundled, puppeteer-extra-plugin's clone-deep → lazy-cache
+// chain loses its require() swap and main.cjs throws "n.typeOf is not a
+// function" at load. Match each package and every path under it.
+export function isMainProcessExternal(id) {
+  return MAIN_PROCESS_EXTERNALS.some((pkg) => id === pkg || id.startsWith(`${pkg}/`))
+}

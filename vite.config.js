@@ -4,7 +4,7 @@ import electron from 'vite-plugin-electron'
 import tailwindcss from '@tailwindcss/vite'
 import { execFileSync } from 'node:child_process'
 import { applicationRendererSourceDigest } from './electron/ipc/applicationV2RendererVersion.js'
-import { MAIN_PROCESS_EXTERNALS } from './vite.main-externals.js'
+import { isMainProcessExternal } from './vite.main-externals.js'
 import { buildInputsManifest } from './vite.build-inputs.js'
 
 // Records which project files this build actually read. The launcher rebuilds
@@ -96,7 +96,7 @@ export default defineConfig({
                   return undefined;
                 },
               },
-              external: MAIN_PROCESS_EXTERNALS,
+              external: isMainProcessExternal,
             }
           },
         }
