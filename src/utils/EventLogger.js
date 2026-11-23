@@ -248,11 +248,16 @@ export class EventLoggerSingleton {
   /** Keep noisy, repeated lifecycle outcomes as one cumulative event row. */
   logCumulative(key, label) {
     if (typeof key !== 'string' || !key || typeof label !== 'string' || !label) return;
-    const prior = this._cumulativeEvents.get(key) || { count: 0, labels: new Map(), line: null };
+    const prior = this._cumulativeEvents.get(key) || { count: 0, labels: new Map(), line: null, firstAt: null };
     prior.count++;
+    const nowDate = new Date();
+    if (!prior.firstAt) prior.firstAt = nowDate;
     prior.labels.set(label, (prior.labels.get(label) || 0) + 1);
     const detail = [...prior.labels.entries()].map(([name, count]) => `${name}=${count}`).join(' · ');
-    const message = `[Manual AI] handoff settled events: ${prior.count}${detail ? ` · ${detail}` : ''}`;
+    // The row keeps its first timestamp for ordering, so say when the last
+    // event happened too; otherwise a long span reads as one early moment.
+    const span = ` · first ${localIsoTimestampWithOffset(prior.firstAt)} · last ${localIsoTimestampWithOffset(nowDate)}`;
+    const message = `[Manual AI] handoff settled events: ${prior.count}${detail ? ` · ${detail}` : ''}${span}`;
     if (prior.line) {
       const index = this.logs.indexOf(prior.line);
       if (index >= 0) {

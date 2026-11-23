@@ -887,6 +887,24 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
       });
       return;
     }
+    // A platform whose site refuses this check's own browser (headless, stealth
+    // plugin, canned user agent) with an anti-bot wall on every start. The
+    // check then gives no answer, and it presents a second, refused fingerprint
+    // on the cookie profile the scraper shares. Keep the prior status, which
+    // only a login-window result updates for such a platform. Its saved time
+    // is not refreshed here (nothing was confirmed), so it still lapses after
+    // STATUS_CACHE_MAX_AGE_MS, exactly as it did while every check was walled.
+    if ((getSellMonitorConfig(platformId) || getJobLoginConfig(platformId))?.startupVerify === 'skip-walled') {
+      const connected = _statusCache[platformId]?.connected ?? false;
+      logger.info(`[Accounts] Startup verify skipping ${platformId} — the site refuses this check's browser, so it gives no answer (kept prior: ${connected ? 'connected' : 'not connected'})`);
+      finishPlatformVerification(platformId, notify);
+      durations.push({
+        platformId, ms: 0, connected, skipped: true,
+        outcome: 'skipped-walled',
+        reason: 'site refuses the startup check browser',
+      });
+      return;
+    }
     const startedAt = Date.now();
     try {
       // Abort the actual verifier on timeout, then await its own cleanup before

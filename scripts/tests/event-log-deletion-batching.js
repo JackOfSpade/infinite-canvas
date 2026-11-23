@@ -86,6 +86,8 @@ export default [
       assert(cumulativeRows.length === 1 && cumulativeRows[0].includes('events: 5')
         && cumulativeRows[0].includes('focus-preserved=3') && cumulativeRows[0].includes('focus-cleared=2'),
       'repeated dock settlement outcomes update one cumulative line instead of evicting earlier history');
+      assert(/ · first \S+ · last \S+$/.test(cumulativeRows[0]),
+        'the cumulative row prints the first and last event times');
       return metadata;
     },
   },

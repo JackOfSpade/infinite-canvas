@@ -239,4 +239,25 @@ export default [
     assert.equal(undoHistoryLimit({ nodes: [big, other], edges: [], drawings: [] }, 100), first);
     assert(first < 100 && undoHistoryLimit({ nodes: [other], edges: [], drawings: [] }, 100) === 100);
   } },
+
+  { name: 'PERF lines say what a save sent, name the stall time basis and label the hand-over accurately', run() {
+    const at = Date.UTC(2026, 10, 23, 7, 0, 0);
+    const report = performanceDiagnosticsMarkdown({
+      observedForMs: 60000, stallObserver: 'active',
+      kinds: {
+        'save-handoff': { count: 2, worstMs: 12601, recent: [
+          { at, ms: 12601, nodes: 872, sent: { records: 3, parts: 2, calls: 1, largest: 'jobhub' } },
+          { at: at - 1000, ms: 2, sent: { records: 1, parts: 0, calls: 1, largest: 'secret title' } },
+          { at: at - 2000, ms: 3, sent: { records: 0, parts: 0, calls: 2, whole: true } },
+        ] },
+        stall: { count: 1, worstMs: 400, recent: [{ at, ms: 400 }] },
+      },
+    });
+    assert.match(report, /12601 ms · 872 nodes on the open level · sent 3 records \(2 parts\) in 1 call · largest: jobhub/u);
+    assert.match(report, /2 ms · sent 1 record \(0 parts\) in 1 call\n/u, 'a type word outside the list is dropped');
+    assert.match(report, /3 ms · sent the whole canvas in 2 calls/u);
+    assert.match(report, /Window could not respond[^\n]*newest first · each time is when the stall ended:/u);
+    assert.match(report, /longest single blocked stretch/u);
+    assert.doesNotMatch(report, /start to confirmed write|does not block\)\n.*start/u);
+  } },
 ];

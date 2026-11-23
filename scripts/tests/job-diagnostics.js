@@ -2180,7 +2180,8 @@ export default [
       const ordinary = buildJobLinkSnapshot(ordinaryCanvas);
       assert(ordinary.includes('Unique job rows inspected: 292')
         && !ordinary.includes('Unique job rows inspected: 292 (bounded sample)')
-        && ordinary.includes('`dice`: 292 total'),
+        && ordinary.includes('`dice`: 292 total')
+        && !ordinary.includes('in sample'),
       `a 394-node canvas with 292 cards must be fully inspected, got:\n${ordinary.slice(0, 3_000)}`);
 
       const hostile = Array.from({ length: 5_001 }, (_, index) => ({
@@ -2190,7 +2191,9 @@ export default [
       const bounded = buildJobLinkSnapshot(hostile);
       assert(bounded.includes('Unique job rows inspected: 1000 (bounded sample)')
         && bounded.includes('per-array child budget')
-        && bounded.includes('row budget'),
+        && bounded.includes('row budget')
+        && bounded.includes('`dice`: 1000 in sample')
+        && bounded.includes('1000 retained row(s) in total'),
       `a >5,000-item hostile array must be explicitly bounded, got:\n${bounded.slice(0, 3_000)}`);
       return { ordinaryNodes: ordinaryCanvas.length, ordinaryCards: 292, hostileItems: hostile.length };
     },
@@ -5937,12 +5940,13 @@ export default [
         startedAt: Date.UTC(2026, 0, 2, 3, 4, 5),
         totalMs: 900,
         concurrency: 4,
-        platformCount: 7,
+        platformCount: 8,
         durations: [
           { platformId: 'indeed', ms: 500, connected: true, outcome: 'retained-prior', inconclusive: true, reason: 'transient fetch failure at https://secure.indeed.com/settings/account?__cf_chl_rt_tk=secret' },
           { platformId: 'linkedin', ms: 400, connected: true, outcome: 'verified', reason: 'feed loaded' },
           { platformId: 'mercari', ms: 0, connected: false, outcome: 'skipped-native', reason: 'native read owns login state' },
           { platformId: 'swappa', ms: 0, connected: false, outcome: 'skipped-login-flow', reason: 'login flow owns verification' },
+          { platformId: 'ziprecruiter', ms: 0, connected: true, skipped: true, outcome: 'skipped-walled', reason: 'site refuses the startup check browser' },
           { platformId: 'legacy-ok', ms: 20, connected: false },
           { platformId: 'legacy-skip', ms: 0, connected: false, skipped: true },
           { platformId: 'failed', ms: 10, connected: false, outcome: 'error', error: 'navigation failed' },
@@ -5961,9 +5965,11 @@ export default [
         'verification timing closes arbitrary verifier text');
       assert(report.includes('skipped native read (prior: not connected) — recorded'),
         'verification timing must distinguish an intentional native-read skip without exporting its reason');
-      assert(report.includes('Platforms considered: 7')
+      assert(report.includes("skipped: the site refuses this check's browser, so it gives no answer (prior: connected)"),
+        'a platform whose site walls the startup check is reported as skipped with its prior state');
+      assert(report.includes('Platforms considered: 8')
         && report.includes('Fresh verifier attempts: 4 — 2 fresh verdicts; 1 retained prior after inconclusive verify; 1 error')
-        && report.includes('Skipped without a verifier navigation: 3 — 1 native-state read; 1 login-flow skip; 1 legacy generic skip'),
+        && report.includes("Skipped without a verifier navigation: 4 — 1 native-state read; 1 login-flow skip; 1 site refuses the check's browser; 1 legacy generic skip"),
       'verification timing must count considered platforms separately from fresh verifier attempts, outcome types, native/login skips, and legacy records');
       return { outcomes: 7 };
     },
@@ -14974,6 +14980,10 @@ export default [
             ...(run === 3 ? { warning: { code: 'http-429', severity: 'throttle' }, detail: 'private retry timing must not be retained' } : {}),
           });
         }
+        // Announced behind another source, never dispatched: queued, not running.
+        recordJobSourceProgress({ sourceId: 'glassdoor', jobRunId: 'run-4', status: 'searching' });
+        recordJobSourceProgress({ sourceId: 'dice', jobRunId: 'run-4', status: 'searching' });
+        assert(__recordJobSourceDispatchForTests('dice', 'run-4'), 'dice run is dispatched for the active/unknown case');
         telemetry.pipeline = { phase: 'completed', active: false, runId: 'run-4', ts: Date.now() };
         const records = telemetry.sourceRunHistory.google;
         const report = buildJobsPipelineSnapshot(new Set([nodeId]), null, null);
@@ -14996,6 +15006,10 @@ export default [
           && !report.includes('run-3') && !report.includes('run-4')
           && !report.includes('private retry timing must not be retained'),
         'the JOBS/FULL/STALL pipeline snapshot renders retained warning and clean terminal state through non-reversible correlations');
+        assert(/`glassdoor`: run `#[a-f0-9]{10}`: searching → no dispatch recorded \(queued behind another source, or started on a path that records none\)/.test(report)
+          && !/`glassdoor`: run `#[a-f0-9]{10}`: searching → active\/unknown/.test(report)
+          && /`dice`: run `#[a-f0-9]{10}`: searching → active\/unknown/.test(report),
+        'an announced but undispatched source prints queued; a dispatched one with no terminal status keeps active/unknown');
       } finally {
         Object.assign(telemetry, saved);
       }

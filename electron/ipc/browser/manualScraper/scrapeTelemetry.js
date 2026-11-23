@@ -185,6 +185,23 @@ export function notePaceChallengeStart(sourceId, meta = {}) {
     pace.opensSinceLastChallenge = 0;
     pace.lastChallengeAt = at;
     pace.openChallengeSince = at;
+    pace.openChallenge = null;
+  });
+}
+
+// What the input probe has counted on the check that is open right now, so a
+// report written DURING a wait can say whether anyone clicked and how often the
+// site loaded its check page again. Counts only.
+export function notePaceChallengeProgress(sourceId, meta = {}) {
+  const c = meta.counts && typeof meta.counts === 'object' ? meta.counts : null;
+  if (!c) return null;
+  const n = value => Math.max(0, Number(value) || 0);
+  return updateScrapePace(sourceId, meta, pace => {
+    if (!pace.openChallengeSince) return;
+    pace.openChallenge = {
+      clicks: n(c.clicks), keys: n(c.keys), frameFocus: n(c.frameFocus),
+      documents: n(c.documents), failedAttempts: n(c.failedAttempts),
+    };
   });
 }
 
@@ -195,6 +212,7 @@ export function notePaceChallengeEnd(sourceId, meta = {}) {
       pace.challengeWaitMs += Math.max(0, at - Number(pace.openChallengeSince));
       pace.openChallengeSince = null;
     }
+    pace.openChallenge = null;
     if (meta.input) {
       const kind = ['input', 'movement', 'none'].includes(meta.input) ? meta.input : 'unknown';
       pace.checkInput ||= { input: 0, movement: 0, none: 0, unknown: 0 };
@@ -253,7 +271,12 @@ export function formatScrapePaceLine(pace, now = Date.now()) {
     `${listPages} list page${listPages === 1 ? '' : 's'}`,
     `${checks} check${checks === 1 ? '' : 's'} (${detailChecks} detail, ${listChecks} list)`,
     `detail pages between checks ${between || 'n/a'}`,
-    `waiting on you ${duration(waitMs)}${pace.openChallengeSince ? ' (check still open)' : ''}`,
+    `waiting on you ${duration(waitMs)}${pace.openChallengeSince ? ` (check still open${(() => {
+      const open = pace.openChallenge;
+      if (!open || typeof open !== 'object') return '';
+      const n = value => Math.max(0, Number(value) || 0);
+      return `: ${n(open.clicks)} click(s), ${n(open.keys)} key press(es), ${n(open.frameFocus)} into-check focus, check page loaded ${n(open.documents)} time(s), served again after input ${n(open.failedAttempts)} time(s)`;
+    })()})` : ''}`,
     ...(() => {
       const input = pace.checkInput || {};
       const counts = ['input', 'movement', 'none', 'unknown'].map(kind => Math.max(0, Number(input[kind]) || 0));
@@ -417,7 +440,7 @@ function collapseRepeatedCardWalk(events, entry) {
 }
 
 const FIELD_ANOMALY_PHASES = new Set([
-  'desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-offsite-challenge', 'detail-navigation-abort', 'detail-appcast-restriction', 'detail-panel-rate-limit', 'detail-panel-http-error', 'google-apply-links-rate-limited', 'detail-block-reprobe', 'detail-block-reprobe-partial', 'detail-block-reprobe-failed', 'detail-block-cleared', 'challenge-text-suppressed', 'challenge-resolved', 'panel-walk-interrupt',
+  'desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-offsite-challenge', 'detail-navigation-abort', 'detail-appcast-restriction', 'detail-panel-rate-limit', 'detail-panel-http-error', 'google-apply-links-rate-limited', 'detail-block-reprobe', 'detail-block-reprobe-partial', 'detail-block-reprobe-failed', 'detail-block-cleared', 'challenge-text-suppressed', 'challenge-resolved', 'challenge-loop', 'panel-walk-interrupt',
 ]);
 
 const ACTIVE_CONTEXT_RESET_PHASES = new Set(['source-start', 'query-start', 'page-extract', 'source-finished', 'recovery-start']);

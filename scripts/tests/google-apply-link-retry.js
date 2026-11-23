@@ -107,6 +107,14 @@ export default [{
     assert.equal(isTimedRetrySourceWarning({ code: CODE }), true);
     assert.equal(isTimedRetrySourceWarning({ code: 'http-403' }), false);
     assert.equal(isTimedRetrySourceWarning(null), false);
+    // A platform that kept serving its check after solved attempts waits like a
+    // hard block; an ordinary session block does not.
+    assert.equal(isTimedRetrySourceWarning({ code: 'session-blocked' }), false);
+    const refused = { code: 'session-blocked', refusedSolvedChecks: true, retryAfterAt: 1_000_000 };
+    assert.equal(isTimedRetrySourceWarning(refused), true);
+    assert.equal(hardBlockRetryWaitMs(refused, 400_000), 600_000);
+    assert.equal(canAutomaticallyResolveJobSourceWarning(refused, 400_000), false);
+    assert.equal(canAutomaticallyResolveJobSourceWarning(refused, 1_000_001), true);
     // The narrower helper keeps its original meaning for its existing callers.
     assert.equal(isHardBlockSourceWarning({ code: CODE }), false);
     assert.equal(isHardBlockSourceWarning({ code: 'cloudflare-hard-block' }), true);

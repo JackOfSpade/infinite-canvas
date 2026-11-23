@@ -8,6 +8,8 @@
 // pure helpers keep that ownership decision and the supersede diagnostics in
 // one place so the surrounding node remains readable.
 
+import { boardPauseBackendAnswer, pauseFlagsOf, withPauseFlags } from './boardPauseRefusal.js';
+
 // Exact user-facing text shown when an interrupted saved handoff can be
 // resumed. Kept as a single exported constant so the node, its effect, and
 // tests all reference the same string without drift.
@@ -69,8 +71,35 @@ export async function pauseBoardCombine({ runId, getMarker, saveMarker, waitForC
   await waitForCommit();
   if (getMarker()?.runId !== runId || getMarker()?.pausedByUser !== true) throw new Error('The Job Board checkpoint was not saved.');
   fence();
-  const result = await pauseBackend();
-  if (result?.settled !== true) throw new Error('The Job Board did not confirm that its saved work stopped. Retry Pause & save.');
+  let result = null;
+  let backendError = null;
+  try {
+    result = await pauseBackend();
+  } catch (error) {
+    backendError = error;
+  }
+  if (backendError || result?.settled !== true) {
+    // The app process refused or did not confirm, so the work was not proven
+    // stopped. Take back the paused mark this call set (only while the marker
+    // still names this run and still carries it); the fence above cannot be
+    // undone, so the caller holds the run for an explicit Retry.
+    const answer = boardPauseBackendAnswer(result, backendError);
+    const current = getMarker();
+    const alreadyPaused = marker?.pausedByUser === true && marker?.autoResumeEligible === false;
+    const restored = !alreadyPaused && current?.runId === runId && current.pausedByUser === true && current.autoResumeEligible === false;
+    if (restored) saveMarker(withPauseFlags(current, pauseFlagsOf(marker)));
+    const error = new Error([
+      answer.kind === 'refused'
+        ? `The app refused the Job Board's pause (${answer.reason}) and stopped none of its work, so that work is still running.`
+        : answer.kind === 'not-settled'
+          ? `The Job Board did not confirm that its saved work stopped (${answer.reason}).`
+          : `The pause request failed (${answer.reason}), so the Job Board did not confirm that its saved work stopped.`,
+      restored ? 'The Job Board is not marked paused. Retry to pick this Board run back up.' : alreadyPaused ? 'The Job Board was already marked paused and stays so.' : 'Retry Pause & save.',
+    ].join(' '));
+    error.pauseMarkRestored = restored;
+    error.pauseRefusalReason = answer.reason;
+    throw error;
+  }
   settle();
   return { success: true };
 }

@@ -5,6 +5,7 @@ import {
   recordActivityBeat,
   notePaceChallengeStart,
   notePaceChallengeEnd,
+  notePaceChallengeProgress,
   formatWaitDuration,
 } from './scrapeTelemetry.js';
 import { NAV_SETTLE_MS, CONTENT_POLL_MS, CONTENT_TIMEOUT_MS, CONTENT_SELECTORS } from './walkRules.js';
@@ -42,6 +43,43 @@ export const CHALLENGE_ACTIVITY_BEAT_MS = 30_000;
 export const CHALLENGE_ESCALATE_MS = [15 * 60_000, 30 * 60_000];
 
 export const CHALLENGE_STABLE_MS    = 1_500;
+
+// A check that takes a person's click and then serves itself again cannot be
+// passed from this browser: on 2026-11-23 ZipRecruiter's Cloudflare page did
+// that for 27 minutes (its answer was refused with HTTP 400 and the page
+// reloaded into the same check), and waiting only kept the refusal alive. After
+// this many refused attempts the wait ends as 'skip' (the source's collected
+// jobs are kept by every caller). A wait nobody has touched is still never
+// ended on a timer.
+export const CHALLENGE_LOOP_MAX_ATTEMPTS = 3;
+
+// Once a source has refused solved checks, a new check from it is not shown to
+// the person again for this long within the same source run (a new run, or a
+// Retry, starts the source again and clears this). Cloudflare's retry counter for a site lasts
+// an hour and is renewed by every further attempt.
+export const CHALLENGE_LOOP_MEMORY_MS = 60 * 60_000;
+
+const challengeLoopSeenAt = new Map();
+export function resetChallengeLoopMemory(sourceId = null) {
+  if (sourceId === null) challengeLoopSeenAt.clear();
+  else challengeLoopSeenAt.delete(sourceId);
+}
+function challengeLoopRemembered(sourceId, now = Date.now()) {
+  const at = challengeLoopSeenAt.get(sourceId);
+  if (!Number.isFinite(at)) return false;
+  if (now - at < CHALLENGE_LOOP_MEMORY_MS) return true;
+  challengeLoopSeenAt.delete(sourceId);
+  return false;
+}
+/** For a wait outside waitForReady that reached the same refusal count. */
+export function noteSourceRefusedSolvedChecks(sourceId, now = Date.now()) {
+  challengeLoopSeenAt.set(sourceId, now);
+}
+/** True when this source's last check wait ended because the site kept refusing solved checks. */
+export function sourceRefusedSolvedChecks(sourceId) {
+  return challengeLoopRemembered(sourceId);
+}
+const CHALLENGE_WAIT_STATUS = '⚠️ Complete the challenge above to continue';
 
 // page must be challenge-free for this long before resuming — guards against re-serves
 // Cloudflare can remove a solved Turnstile iframe before it either redirects or
@@ -540,7 +578,8 @@ export async function recoverFromChallengeHomeLanding(page, overlayBase, signal,
 
 // ── waitForReady ──────────────────────────────────────────────────────────────
 // Waits for real page content to appear, handling challenge pages.
-// Returns 'ok' | 'recovered' | 'skip' (session blocked) | 'hard-block' |
+// Returns 'ok' | 'recovered' | 'skip' (session blocked, or the site kept serving
+// its check again after CHALLENGE_LOOP_MAX_ATTEMPTS solved attempts) | 'hard-block' |
 // 'abort' (signal aborted) | 'page-detached' (this page object can no longer be
 // read — detached main frame, closed tab or disconnected browser; nothing was
 // observed about the site, and only 'ok'/'recovered' mean the page is usable).
@@ -549,6 +588,7 @@ export async function recoverFromChallengeHomeLanding(page, overlayBase, signal,
 export async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = null, {
   challengeOnly = false,
   initialChallengeState = null,
+  refusalSettleMs = undefined, // tests only: how long a re-served check must stand before it counts
 } = {}) {
   // Location autocomplete runs from Glassdoor's origin landing page, before a
   // results page exists. In that phase there cannot be a job-card selector to
@@ -573,7 +613,10 @@ export async function waitForReady(page, sourceId, overlayBase, signal, resumeUr
     : null;
   let terminalTransitionCount  = 0;
   let recordedTextSuppression  = false;
-  let inputProbe               = null; // mouse/key input seen while a check is open (diagnostics only)
+  let inputProbe               = null; // mouse/key input seen while a check is open
+  let challengeStatus          = CHALLENGE_WAIT_STATUS; // what the overlay should say while the check is open
+  let paintedDocumentId        = null; // the document the overlay status was last painted on
+  let reportedRefusals         = 0;    // refused attempts already logged for the current wait
   // A check that was counted as open must be closed on every way out of the wait, or the pace record keeps it open.
   const closeOpenChallenge = () => {
     if (!inChallenge) return;
@@ -761,10 +804,24 @@ export async function waitForReady(page, sourceId, overlayBase, signal, resumeUr
         closeOpenChallenge();
         return 'hard-block';
       }
+      // This source already refused solved checks a short while ago. Showing the
+      // person another one would only repeat that, so the check is not opened.
+      if (!inChallenge && challengeLoopRemembered(sourceId)) {
+        logger.warn(`[BrowserScraper] ${overlayBase.srcName}: another verification check, and this site already served its check again after ${CHALLENGE_LOOP_MAX_ATTEMPTS} solved attempts — not asking for another solve`);
+        recordManualScraperTelemetry({
+          phase: 'challenge-loop',
+          srcName: overlayBase.srcName,
+          reason: signals.reason,
+          title: signals.title,
+          url: signals.url,
+          closeCause: 'refused-earlier-this-hour',
+        });
+        return 'skip';
+      }
       if (!inChallenge) {
         inChallenge = true;
         challengeStartedAt = Date.now();
-        inputProbe = createChallengeInputProbe(page);
+        inputProbe = createChallengeInputProbe(page, refusalSettleMs === undefined ? {} : { refusalSettleMs });
         await inputProbe.poll();
         // Pace telemetry (diagnostics only): counts the check, files how many
         // detail pages opened since the previous one, and opens the ongoing
@@ -782,9 +839,11 @@ export async function waitForReady(page, sourceId, overlayBase, signal, resumeUr
         // "manual-verification-first" scrape ordering (scrapeVerification.js). The
         // orchestrator records the outcome per source; we only flag it here.
         markManualSolveRequired(sourceId);
+        challengeStatus = CHALLENGE_WAIT_STATUS;
+        paintedDocumentId = inputProbe.documentId();
         await updateOverlay(page, {
           ...overlayBase,
-          status:    '⚠️ Complete the challenge above to continue',
+          status:    challengeStatus,
           challenge: true,
         });
         logger.info(`[BrowserScraper] ${overlayBase.srcName}: bot challenge detected — waiting for user (no timeout; Reset to cancel)`);
@@ -830,6 +889,52 @@ export async function waitForReady(page, sourceId, overlayBase, signal, resumeUr
           challenge: true,
         });
         logger.info(`[BrowserScraper] ${overlayBase.srcName}: verification successful — waiting for Cloudflare redirect`);
+      }
+      // The site may load a new copy of its check page at any time (Cloudflare
+      // does so by itself every few minutes, and after every refused answer).
+      // A new document starts with an empty overlay, so say again what is open.
+      const challengeDocumentId = inputProbe?.documentId() ?? null;
+      const documentChanged = !!challengeDocumentId && challengeDocumentId !== paintedDocumentId;
+      // "Verification successful, waiting for the site" is still read as a
+      // check here, but it is a solve in progress, never a refusal.
+      if (signals?.verificationCompleted) inputProbe?.noteCleanRead();
+      const refusedAttempts = inputProbe ? inputProbe.confirmStillChallenged() : 0;
+      if (documentChanged || refusedAttempts > reportedRefusals) {
+        const inputSoFar = inputProbe?.summary() || null;
+        notePaceChallengeProgress(sourceId, { srcName: overlayBase.srcName, counts: inputSoFar });
+        if (refusedAttempts > reportedRefusals) {
+          reportedRefusals = refusedAttempts;
+          logger.warn(`[BrowserScraper] ${overlayBase.srcName}: the site served its check again after input (refused attempt ${refusedAttempts} of ${CHALLENGE_LOOP_MAX_ATTEMPTS})`);
+          if (refusedAttempts >= CHALLENGE_LOOP_MAX_ATTEMPTS) {
+            challengeLoopSeenAt.set(sourceId, Date.now());
+            recordManualScraperTelemetry({
+              phase: 'challenge-loop',
+              srcName: overlayBase.srcName,
+              reason: signals.reason,
+              title: signals.title,
+              url: signals.url,
+              closeCause: 'refused-after-input',
+              refusedAttempts,
+              inputCounts: inputSoFar,
+              waitedFor: formatWaitDuration(Date.now() - challengeStartedAt),
+            });
+            await updateOverlay(page, {
+              ...overlayBase,
+              status: `${overlayBase.srcName} served its check again after ${refusedAttempts} tries — stopping here and keeping what was collected`,
+              challenge: true,
+            }).catch(() => {});
+            logger.warn(`[BrowserScraper] ${overlayBase.srcName}: check cannot be passed from this browser right now (served again after ${refusedAttempts} solved attempts over ${formatWaitDuration(Date.now() - challengeStartedAt)}) — ending the wait; collected jobs are kept`);
+            closeOpenChallenge();
+            return 'skip';
+          }
+          challengeStatus = `⚠️ The site served its check again after your click (${refusedAttempts} of ${CHALLENGE_LOOP_MAX_ATTEMPTS} tries) — try once more`;
+        }
+        paintedDocumentId = challengeDocumentId || paintedDocumentId;
+        await updateOverlay(page, {
+          ...overlayBase,
+          status: challengeStatus,
+          challenge: true,
+        }).catch(() => {});
       }
       // Wait INDEFINITELY for the user to solve — never skip a solvable challenge
       // on a timer. The escape hatches are the abort check at the top of the loop
@@ -886,6 +991,9 @@ export async function waitForReady(page, sourceId, overlayBase, signal, resumeUr
     // the fact that this challenge was interactive, but never carry its old
     // terminal timestamp through a redirect/clean settle into a later block.
     terminalSince = null;
+    // A page that left the check was not refused: a replacement seen just
+    // before this read was the solve's own redirect.
+    inputProbe?.noteCleanRead();
 
     if (inChallenge) {
       if (await recoverFromChallengeHomeLanding(page, overlayBase, signal, resumeUrl)) {
@@ -958,6 +1066,7 @@ export async function waitForReady(page, sourceId, overlayBase, signal, resumeUr
         clearedAfter, input: challengeInputVerdict(inputSummary), inputCounts: inputSummary,
       });
       notePaceChallengeEnd(sourceId, { srcName: overlayBase.srcName, input: challengeInputVerdict(inputSummary) });
+      challengeLoopSeenAt.delete(sourceId);
       logger.info(`[BrowserScraper] ${overlayBase.srcName}: challenge resolved after ${clearedAfter} — resuming; ${describeChallengeInput(inputSummary)}`);
       // 'recovered' signals that a home-landing recovery fired — caller is on the
       // base search URL (page 1), not the paginated URL that triggered the challenge.

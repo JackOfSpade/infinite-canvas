@@ -9,6 +9,14 @@
 // whole canvas from the keys, then serializes, verifies and writes it exactly
 // as before. The file on disk is unchanged in form and content.
 //
+// A node can itself be huge: a Job Search card holding its candidate pool was
+// 169 MB, and so was the Job Board card holding that search's rollback. A
+// progress write replaces such a node but keeps the big values inside it, so
+// sending the whole node again froze the window for 13 seconds on every
+// results page (2026-11-23). A node's big values are therefore keyed and sent
+// the same way, by identity, however deep they sit: a record carries `parts`,
+// pairs of [property name or array index, key], where its big values were.
+//
 // Nothing here is trusted to stay in step. A key the app process does not hold
 // makes resolve() return null and the window sends the whole canvas the old
 // way. Manual save and the save on quit always send the whole canvas.
@@ -19,6 +27,26 @@
 const isObject = value => value !== null && typeof value === 'object';
 const isPlainObject = value => isObject(value) && !Array.isArray(value);
 const isObjectArray = value => Array.isArray(value) && value.every(isObject);
+
+// A value at least this heavy is sent as its own record. The unit is roughly
+// one character of the saved text. Below it, copying is cheaper than the
+// bookkeeping; a job row is about 20,000.
+export const PART_MIN_WEIGHT = 1_000_000;
+// Weights below this are not remembered: a canvas holds millions of small
+// objects, and remembering each would cost more memory than re-adding them.
+const WEIGHT_MEMO_MIN = 4_096;
+const WEIGHT_MAX_DEPTH = 200;
+
+function isSplittable(value) {
+  if (Array.isArray(value)) return true;
+  if (!isObject(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function isPartName(name) {
+  return (typeof name === 'string' && name !== '__proto__') || (Number.isInteger(name) && name >= 0);
+}
 
 function newSessionId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
@@ -40,24 +68,48 @@ function refKeys(refs) {
   const keys = refs.nodes ? [...refs.nodes] : [];
   if (refs.edges) keys.push(refs.edges);
   if (refs.drawings) keys.push(refs.drawings);
+  if (refs.parts) for (const part of refs.parts) keys.push(part[1]);
   return keys;
 }
 
 /**
  * Window half. `encode(data)` returns what to send for one save:
- * `{ session, root, chunks, settle }`. `chunks` holds only the records the app
- * process is not known to hold. Call `settle(outcome)` once the request is
+ * `{ session, root, chunks, attached, settle }`. `chunks` holds only the records
+ * the app process is not known to hold; `attached` names the part records,
+ * which must travel in the same call as the record that follows them. Call `settle(outcome)` once the request is
  * over: 'saved' when the app process rebuilt the canvas, 'failed' when it may
  * or may not have, 'lost' when its copy can no longer be relied on.
  */
 export function createCanvasDeltaEncoder({ session = newSessionId() } = {}) {
   const keys = new WeakMap();
+  // Canvas values are never changed in place, so a value's weight never changes.
+  const weights = new WeakMap();
+  const weightOf = (value, depth = 0) => {
+    if (typeof value === 'string') return value.length + 2;
+    if (!isObject(value)) return 8;
+    const known = weights.get(value);
+    if (known !== undefined) return known;
+    if (depth > WEIGHT_MAX_DEPTH || !isSplittable(value)) return 8;
+    let total = 2;
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i += 1) total += weightOf(value[i], depth + 1) + 1;
+    } else {
+      for (const name of Object.keys(value)) total += name.length + 3 + weightOf(value[name], depth + 1);
+    }
+    if (total >= WEIGHT_MEMO_MIN) weights.set(value, total);
+    return total;
+  };
   // Keys the app process holds, with the child keys of each group record.
   let held = new Map();
   let counter = 0;
 
   function encode(data) {
     const chunks = [];
+    // Keys of part records. Each is listed just before the record it was cut
+    // from, and the sender keeps them in one call: two values that share an
+    // object stay sharing it only when they are copied in the same call.
+    const attached = new Set();
+    let partDepth = 0;
     const fresh = new Map();
     const reach = new Set();
     const childrenOf = key => fresh.get(key) ?? held.get(key);
@@ -74,6 +126,7 @@ export function createCanvasDeltaEncoder({ session = newSessionId() } = {}) {
         const record = build();
         fresh.set(key, refKeys(record.refs));
         chunks.push(record.refs ? [key, record.value, record.refs] : [key, record.value]);
+        if (partDepth > 0) attached.add(key);
       }
       return key;
     };
@@ -96,9 +149,32 @@ export function createCanvasDeltaEncoder({ session = newSessionId() } = {}) {
       return refs.nodes || refs.edges || refs.drawings ? refs : null;
     };
 
+    // Replace each big value directly inside `container` with a key. The big
+    // value's own record is split the same way, so a big value nested inside
+    // another is still sent once and then named.
+    const partsRecord = (container) => {
+      let copy = null;
+      const parts = [];
+      const visit = (name, child) => {
+        if (!isPartName(name) || !isSplittable(child) || weightOf(child) < PART_MIN_WEIGHT) return;
+        partDepth += 1;
+        let key;
+        try { key = keyOf(child, () => partsRecord(child)); } finally { partDepth -= 1; }
+        if (!copy) copy = Array.isArray(container) ? container.slice() : { ...container };
+        copy[name] = 0;
+        parts.push([name, key]);
+      };
+      if (Array.isArray(container)) container.forEach((child, index) => visit(index, child));
+      else for (const name of Object.keys(container)) visit(name, container[name]);
+      return parts.length ? { value: copy, refs: { parts } } : { value: container };
+    };
+
     const nodeRecord = (node) => {
       const canvasData = node.type === 'group' && isPlainObject(node.data) ? node.data.canvasData : null;
-      if (!isPlainObject(canvasData)) return { value: node };
+      if (!isPlainObject(canvasData)) {
+        if (node.type === 'group' || !isSplittable(node) || weightOf(node) < PART_MIN_WEIGHT) return { value: node };
+        return partsRecord(node);
+      }
       const level = { ...canvasData };
       const refs = splitLevel(level);
       if (!refs) return { value: node };
@@ -123,7 +199,7 @@ export function createCanvasDeltaEncoder({ session = newSessionId() } = {}) {
       held = next;
     };
 
-    return { session, root: rootRefs ? { value: rootValue, refs: rootRefs } : { value: rootValue }, chunks, settle };
+    return { session, root: rootRefs ? { value: rootValue, refs: rootRefs } : { value: rootValue }, chunks, attached, settle };
   }
 
   return { session, encode };
@@ -155,6 +231,9 @@ export function createCanvasDeltaStore() {
     if (refs === undefined) return true;
     if (!isPlainObject(refs)) return false;
     if (refs.nodes !== undefined && !(Array.isArray(refs.nodes) && refs.nodes.every(key => typeof key === 'string'))) return false;
+    if (refs.parts !== undefined && !(Array.isArray(refs.parts) && refs.parts.every(part => (
+      Array.isArray(part) && part.length === 2 && isPartName(part[0]) && typeof part[1] === 'string'
+    )))) return false;
     return ['edges', 'drawings'].every(slot => refs[slot] === undefined || typeof refs[slot] === 'string');
   }
 
@@ -188,13 +267,30 @@ export function createCanvasDeltaStore() {
     return true;
   }
 
+  // Put each big value back where its key stands. The same key under two
+  // owners gives both the same object, as it was in the window.
+  function fillParts(owner, parts) {
+    for (const [name, key] of parts) {
+      if (Array.isArray(owner) ? !Number.isInteger(name) : typeof name !== 'string') return false;
+      const value = valueOf(key);
+      if (!isObject(value)) return false;
+      owner[name] = value;
+    }
+    return true;
+  }
+
   function valueOf(key) {
     const record = records.get(key);
     if (!record || record.state === 'filling') return null;
     if (record.state === 'ready') return record.value;
     record.state = 'filling';
-    const owner = record.refs ? record.value?.data?.canvasData : null;
-    const filled = record.refs ? isPlainObject(owner) && fill(owner, record.refs) : true;
+    const refs = record.refs;
+    let filled = true;
+    if (refs && (refs.nodes || refs.edges || refs.drawings)) {
+      const owner = record.value?.data?.canvasData;
+      filled = isPlainObject(owner) && fill(owner, refs);
+    }
+    if (filled && refs?.parts) filled = fillParts(record.value, refs.parts);
     record.state = filled ? 'ready' : 'new';
     return filled ? record.value : null;
   }

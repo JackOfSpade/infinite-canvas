@@ -10,6 +10,12 @@ import {
   isLiveCombineOwnedMarker,
   pauseBoardCombine,
 } from '../../src/nodes/jobboard/boardRecoveryNotice.js';
+import {
+  boardPauseBackendAnswer,
+  boardPauseRefusalMessage,
+  boardPauseRestorePatch,
+  classifyBoardPauseOutcome,
+} from '../../src/nodes/jobboard/boardPauseRefusal.js';
 import { isBoardCombineManualAiRunId } from '../../src/utils/jobBoardCareerOverride.js';
 
 function readNodeSource() {
@@ -207,11 +213,207 @@ export default [
       steps.length = 0;
       await assert.rejects(pauseBoardCombine({ ...ports, runId: 'stale' }), /changed/);
       assert.deepStrictEqual(steps, [], 'a stale request cannot touch another run');
-      await assert.rejects(pauseBoardCombine({ ...ports, pauseBackend: async () => ({ settled: false }) }), /did not confirm/);
-      assert(!steps.includes('settle') && marker.pausedByUser, 'an unacknowledged stop keeps recovery and cannot report success');
+      // The app process returned before aborting anything: nothing stopped, so
+      // the marker is kept (recovery survives) but its paused mark is taken back.
+      const beforeRefusal = { ...marker, pausedByUser: undefined, autoResumeEligible: true };
+      marker = beforeRefusal;
+      await assert.rejects(pauseBoardCombine({ ...ports, pauseBackend: async () => ({ ok: false, settled: false, reason: 'ownership-mismatch' }) }),
+        error => /refused the Job Board's pause \(ownership-mismatch\)/.test(error.message) && /still running/.test(error.message)
+          && /not marked paused/.test(error.message) && error.pauseMarkRestored === true);
+      assert(!steps.includes('settle'), 'an unacknowledged stop cannot report success');
+      assert.strictEqual(marker.runId, 'board-run', 'a refused pause keeps the recovery marker');
+      assert.strictEqual(marker.combineInputSignature, 'inputs');
+      assert(!('pausedByUser' in marker) && marker.autoResumeEligible === true, 'a refused pause restores the flags it found');
+      // The abort was requested but not confirmed: still not marked paused.
+      await assert.rejects(pauseBoardCombine({ ...ports, pauseBackend: async () => ({ ok: false, settled: false, pausedContinuations: 0 }) }),
+        /did not confirm that its saved work stopped/);
+      assert(!marker.pausedByUser);
+      // A thrown backend call is handled the same way.
+      await assert.rejects(pauseBoardCombine({ ...ports, pauseBackend: async () => { throw new Error('ipc closed'); } }),
+        /pause request failed \(ipc closed\)/);
+      assert(!marker.pausedByUser);
+      // A newer owner of the marker is never rewritten by a refused pause.
+      let newer = null;
+      await assert.rejects(pauseBoardCombine({ ...ports,
+        pauseBackend: async () => { newer = { runId: 'newer-run', pausedByUser: true, autoResumeEligible: false }; marker = newer; return { settled: false }; } }),
+        error => error.pauseMarkRestored === false && /Retry Pause & save/.test(error.message));
+      assert.strictEqual(marker, newer, 'another run\'s paused mark is left alone');
+      marker = { runId: 'board-run', combineInputSignature: 'inputs', combineSourceRuns: [{ runId: 'source' }], pausedByUser: true, autoResumeEligible: false };
       steps.length = 0;
       await assert.rejects(pauseBoardCombine({ ...ports, saveMarker: () => { marker = { runId: 'newer' }; } }), /not saved/);
       assert.deepStrictEqual(steps, ['commit'], 'a changed owner cannot abort backend work');
+    },
+  },
+
+  {
+    name: 'Board pause refusal: the answers decide whether paused marks stay, and the message says only what is true',
+    run: async () => {
+      const ok = value => ({ status: 'fulfilled', value });
+      const paused = ok({ success: true });
+      const idle = ok({ success: true, idle: true });
+      const failed = ok({ success: false, error: 'changed runs' });
+      const rejected = { status: 'rejected', reason: new Error('x') };
+      const refusal = { ok: false, paused: false, settled: false, tokenMismatch: true, reason: 'ownership-mismatch' };
+      const notSettled = { ok: false, settled: false, paused: false, absent: true, pausedContinuations: 0 };
+
+      assert.deepStrictEqual(boardPauseBackendAnswer({ ok: true, settled: true }), { kind: 'confirmed', reason: null });
+      assert.deepStrictEqual(boardPauseBackendAnswer(refusal), { kind: 'refused', reason: 'ownership-mismatch' });
+      assert.deepStrictEqual(boardPauseBackendAnswer({ ok: false, paused: false, settled: false, operationAuthorityMismatch: true }),
+        { kind: 'refused', reason: 'operation-authority-mismatch' });
+      assert.deepStrictEqual(boardPauseBackendAnswer({ ok: false, settled: false, reason: 'continuation-pause-failed' }),
+        { kind: 'refused', reason: 'continuation-pause-failed' });
+      assert.strictEqual(boardPauseBackendAnswer(notSettled).kind, 'not-settled');
+      assert.strictEqual(boardPauseBackendAnswer({ ok: false, settled: false, reason: 'quit-pause-not-settled' }).kind, 'not-settled');
+      assert.strictEqual(boardPauseBackendAnswer(undefined).kind, 'failed');
+      // A quit pause drains the card's tasks before it can refuse, so the
+      // refusal is not proof that work is still running.
+      assert.strictEqual(boardPauseBackendAnswer(refusal, null, { drainedBeforeAnswer: true }).kind, 'not-settled');
+      assert.strictEqual(boardPauseBackendAnswer({ ok: false, settled: false, reason: 'missing-node' }, null, { drainedBeforeAnswer: true }).kind, 'refused');
+      // Marks that were already paused before the attempt are not "taken back".
+      assert.strictEqual(boardPauseRestorePatch(
+        { boardScanResume: { boardRunId: 'r1', pausedByUser: true, autoResumeEligible: false } },
+        { plan: { boardRunId: 'r1', prior: { pausedByUser: true, autoResumeEligible: false } }, marker: null }), null);
+      assert.deepStrictEqual(boardPauseBackendAnswer(null, new Error('ipc closed')), { kind: 'failed', reason: 'ipc closed' });
+
+      const confirmed = classifyBoardPauseOutcome({ acknowledgement: { ok: true, settled: true }, children: [paused, idle], phase: 'searches' });
+      assert(confirmed.confirmed && !confirmed.restoreMarks);
+      assert.deepStrictEqual(confirmed.searches, { total: 2, paused: 1, idle: 1, failed: 0 });
+
+      // Refused with nothing else paused: the mark comes back and the text says the work runs on.
+      const combineRefused = classifyBoardPauseOutcome({ acknowledgement: refusal, children: [], phase: 'combine', hasCombineMarker: true });
+      assert(!combineRefused.confirmed && combineRefused.restoreMarks);
+      const combineText = boardPauseRefusalMessage(combineRefused, { marksRestored: true });
+      assert(/was not confirmed/.test(combineText) && /refused the Job Board's pause \(ownership-mismatch\)/.test(combineText)
+        && /still running/.test(combineText) && /not marked paused/.test(combineText));
+      assert(!/Search/.test(combineText.replace('Job Board', '')), 'no Search claim when no Search was asked to pause');
+
+      // Every active Search really paused while the app refused: the Searches are
+      // paused, so the mark stays and the text must not claim nothing paused.
+      const searchesPaused = classifyBoardPauseOutcome({ acknowledgement: refusal, children: [paused, paused, idle], phase: 'searches' });
+      assert(!searchesPaused.confirmed && !searchesPaused.restoreMarks);
+      const pausedText = boardPauseRefusalMessage(searchesPaused);
+      assert(/All 2 active Searches paused and saved\./.test(pausedText) && /stays marked paused/.test(pausedText)
+        && /stopped none of the Board's own work/.test(pausedText));
+      // The same answers with a Board Combine handoff, or outside the searches
+      // phase, leave Board work unproven: restore.
+      assert(classifyBoardPauseOutcome({ acknowledgement: refusal, children: [paused], phase: 'searches', hasCombineMarker: true }).restoreMarks);
+      assert(classifyBoardPauseOutcome({ acknowledgement: refusal, children: [paused], phase: 'combine' }).restoreMarks);
+      // Only idle children: nothing was paused, so nothing justifies the mark.
+      assert(classifyBoardPauseOutcome({ acknowledgement: refusal, children: [idle], phase: 'searches' }).restoreMarks);
+
+      // The app confirmed but a Search did not pause: that Search may still run.
+      const childFailed = classifyBoardPauseOutcome({ acknowledgement: { ok: true, settled: true }, children: [paused, failed, rejected], phase: 'searches' });
+      assert(!childFailed.confirmed && childFailed.restoreMarks && childFailed.backend === 'confirmed');
+      const childText = boardPauseRefusalMessage(childFailed, { marksRestored: true });
+      assert(/1 of 3 active Searches paused and saved; 2 did not confirm and may still be running\./.test(childText)
+        && /The Job Board's own work stopped\./.test(childText));
+      assert(/The active Search did not confirm its pause and may still be running\./.test(boardPauseRefusalMessage(
+        classifyBoardPauseOutcome({ acknowledgement: notSettled, children: [failed], phase: 'searches' }), { marksRestored: true })));
+      // Restoring was due but the saved run had changed: say the mark was left.
+      assert(/paused mark was left as it is/.test(boardPauseRefusalMessage(combineRefused, { marksRestored: false })));
+
+      // Restore patch: only this attempt's own marks, same run, still paused.
+      const applied = {
+        plan: { boardRunId: 'board-1', prior: { pausedByUser: undefined, autoResumeEligible: true } },
+        marker: { runId: 'manual-1', existed: true, priorValue: { runId: 'manual-1' }, prior: { pausedByUser: undefined, autoResumeEligible: undefined } },
+      };
+      const data = {
+        boardScanResume: { boardRunId: 'board-1', phase: 'searches', pausedByUser: true, autoResumeEligible: false, updatedAt: 1 },
+        manualAiResume: { runId: 'manual-1', combineInputSignature: 'sig', pausedByUser: true, autoResumeEligible: false, updatedAt: 1 },
+      };
+      const patch = boardPauseRestorePatch(data, applied, 50);
+      assert.deepStrictEqual(patch.boardScanResume, { boardRunId: 'board-1', phase: 'searches', autoResumeEligible: true, updatedAt: 50 });
+      assert.deepStrictEqual(patch.manualAiResume, { runId: 'manual-1', combineInputSignature: 'sig', updatedAt: 50 });
+      // A marker the attempt created goes back to what was there before.
+      const created = boardPauseRestorePatch({ manualAiResume: data.manualAiResume },
+        { plan: null, marker: { runId: 'manual-1', existed: false, priorValue: null, prior: {} } });
+      assert.deepStrictEqual(created, { manualAiResume: null });
+      // A different run, or flags someone already changed, are never touched.
+      assert.strictEqual(boardPauseRestorePatch({ boardScanResume: { ...data.boardScanResume, boardRunId: 'board-2' },
+        manualAiResume: { ...data.manualAiResume, runId: 'manual-2' } }, applied), null);
+      assert.strictEqual(boardPauseRestorePatch({ boardScanResume: { ...data.boardScanResume, pausedByUser: false, autoResumeEligible: true } },
+        applied), null);
+      assert.strictEqual(boardPauseRestorePatch({}, applied), null);
+      assert.strictEqual(boardPauseRestorePatch(data, null), null);
+    },
+  },
+
+  {
+    name: 'Board pause refusal: the production Board pauser takes back its own paused marks and reports what paused',
+    run: async () => {
+      const source = readNodeSource();
+      const start = source.indexOf('const pauseBoardForQuit = useCallback(') + 'const pauseBoardForQuit = useCallback('.length;
+      const end = source.indexOf('}, [canvasFilePath, data, epoch, getNode, id, moduleRunQueue, updateGlobal]', start) + 1;
+      assert(start > 100 && end > start);
+      const ref = current => ({ current });
+      const build = ({ live, backend, sources = [] }) => {
+        const state = { live, errors: [], bumps: 0, logs: [] };
+        const noop = () => {};
+        state.pause = new Function('scope', `with (scope) { return (${source.slice(start, end)}); }`)({
+          id: 'board', data: {}, canvasFilePath: '/c.canvas', getNode: () => ({ data: state.live }), jobWorkflowNeedsQuitPause: () => true,
+          scanRunRef: ref(Symbol('scan')), scanPreflightRef: ref(null), boardPauseAttemptRef: ref(0), pauseRefusalMessageRef: ref(null), combineRunRef: ref(null),
+          combineRecoveryTokenClaimRef: ref(null), activeCombineManualAiRunRef: ref(null),
+          activeSearchModuleIdRef: ref(null), activeSearchModuleIdsRef: ref(new Set(sources)),
+          combineInputSignaturesRef: ref(new Map()), combineSourceRunsRef: ref(new Map()), compensationRequestIdRef: ref(null),
+          updateGlobal: (_id, updater) => {
+            const patch = typeof updater === 'function' ? updater({ type: 'jobboard', data: state.live }) : updater;
+            if (patch) state.live = { ...state.live, ...patch };
+          },
+          epoch: { bump: () => { state.bumps += 1; } }, moduleRunQueue: { cancelQueuedRunsOwnedByNode: noop },
+          window: { electronAPI: { pauseJobRunAndCancel: backend } },
+          setScanning: noop, setScanProgress: noop, setCombining: noop, setCompensationProgress: noop, setCombineResearchProgress: noop,
+          setRecoveryError: message => { state.errors.push(message); },
+          savedPauseMessageForPlan: () => 'Paused', savedWorkflowQuitPausePatch: () => null, settlePreFenceCanvasBatches: async () => {},
+          classifyBoardPauseOutcome, boardPauseRestorePatch, boardPauseRefusalMessage,
+          EventLogger: { log: line => { state.logs.push(line); } },
+        });
+        return state;
+      };
+      const plan = () => ({ version: 1, boardRunId: 'board-1', phase: 'searches', autoResumeEligible: true });
+      const refusal = async () => ({ ok: false, paused: false, settled: false, tokenMismatch: true, reason: 'ownership-mismatch' });
+
+      // The app refuses and the one active Search does not pause either.
+      let state = build({ live: { boardScanResume: plan() }, backend: refusal, sources: ['search-1'] });
+      await assert.rejects(state.pause({ pauseSearchModule: async () => ({ success: false }) }),
+        /did not confirm its pause and may still be running.*asked the Job Board's own work to stop but did not confirm a saved pause \(ownership-mismatch\).*not marked paused/);
+      assert.strictEqual(state.live.boardScanResume.autoResumeEligible, true, 'auto-resume is switched back on');
+      assert(!('pausedByUser' in state.live.boardScanResume), 'the Board is no longer marked paused by the user');
+      assert.strictEqual(state.live.boardScanResume.boardRunId, 'board-1', 'the saved run itself is kept');
+      assert.strictEqual(state.errors.length, 1, 'the Board shows the refusal');
+      assert(state.logs.some(line => /pause not confirmed .*backend=not-settled reason=ownership-mismatch .*searches-failed=1 marks=restored/.test(line)));
+      assert.strictEqual(state.bumps, 1, 'the fence is still raised before the app is asked; it is not undone');
+
+      // The app refuses but the active Search paused and saved: the mark stays.
+      state = build({ live: { boardScanResume: plan() }, backend: refusal, sources: ['search-1'] });
+      await assert.rejects(state.pause({ pauseSearchModule: async () => ({ success: true }) }),
+        /The active Search paused and saved\..*stays marked paused/);
+      assert(state.live.boardScanResume.pausedByUser === true && state.live.boardScanResume.autoResumeEligible === false);
+
+      // A thrown backend call no longer skips the child answers or leaves the mark.
+      state = build({ live: { boardScanResume: plan() }, backend: async () => { throw new Error('ipc closed'); } });
+      await assert.rejects(state.pause({}), /pause request to the app failed \(ipc closed\).*not marked paused/);
+      assert.strictEqual(state.live.boardScanResume.autoResumeEligible, true);
+
+      // A newer run that replaced the plan while the app answered is left alone.
+      state = build({ live: { boardScanResume: plan() }, backend: async () => {
+        state.live = { boardScanResume: { version: 1, boardRunId: 'board-2', pausedByUser: true, autoResumeEligible: false } };
+        return refusal();
+      } });
+      await assert.rejects(state.pause({}), /paused mark was left as it is/);
+      assert.deepStrictEqual(state.live.boardScanResume, { version: 1, boardRunId: 'board-2', pausedByUser: true, autoResumeEligible: false });
+
+      // No pauser for an active Search: refused before any mark is written.
+      state = build({ live: { boardScanResume: plan() }, backend: refusal, sources: ['search-1'] });
+      await assert.rejects(state.pause({}), /cannot save its active Search owners/);
+      assert.deepStrictEqual(state.live.boardScanResume, plan());
+      assert.strictEqual(state.bumps, 0);
+
+      // The confirmed path is unchanged.
+      state = build({ live: { boardScanResume: plan() }, backend: async () => ({ ok: true, settled: true }) });
+      state.live.boardScanResume.autoResumeEligible = true;
+      const result = await state.pause({}).catch(error => error);
+      assert(state.live.boardScanResume.pausedByUser === true && state.errors[0] === 'Paused',
+        `a confirmed pause keeps its marks (${result?.message || 'ok'})`);
     },
   },
 

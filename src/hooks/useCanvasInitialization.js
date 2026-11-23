@@ -258,13 +258,20 @@ export function useCanvasInitialization({
           // Only nodes changed since the last auto-save are copied. The
           // longest single copy is what the window feels, so that is recorded.
           let longestBlockMs = 0;
-          const res = await sendAutosaveRef.current({
-            api: window.electronAPI,
-            data,
-            filePath: currentFile,
-            onBlocked: (ms) => { longestBlockMs = Math.max(longestBlockMs, ms); },
-          });
-          recordPerf('save-handoff', longestBlockMs, stateRef.current?.nodes?.length);
+          let sent = null;
+          let res;
+          try {
+            res = await sendAutosaveRef.current({
+              api: window.electronAPI,
+              data,
+              filePath: currentFile,
+              onBlocked: (ms) => { longestBlockMs = Math.max(longestBlockMs, ms); },
+              onSent: (summary) => { sent = summary; },
+            });
+          } finally {
+            // Recorded even when the save throws: that is when it blocked most.
+            recordPerf('save-handoff', longestBlockMs, stateRef.current?.nodes?.length, sent);
+          }
           recordPerf('save-total', performance.now() - saveStartedAt, stateRef.current?.nodes?.length);
           if (cancelled || !isMountedRef.current || !isCurrentGeneration()) return false;
           const snapshotIsCurrent = currentFileRef.current === currentFile

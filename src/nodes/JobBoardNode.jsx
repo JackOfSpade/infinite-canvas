@@ -1,6 +1,7 @@
 import { usePublishJobRunStatus } from '../hooks/usePublishJobRunStatus';
 import { normalizeProgress } from './jobboard/jobBoardProgress';
 import { pauseBoardCombine } from './jobboard/boardRecoveryNotice';
+import { boardPauseRefusalMessage, boardPauseRestorePatch, classifyBoardPauseOutcome } from './jobboard/boardPauseRefusal';
 import { settlePreFenceCanvasBatches } from '../utils/quitCommitSettle';
 import { jobWorkflowNeedsQuitPause, savedWorkflowQuitPausePatch } from '../utils/quitWorkflowPause';
 import { jobBoardHasSavedAiContinuation } from '../utils/jobBoardSavedAiContinuation';
@@ -881,6 +882,14 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // Reserve that short window so a double click cannot start two probes and
   // then two independent Board transactions.
   const scanPreflightRef = useRef(null);
+  // Counts Board pause attempts, so a refused attempt takes back only the
+  // paused marks that no later attempt has claimed.
+  const boardPauseAttemptRef = useRef(0);
+  // The text of the last "pause not confirmed" statement. While the Board's
+  // recovery message is still exactly this text, the recovery effects leave it
+  // alone: they neither replace it with a saved-pause notice nor re-enter the
+  // run. Retry (or any newer message) ends the hold.
+  const pauseRefusalMessageRef = useRef(null);
   const scanLaneLeaseOwnerRef = useRef(null);
   const activeSearchModuleIdRef = useRef(null);
   // A Board normally advances its children in source order.  A fresh-file
@@ -2861,19 +2870,32 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       plan?.awaitingSourceResolution?.sourceId,
       ...(plan?.awaitingSourceResolutions || []).map(item => item?.sourceId),
     ].filter(Boolean))];
+    // Checked before any mark is written: this refusal stops nothing.
+    if (sourceIds.length && typeof pauseSearchModule !== 'function') throw new Error('The Board cannot save its active Search owners.');
     let pauseCommitted = false;
+    // What this attempt changed, so an unconfirmed pause can take back exactly
+    // its own marks (see jobboard/boardPauseRefusal.js).
+    const pauseAttempt = ++boardPauseAttemptRef.current;
+    let appliedMarks = null;
     updateGlobal(id, node => {
       if (!isQuitPauseCurrent()) return null;
       if (plan?.boardRunId && node?.data?.boardScanResume?.boardRunId !== plan.boardRunId) return null;
       if (live.manualAiResume?.runId && node?.data?.manualAiResume?.runId !== live.manualAiResume.runId) return null;
       pauseCommitted = true;
+      const priorPlan = node.data.boardScanResume;
+      const priorMarker = node.data.manualAiResume;
+      appliedMarks = {
+        plan: plan ? { boardRunId: priorPlan?.boardRunId ?? null,
+          prior: { pausedByUser: priorPlan?.pausedByUser, autoResumeEligible: priorPlan?.autoResumeEligible } } : null,
+        marker: marker ? { runId: priorMarker?.runId || marker.runId, existed: !!priorMarker, priorValue: priorMarker,
+          prior: { pausedByUser: priorMarker?.pausedByUser, autoResumeEligible: priorMarker?.autoResumeEligible } } : null,
+      };
       return {
         queuedModuleRun: null,
         ...(plan ? { boardScanResume: { ...node.data.boardScanResume, autoResumeEligible: false, pausedByUser: true, updatedAt: Date.now() } } : {}),
         ...(marker ? { manualAiResume: { ...marker, ...node.data.manualAiResume, autoResumeEligible: false, pausedByUser: true, updatedAt: Date.now() } } : {}),
       };
     });
-    if (sourceIds.length && typeof pauseSearchModule !== 'function') throw new Error('The Board cannot save its active Search owners.');
     // Install each child's pauseCompletion synchronously before the parent
     // epoch changes. Those controls route aborted workers to saved Pause,
     // instead of the ordinary Board cancellation/rollback path.
@@ -2881,14 +2903,37 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const childSettlement = Promise.allSettled(childPauses);
     epoch.bump();
     moduleRunQueue.cancelQueuedRunsOwnedByNode(id, 'App paused for quit');
-    const acknowledgement = await window.electronAPI?.pauseJobRunAndCancel?.({
-      canvasFilePath, nodeId: id, cause: 'app-quit',
-    });
+    let acknowledgement = null;
+    let backendError = null;
+    try {
+      acknowledgement = await window.electronAPI?.pauseJobRunAndCancel?.({
+        canvasFilePath, nodeId: id, cause: 'app-quit',
+      });
+    } catch (error) {
+      backendError = error;
+    }
     const children = await childSettlement;
     if (!isQuitPauseCurrent()) return { success: false, error: 'This quit request was released.' };
-    if (acknowledgement?.settled !== true || acknowledgement?.ok === false
+    if (backendError || acknowledgement?.settled !== true || acknowledgement?.ok === false
       || children.some(result => result.status === 'rejected' || result.value?.success !== true)) {
-      throw new Error('The Job Board and its active Searches did not confirm their saved pause.');
+      // The app process refused or did not confirm, or a child Search did not
+      // pause. The paused marks written above would now show "paused" (and
+      // switch off auto-resume) for work that was never proven stopped, so
+      // take back this attempt's own marks. The epoch bump and the cancelled
+      // queued runs cannot be undone: the Board's own loop has let go of this
+      // run, and the message below says how to pick it back up.
+      const outcome = classifyBoardPauseOutcome({ acknowledgement, backendError, children,
+        phase: plan?.phase, hasCombineMarker: !!marker, drainedBeforeAnswer: true });
+      const mayRestore = outcome.restoreMarks && pauseCommitted && boardPauseAttemptRef.current === pauseAttempt;
+      const marksRestored = mayRestore && !!boardPauseRestorePatch(getNode(id)?.data, appliedMarks);
+      if (marksRestored) updateGlobal(id, node => boardPauseRestorePatch(node?.data, appliedMarks));
+      const message = boardPauseRefusalMessage(outcome, { marksRestored });
+      EventLogger.log(`[JobBoard] pause not confirmed id=${id} run=${plan?.boardRunId || marker?.runId || 'none'} backend=${outcome.backend} reason=${outcome.reason || 'none'} searches-paused=${outcome.searches.paused} searches-idle=${outcome.searches.idle} searches-failed=${outcome.searches.failed} marks=${marksRestored ? 'restored' : outcome.restoreMarks ? 'left-changed' : 'kept'}`);
+      // Held (see pauseRefusalMessageRef) until the person chooses Retry, so
+      // un-marking cannot start a second copy of work that may still be running.
+      pauseRefusalMessageRef.current = message;
+      setRecoveryError(message);
+      throw new Error(message);
     }
     scanRunRef.current = null;
     scanPreflightRef.current = null;
@@ -6261,6 +6306,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       foreignRecoveryWaitSigRef.current = null;
       return;
     }
+    if (recoveryError && recoveryError === pauseRefusalMessageRef.current) return;
     if (data.manualAiResume?.pausedByUser === true
       || data.manualAiResume?.autoResumeEligible === false
       || plan.pausedByUser === true || plan.autoResumeEligible === false) {
@@ -6855,6 +6901,23 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           EventLogger.log(`[JobBoard] Pause & save acknowledged id=${id} run=${detail.runId}`);
         },
       }).then(detail.acknowledge, error => {
+        // pauseBoardCombine took its paused mark back when the app process did
+        // not confirm. Say so on the Board; the set error also holds automatic
+        // re-entry of this Combine until the person chooses Retry.
+        if (error?.pauseMarkRestored) {
+          EventLogger.log(`[JobBoard] Pause & save not confirmed id=${id} run=${detail.runId} reason=${error.pauseRefusalReason || 'none'} marks=restored`);
+          // The fence above already made this window's Combine let go, and its
+          // own exit does not clear the busy state once fenced. Release it here
+          // (as a confirmed pause does) so the statement and Retry can show.
+          if (combineRunRef.current === active.token) combineRunRef.current = null;
+          if (activeCombineManualAiRunRef.current === active) activeCombineManualAiRunRef.current = null;
+          compensationRequestIdRef.current = null;
+          setCompensationProgress(null);
+          setCombineResearchProgress(null);
+          setCombining(false);
+          pauseRefusalMessageRef.current = error.message;
+          setRecoveryError(error.message);
+        }
         detail.acknowledge?.({ success: false, error: error?.message || 'The Job Board could not pause.' });
       }).finally(() => { pausing = false; });
     };
@@ -7200,6 +7263,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       autoResumedManualAiRunRef.current = null;
       return;
     }
+    if (recoveryError && recoveryError === pauseRefusalMessageRef.current) return;
     if (autoResumedManualAiRunRef.current === resume.runId) return;
     if (retiredCombineManualAiRunIdsRef.current.has(resume.runId)) {
       updateGlobal(id, (node) => (
@@ -7272,6 +7336,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     // Ignore repeat clicks before changing its pause flags or recovery state.
     if (scanRunRef.current || scanPreflightRef.current || combineRunRef.current
       || cancellationInFlightRef.current) return;
+    pauseRefusalMessageRef.current = null;
     const liveData = getNode(id)?.data || {};
     const plan = liveData.boardScanResume;
     if (plan && (plan.autoResumeEligible === false || plan.pausedByUser === true)) {

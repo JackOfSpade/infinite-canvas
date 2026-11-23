@@ -63,6 +63,7 @@ import { completionTimestampIso } from '../../src/utils/completionTimestamp.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 import { validateIssueReportDescription } from '../../src/utils/issueReportDescription.js';
 import { parseWorkspaceText } from './workspaceContentPool.js';
+import { JOB_COMPENSATION_METHOD_VERSION } from '../../src/utils/jobCompensationVersion.js';
 import { describeBoardMergeInputs } from '../../src/utils/jobBoardMergeSummary.js';
 import { scrapeAlarmsMarkdown } from './scrapeAlarms.js';
 
@@ -457,6 +458,9 @@ export function formatLoginVerificationTimingResult(duration = {}) {
       return withReason(`skipped native read (prior: ${state})`);
     case 'skipped-login-flow':
       return withReason(`skipped during login flow (prior: ${state})`);
+    case 'skipped-walled':
+      // The reason is fixed text written by the app, so it is safe to show.
+      return `skipped: the site refuses this check's browser, so it gives no answer (prior: ${state})`;
     case 'error':
       return `error: ${detail || 'recorded'}`;
     default:
@@ -493,6 +497,7 @@ export function buildLoginVerificationTimingMarkdown(run) {
     switch (duration?.outcome) {
       case 'skipped-native': return 'skipped-native';
       case 'skipped-login-flow': return 'skipped-login-flow';
+      case 'skipped-walled': return 'skipped-walled';
       case 'retained-prior': return 'retained-prior';
       case 'error': return 'error';
       case 'verified': return 'verified';
@@ -516,6 +521,7 @@ export function buildLoginVerificationTimingMarkdown(run) {
   const skippedNative = count('skipped-native');
   const skippedLoginFlow = count('skipped-login-flow');
   const skippedLegacy = count('skipped-legacy');
+  const skippedWalled = count('skipped-walled');
   const freshOutcomeParts = [
     `${verified} fresh verdict${verified === 1 ? '' : 's'}`,
     retained ? `${retained} retained prior after inconclusive verify` : null,
@@ -524,6 +530,7 @@ export function buildLoginVerificationTimingMarkdown(run) {
   const skippedOutcomeParts = [
     skippedNative ? `${skippedNative} native-state read${skippedNative === 1 ? '' : 's'}` : null,
     skippedLoginFlow ? `${skippedLoginFlow} login-flow skip${skippedLoginFlow === 1 ? '' : 's'}` : null,
+    skippedWalled ? `${skippedWalled} site refuses the check's browser` : null,
     skippedLegacy ? `${skippedLegacy} legacy generic skip${skippedLegacy === 1 ? '' : 's'}` : null,
   ].filter(Boolean);
   return `
@@ -539,7 +546,7 @@ export function buildLoginVerificationTimingMarkdown(run) {
 - Run started: \`${new Date(run.startedAt).toISOString()}\`
 - Platforms considered: ${considered}${countMismatch}
 - Fresh verifier attempts: ${freshAttempts} — ${freshOutcomeParts.join('; ') || 'no outcome recorded'}
-- Skipped without a verifier navigation: ${skippedNative + skippedLoginFlow + skippedLegacy}${skippedOutcomeParts.length ? ` — ${skippedOutcomeParts.join('; ')}` : ''}
+- Skipped without a verifier navigation: ${skippedNative + skippedLoginFlow + skippedWalled + skippedLegacy}${skippedOutcomeParts.length ? ` — ${skippedOutcomeParts.join('; ')}` : ''}
 - Concurrency pool: ${run.concurrency}
 - **Wall-clock total: ${run.totalMs}ms** (sum of per-platform: ${sumMs}ms — concurrency saved ~${savedMs}ms)
 - Slowest: \`${slowest.platformId}\` at ${slowest.ms}ms
@@ -1180,7 +1187,20 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
         const breakdown = describeBoardMergeInputs(ms);
         previewParts.push(
           `merge: ${ms.modules ?? '?'} mod · ${breakdown} → ${ms.unique ?? '?'} unique ` +
-          `(${ms.duplicatesRemoved ?? '?'} dup, ${ms.collisionUpgrades ?? 0} score-upgrade)`
+          `(${ms.duplicatesRemoved ?? '?'} dup, ${ms.collisionUpgrades ?? 0} score-upgrade)` +
+          // Why the unique count differs from the cards on the Board: later steps remove more.
+          // A counter the saved stats do not carry prints "?", never an observed 0.
+          ` · then ${ms.locationVariantPostingsCollapsed ?? '?'} location-variant collapsed, ` +
+          `${ms.researchRemoved ?? '?'} research-removed, ${ms.overrideRemoved ?? '?'} preference-override removed ` +
+          `(${ms.preferenceFilteredSkipped ?? '?'} preference-filtered skipped before merge) → ` +
+          `${typeof d.resultCount === 'number' ? d.resultCount : '?'} cards`
+        );
+      }
+      if (n.type === 'jobboard') {
+        const savedVersion = Number.isSafeInteger(d.salaryMethodVersion) ? `v${d.salaryMethodVersion}` : 'none';
+        previewParts.push(
+          `salary method: saved ${savedVersion} vs current v${JOB_COMPENSATION_METHOD_VERSION}`
+          + ` · method-version refresh offered: ${d.resultCount !== 0 && d.salaryMethodVersion !== JOB_COMPENSATION_METHOD_VERSION ? 'yes' : 'no'}`,
         );
       }
       // Board cascades are deliberately hidden instead of discarded when their

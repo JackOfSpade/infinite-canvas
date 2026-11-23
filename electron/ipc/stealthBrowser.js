@@ -1294,7 +1294,12 @@ const JOB_LOGIN_PLATFORMS = {
   // catches the redirect). Avoids /profile which Cloudflare challenges on new
   // browser sessions (HTTP 403, not a real auth failure) and caused false
   // "not logged in" verdicts on every app restart after cf_clearance expired.
-  ziprecruiter: { name: 'ZipRecruiter', verifyUrl: 'https://www.ziprecruiter.com/jobseeker/home', connectedFinalUrlMustContain: 'ziprecruiter.com/jobseeker', bodySignals: ['log in to ziprecruiter', 'sign in to ziprecruiter'] },
+  // startupVerify 'skip-walled': from 2026-11-22 07:26Z every logged startup
+  // check of this page was answered HTTP 403 (anti-bot wall) in the headless
+  // stealth browser, on 5 of 5 starts, while the plain scraper browser read
+  // ZipRecruiter normally on the same cookies. The check gave no answer, so
+  // startup skips it (accounts.js). Remove the flag to try the check again.
+  ziprecruiter: { name: 'ZipRecruiter', startupVerify: 'skip-walled', verifyUrl: 'https://www.ziprecruiter.com/jobseeker/home', connectedFinalUrlMustContain: 'ziprecruiter.com/jobseeker', bodySignals: ['log in to ziprecruiter', 'sign in to ziprecruiter'] },
 };
 
 export function getJobLoginPlatforms() {

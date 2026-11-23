@@ -244,6 +244,43 @@ export default [
     },
   },
   {
+    name: 'saved pause: a pause that names another run is refused, logged, and stops nothing',
+    async run() {
+      // 2026-11-23: a crash-resumed Search sent its previous finished run's id.
+      // The refusal is right; it must leave the live run exactly as it was.
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-pause-other-run-'));
+      const canvas = path.join(directory, 'canvas.json');
+      const sender = new EventEmitter(); sender.id = 893; sender.isDestroyed = () => false;
+      const nodeId = 'resumed-hub'; const runId = 'resumed-run';
+      try {
+        ipcMain.__clearInvokeHandlers(); registerJobsHandlers();
+        await fs.promises.writeFile(canvas, '{}');
+        const claimed = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: nodeId,
+          operationId: 'resumed-operation', semanticBase: base('search', { runId }) });
+        await startRun(canvas, { runId, startedAt: Date.now(), nodeId, careerSnapshotId: pin,
+          profileFingerprint: 'b'.repeat(64), sourceIds: ['provider'], operationAuthority: claimed.receipt });
+        const refused = await ipcMain.__getInvokeHandler('pause-job-run-and-cancel')({ sender }, {
+          canvasFilePath: canvas, nodeId, runId: 'previous-finished-run', cause: 'user-stopped',
+          operationAuthority: claimed.receipt,
+        });
+        assert(refused.tokenMismatch && refused.reason === 'ownership-mismatch' && !refused.ok && !refused.settled,
+          'a pause for another run must be refused');
+        assert(refused.runId === runId, 'the refusal names the run this card is really on');
+        const state = await readRunState(canvas, Date.now(), { nodeId });
+        assert(state.manifest.runId === runId && state.manifest.recoveryDisposition !== 'manual',
+          'the live run must not be marked paused by a refused request');
+        assert(await currentJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: nodeId, ...claimed.receipt }),
+          'the live run keeps its write capability');
+        const accepted = await ipcMain.__getInvokeHandler('pause-job-run-and-cancel')({ sender }, {
+          canvasFilePath: canvas, nodeId, runId, cause: 'user-stopped', operationAuthority: claimed.receipt,
+        });
+        assert(accepted.ok && accepted.settled, 'the same pause naming the live run is accepted');
+      } finally {
+        await fs.promises.rm(directory, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'app quit pause: final staged page drains before authority tombstone and every saved listing remains recoverable',
     async run() {
       const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-quit-pause-page-'));

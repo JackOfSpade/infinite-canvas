@@ -205,6 +205,13 @@ export function buildJobsConfigSnapshot() {
 // meanwhile (challengeInputProbe.js). Counts only; a click inside the check's
 // own frame is visible only as focus moving into it.
 function formatChallengeInputEvidence(e) {
+  if (e?.phase === 'challenge-loop') {
+    // The wait ended because the site kept serving its check again.
+    const c = e.inputCounts && typeof e.inputCounts === 'object' ? e.inputCounts : null;
+    const cause = ['refused-after-input', 'refused-earlier-this-hour'].includes(e.closeCause) ? e.closeCause : 'unknown';
+    const counts = c ? ` (clicks ${Number(c.clicks) || 0}, keys ${Number(c.keys) || 0}, into-check focus ${Number(c.frameFocus) || 0}, check page loads ${Number(c.documents) || 0})` : '';
+    return `ended=${cause}${Number(e.refusedAttempts) > 0 ? ` served-again-after-input=${Number(e.refusedAttempts)}` : ''}${typeof e.waitedFor === 'string' ? ` waited=${e.waitedFor.slice(0, 16)}` : ''}${counts}`;
+  }
   if (!e || e.phase !== 'challenge-resolved') return null;
   const c = e.inputCounts && typeof e.inputCounts === 'object' ? e.inputCounts : null;
   const input = typeof e.input === 'string' ? e.input : 'unknown';
@@ -489,20 +496,23 @@ export function buildJobLinkSnapshot(nodes) {
     if (!bySource.has(source)) bySource.set(source, []);
     bySource.get(source).push(row);
   }
-  const lines = [`- Unique job rows inspected: ${rows.length}${omissions.size > 0 ? ' (bounded sample)' : ''}`];
-  if (omissions.size > 0) {
+  const bounded = omissions.size > 0;
+  // A bounded sample can leave a platform out; say the lines below count the sample only.
+  const lines = [`- Unique job rows inspected: ${rows.length}${bounded ? ' (bounded sample)' : ''}`];
+  if (bounded) {
+    lines.push(`- Per-source counts below are rows in sample (${rows.length} retained row(s) in total), so a platform absent here may still be in the data.`);
     lines.push(`- ⚠️ Inspection was bounded; additional payload may be omitted (${[...omissions].sort().join(', ')}).`);
   }
   for (const [source, sourceRows] of [...bySource.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     if (source !== 'google') {
       const missing = sourceRows.filter(row => !String(row.url || '').trim()).length;
-      lines.push(`- \`${source}\`: ${sourceRows.length} total · ${missing} missing public URL`);
+      lines.push(`- \`${source}\`: ${sourceRows.length} ${bounded ? 'in sample' : 'total'} · ${missing} missing public URL`);
       continue;
     }
     const shapes = sourceRows.map(row => ({ row, ...googleLinkShape(row) }));
     const count = field => shapes.filter(shape => shape[field]).length;
     const fallbackCount = shapes.filter(shape => shape.publicMissing && shape.identityFallbackAvailable).length;
-    lines.push(`- \`google\`: ${sourceRows.length} total · ${count('direct')} direct Apply-on URL(s) · ${count('publicInternal')} internal Google route(s) exposed as public · ${count('publicMissing')} missing direct Apply-on URL(s)${fallbackCount ? ` (${fallbackCount} retain a Google identity fallback)` : ''}`);
+    lines.push(`- \`google\`: ${sourceRows.length} ${bounded ? 'in sample' : 'total'} · ${count('direct')} direct Apply-on URL(s) · ${count('publicInternal')} internal Google route(s) exposed as public · ${count('publicMissing')} missing direct Apply-on URL(s)${fallbackCount ? ` (${fallbackCount} retain a Google identity fallback)` : ''}`);
     lines.push(`  - Identity-route health: ${count('legacy')} with \`ibp=htl;jobs\` (Google's current share-route shape, not a defect) · ${count('blankQuery')} blank raw search query (title/company/location are synthesized when fallback opening is needed) · ${count('missingId')} missing htidocid/docid · ${count('webhp')} \`/webhp\` route`);
     // Whether the detail-panel read ran is recorded on each row, so this survives a restart, unlike the per-run counters.
     const applyState = state => shapes.filter(shape => shape.row.applyOptionsState === state).length;
@@ -6612,7 +6622,12 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           // started/throttle shape too so an in-memory report remains readable
           // across a hot update.
           const announced = record?.announcedStatus || record?.startedStatus || 'not announced';
-          const terminal = record?.terminalStatus ? ` → ${record.terminalStatus}` : ' → active/unknown';
+          // No terminal status and no dispatch time is usually a source queued
+          // behind another one. A few paths start a source without recording a
+          // dispatch, so the line says what is recorded, not that it is idle.
+          const terminal = record?.terminalStatus
+            ? ` → ${record.terminalStatus}`
+            : (record?.dispatchedAt ? ' → active/unknown' : ' → no dispatch recorded (queued behind another source, or started on a path that records none)');
           const throttle = record?.throttle || record?.warning;
           const warningText = throttle
             ? ` · ⚠️ ${historyReportValue(throttle.code, 'warning', 80)}/${historyReportValue(throttle.severity, 'unknown', 32)}`

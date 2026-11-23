@@ -270,6 +270,86 @@ export default [
     }
   } },
 
+  { name: 'A huge card whose small field changes is not copied out again; only the changed part is', async run() {
+    // 2026-11-23: a 169 MB Job Search card and the Job Board card holding its
+    // rollback were copied whole on every results page, freezing the window
+    // for 13 seconds each time.
+    const row = (i, tag) => ({ id: `${tag}-${i}`, description: `${tag} `.repeat(2000) });
+    const pool = Array.from({ length: 300 }, (_, i) => row(i, 'pool'));
+    const scored = Array.from({ length: 90 }, (_, i) => row(i, 'scored'));
+    const rollback = { scoredJobs: scored, preferenceCandidatePool: pool, note: 'kept' };
+    const hub = { id: 'hub', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'searching', gatheredCount: 1, scoredJobs: scored, preferenceCandidatePool: pool } };
+    const board = { id: 'board', type: 'jobboard', position: { x: 5, y: 5 }, data: { boardScanResume: { phase: 'searches', activeSourceRollback: rollback, activeSourceRollbacks: { hub: rollback } } } };
+    let data = { nodes: [text('a', 'first'), group('g', { nodes: [hub, board, text('inner', 'x')], edges: [], drawings: [] })], edges: [], drawings: [] };
+    const encoder = createCanvasDeltaEncoder();
+    const store = createCanvasDeltaStore();
+    const bytes = chunks => v8.serialize(chunks).length;
+
+    const first = encoder.encode(data);
+    const firstBytes = bytes(first.chunks);
+    let rebuilt = store.resolve(overIpc({ session: first.session, root: first.root, chunks: first.chunks }));
+    first.settle('saved');
+    assert.equal(JSON.stringify(rebuilt), JSON.stringify(data));
+    assert(first.attached.size >= 3, 'the big values travel as parts of their card');
+    assert(firstBytes < JSON.stringify(data).length * 0.75, 'a value held in several places is sent once');
+    const rebuiltBoard = rebuilt.nodes[1].data.canvasData.nodes[1].data.boardScanResume;
+    assert.equal(rebuiltBoard.activeSourceRollback, rebuiltBoard.activeSourceRollbacks.hub, 'one rollback under two keys is still one object');
+    assert.equal(rebuiltBoard.activeSourceRollback.preferenceCandidatePool, rebuilt.nodes[1].data.canvasData.nodes[0].data.preferenceCandidatePool, 'and it still shares the card\'s own pool');
+
+    // A progress write: the card is replaced, its big values are not.
+    data = { ...data, nodes: replaceAt(data.nodes, ['g', 'hub'], node => ({ ...node, data: { ...node.data, gatheredCount: 2 } })) };
+    const progress = encoder.encode(data);
+    rebuilt = store.resolve(overIpc({ session: progress.session, root: progress.root, chunks: progress.chunks }));
+    progress.settle('saved');
+    assert.equal(JSON.stringify(rebuilt), JSON.stringify(data));
+    assert(bytes(progress.chunks) * 50 < firstBytes, `a progress write copied ${bytes(progress.chunks)} bytes against ${firstBytes}`);
+
+    // A Board plan write: the plan object is new, the rollback inside it is not.
+    data = { ...data, nodes: replaceAt(data.nodes, ['g', 'board'], node => ({ ...node, data: { ...node.data, boardScanResume: { ...node.data.boardScanResume, pausedByUser: true } } })) };
+    const plan = encoder.encode(data);
+    rebuilt = store.resolve(overIpc({ session: plan.session, root: plan.root, chunks: plan.chunks }));
+    plan.settle('saved');
+    assert.equal(JSON.stringify(rebuilt), JSON.stringify(data));
+    assert(bytes(plan.chunks) * 50 < firstBytes, `a plan write copied ${bytes(plan.chunks)} bytes against ${firstBytes}`);
+
+    // One big value replaced: it alone is sent again.
+    const newScored = scored.map(job => ({ ...job, score: 1 }));
+    data = { ...data, nodes: replaceAt(data.nodes, ['g', 'hub'], node => ({ ...node, data: { ...node.data, scoredJobs: newScored } })) };
+    const rescored = encoder.encode(data);
+    rebuilt = store.resolve(overIpc({ session: rescored.session, root: rescored.root, chunks: rescored.chunks }));
+    rescored.settle('saved');
+    assert.equal(JSON.stringify(rebuilt), JSON.stringify(data));
+    assert(bytes(rescored.chunks) < firstBytes * 0.45, 'the pool was not sent again');
+
+    // The sender never cuts a batch between a part and the card it belongs to.
+    const calls = [];
+    const senderStore = createCanvasDeltaStore();
+    const many = { nodes: [...Array.from({ length: 40 }, (_, i) => text(`t${i}`, 'x')), hub, board], edges: [], drawings: [] };
+    const reply = await createAutosaveSender()({
+      api: {
+        stageWorkspaceChunks: async (request) => { calls.push(request.chunks); return { success: senderStore.stage(overIpc(request)) }; },
+        saveWorkspace: async (request) => { calls.push(request.canvas.chunks); return { success: true, rebuilt: senderStore.resolve(overIpc(request.canvas)) }; },
+      },
+      data: many,
+      filePath: '/tmp/x.json',
+    });
+    assert.equal(JSON.stringify(reply.rebuilt), JSON.stringify(many));
+    assert(calls.length >= 3, 'a large first save still goes over in several calls');
+    const sharedAcrossCalls = reply.rebuilt.nodes[41].data.boardScanResume.activeSourceRollback.preferenceCandidatePool === reply.rebuilt.nodes[40].data.preferenceCandidatePool;
+    assert.equal(sharedAcrossCalls, true, 'a part first sent with one card is named, not copied, by the next');
+  } },
+
+  { name: 'A part record the app process cannot place makes the save ask for the whole canvas', run() {
+    const store = createCanvasDeltaStore();
+    const base = { session: 's1', root: { value: { nodes: 0, edges: [], drawings: [] }, refs: { nodes: ['k1'] } } };
+    assert.equal(store.resolve({ ...base, chunks: [['k1', { id: 'n', data: 0 }, { parts: [['data', 'k9']] }]] }), null, 'missing part');
+    assert.equal(createCanvasDeltaStore().resolve({ ...base, chunks: [['k1', { id: 'n', data: 0 }, { parts: [['__proto__', 'k2']] }], ['k2', { a: 1 }]] }), null, 'unsafe name');
+    assert.equal(createCanvasDeltaStore().resolve({ ...base, chunks: [['k1', { id: 'n', data: 0 }, { parts: [['data', 'k2', 'extra']] }], ['k2', { a: 1 }]] }), null, 'malformed pair');
+    assert.equal(createCanvasDeltaStore().resolve({ ...base, chunks: [['k1', { id: 'n', data: 0 }, { parts: [[0, 'k2']] }], ['k2', { a: 1 }]] }), null, 'an index names an array slot only');
+    const ok = createCanvasDeltaStore().resolve({ ...base, chunks: [['k2', { a: 1 }], ['k1', { id: 'n', data: 0 }, { parts: [['data', 'k2']] }]] });
+    assert.deepEqual(ok.nodes, [{ id: 'n', data: { a: 1 } }]);
+  } },
+
   { name: 'On a 1,159-node workspace an auto-save copies out only the changed cards', run() {
     // Same node count as the 2026-11-16 report at a tenth of its size, so the
     // suite stays quick. scripts/bench-autosave-handoff.mjs runs the full size.
@@ -285,5 +365,36 @@ export default [
     assert.equal(changed.chunks, 4, 'three cards and the group that holds them');
     assert(changed.bytes * 100 < whole.bytes, `changed-node save copied ${changed.bytes} bytes against ${whole.bytes}`);
     assert(changed.gatherMs + changed.handoffMs < 150, `window blocked ${(changed.gatherMs + changed.handoffMs).toFixed(1)} ms`);
+  } },
+
+  { name: 'The auto-save reports how much it sent: counts and one fixed type word', async run() {
+    const big = 'x'.repeat(1_100_000);
+    const hub = (pool, extra = {}) => ({ id: 'hub', type: 'jobhub', position: { x: 0, y: 0 }, data: { preferenceCandidatePool: pool, ...extra } });
+    const api = {
+      stageWorkspaceChunks: async () => ({ success: true }),
+      saveWorkspace: async args => ({ success: true, filePath: args.filePath }),
+    };
+    const send = createAutosaveSender();
+    const sents = [];
+    const data = { nodes: [hub([{ t: big }]), text('a', 'note')], edges: [], drawings: [], schemaVersion: 12 };
+    await send({ api, data, filePath: '/w/c.json', onSent: sent => sents.push(sent) });
+    assert.deepEqual(sents[0], { records: 7, parts: 3, calls: 1, largest: 'jobhub' }, 'the card, its three nested big values, and the unchanged-shape small records, in one call');
+
+    // A small field changed on the heavy card: its big pool value is not sent again.
+    const next = { ...data, nodes: [hub([{ t: big }].slice(), { label: 'x' }), data.nodes[1]] };
+    next.nodes[0].data.preferenceCandidatePool = data.nodes[0].data.preferenceCandidatePool;
+    await send({ api, data: next, filePath: '/w/c.json', onSent: sent => sents.push(sent) });
+    assert.deepEqual(sents[1], { records: 2, parts: 1, calls: 1, largest: 'jobhub' }, 'the card and its changed data part only');
+
+    // An unknown type prints as "other"; the type string itself never travels.
+    await createAutosaveSender()({ api, data: { nodes: [{ id: 'z', type: 'secret-title', data: {} }], edges: [], drawings: [] }, filePath: '/w/c.json', onSent: sent => sents.push(sent) });
+    assert.equal(sents[2].largest, 'other');
+
+    // The whole-canvas fallback says so; a throwing save still reports.
+    await createAutosaveSender()({ api: { saveWorkspace: async () => ({ success: true }) }, data, filePath: '/w/c.json', onSent: sent => sents.push(sent) });
+    assert.deepEqual(sents[3], { records: 0, parts: 0, calls: 1, whole: true });
+    await assert.rejects(createAutosaveSender()({ api: { ...api, saveWorkspace: async () => { throw new Error('boom'); } }, data, filePath: '/w/c.json', onSent: sent => sents.push(sent) }));
+    assert.equal(sents.length, 5);
+    assert.equal(sents[4].calls, 1);
   } },
 ];

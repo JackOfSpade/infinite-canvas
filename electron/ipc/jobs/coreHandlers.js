@@ -919,6 +919,10 @@ Return a JSON object with four arrays of search query strings:
         ? runId.trim()
         : discoveredRunId;
       if (expectedRunId !== discoveredRunId) {
+        // Nothing was marked paused; outside a quit nothing was stopped either
+        // (a quit drains this card's tasks above). Without this line the only trace of a
+        // refused pause was in the window's own event log.
+        logger.warn(`[Jobs] saved_pause outcome=refused reason=ownership-mismatch cause=${appQuitPause ? 'app-quit' : 'user'} (the window named a different run than this card's saved run; ${appQuitPause ? 'this card\'s tasks were already stopped for quit, but its saved run was not marked paused' : 'the search was left running'})`);
         return {
           ok: false,
           paused: false,

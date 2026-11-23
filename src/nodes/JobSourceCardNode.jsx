@@ -2180,7 +2180,9 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
                 : progress?.warning?.retryLabel
                   // Say what the wait is for: a hard block has no control to
                   // act on, and retrying it immediately is what looped before.
-                  ? 'This source is still inside its hard-block wait — there is nothing to solve yet. Retrying too soon usually gets blocked again. Skip continues without this source.'
+                  ? (progress?.warning?.refusedSolvedChecks === true
+                    ? 'This site kept serving its check after it was solved. Retrying before the wait ends is refused again and restarts the wait. Skip continues now with the listings already collected.'
+                    : 'This source is still inside its hard-block wait — there is nothing to solve yet. Retrying too soon usually gets blocked again. Skip continues without this source.')
                 : progress?.warning?.actionTitle
                   ? progress.warning.actionTitle
                   : progress?.warning?.resumeState?.mode === 'native-challenge'

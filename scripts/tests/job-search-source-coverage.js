@@ -18,6 +18,7 @@ import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import {
   __resetJobsTelemetryForTests,
   getJobsTelemetry,
+  recordJobSourceProgress,
   recordRunCompletedWithUnfinishedSources,
 } from '../../electron/ipc/jobs.js';
 import {
@@ -724,6 +725,23 @@ export default [
       const popup = node.slice(node.indexOf('title: `Scan date did not move: '), node.indexOf('dedupeKey: `job-scan-date-stalled:'));
       assert(popup.includes("type: 'error'") && popup.includes('duration: 0'),
         'the warning uses the error popup that stays until dismissed');
+    },
+  },
+  {
+    name: 'A selected source stays pending until it reports a terminal status',
+    run() {
+      __resetJobsTelemetryForTests();
+      try {
+        const telemetry = getJobsTelemetry();
+        telemetry.nodeId = 'hub';
+        telemetry.pipeline = { phase: 'searching', runId: 'run-1', active: true, pendingSources: ['indeed', 'ziprecruiter', 'glassdoor'] };
+        recordJobSourceProgress({ sourceId: 'indeed', status: 'searching', jobRunId: 'run-1' });
+        assert([...getJobsTelemetry().pipeline.pendingSources].sort().join() === 'glassdoor,indeed,ziprecruiter',
+          'a queued source does not drop out when another reports');
+        recordJobSourceProgress({ sourceId: 'indeed', status: 'done', jobRunId: 'run-1' });
+        assert([...getJobsTelemetry().pipeline.pendingSources].sort().join() === 'glassdoor,ziprecruiter',
+          'a terminal event removes only that source');
+      } finally { __resetJobsTelemetryForTests(); }
     },
   },
   {

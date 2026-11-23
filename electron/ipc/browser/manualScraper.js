@@ -35,6 +35,7 @@ export {
   notePaceListPage,
   notePaceChallengeStart,
   notePaceChallengeEnd,
+  notePaceChallengeProgress,
   notePacePanelInterrupt,
   formatScrapePaceLine,
   isIgnorableManualBrowserTelemetry,
@@ -176,6 +177,10 @@ import {
 } from './manualScraper/scrapeBrowser.js';
 import { createBackgroundScrapePage } from './backgroundScrapeBrowser.js';
 import {
+  CHALLENGE_LOOP_MAX_ATTEMPTS,
+  CHALLENGE_LOOP_MEMORY_MS,
+  resetChallengeLoopMemory,
+  sourceRefusedSolvedChecks,
   waitForReady,
 } from './manualScraper/pageReadiness.js';
 export {
@@ -189,6 +194,9 @@ export {
   waitForReady,
   challengeHeartbeatIntervalMs,
   resolveManualDetailChallengeDisposition,
+  CHALLENGE_LOOP_MAX_ATTEMPTS,
+  resetChallengeLoopMemory,
+  sourceRefusedSolvedChecks,
 } from './manualScraper/pageReadiness.js';
 import {
 } from './manualScraper/googleApply.js';
@@ -853,6 +861,8 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         sourceTotal: displayTotal,
         queryTotal: sourceTasks.length,
       });
+      // A new run of this source may show its checks to the person again.
+      resetChallengeLoopMemory(sourceId);
       // Fresh pace record for THIS source run (diagnostics only, fail-soft).
       resetScrapePace(sourceId, {
         srcName,
@@ -2105,6 +2115,26 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             earlyExit = true;
             break;
           }
+          // The site kept serving its check again after solved attempts while
+          // listings were being opened. Walking on would open no further
+          // listing (each new check is skipped for the rest of this run), yet
+          // would finish the platform as complete: 24-hour cooldown, the
+          // remaining queries never searched. End the platform as blocked
+          // instead. This page's rows are already saved above; the platform
+          // stays due and its unfinished queries are resumed by the next run.
+          if (sourceRefusedSolvedChecks(sourceId)) {
+            if (!sourceSiteChangedWarning || sourceSiteChangedWarning.severity !== 'block') {
+              sourceSiteChangedWarning = {
+                code:       'session-blocked',
+                severity:   'block',
+                url:        task.url,
+                evidence:   `${srcName} kept serving its verification check while listings were being opened.`,
+                suggestion: `Run ${srcName} again later.`,
+              };
+            }
+            sourceSkipped = true;
+            break;
+          }
           // A partial detail page is actionable but does not invalidate a relevant
           // list row. Preserve the row, continue the source, and surface this as a
           // warning in the result rather than converting it into a clean finish.
@@ -2655,7 +2685,21 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         // strand otherwise usable rows in sources-ready, but it must remain
         // visible/actionable after source cards are reaped. A concrete block
         // warning from the retry still wins this informational outcome.
-        warning:     sourceSiteChangedWarning || providerTotalShortfallWarning || null,
+        // Every list caller files a wait that ended as 'skip' under
+        // 'session-blocked'. When the wait ended because the site kept serving
+        // its check again after solved attempts, say that and when to retry.
+        warning:     (sourceSiteChangedWarning?.code === 'session-blocked' && sourceRefusedSolvedChecks(sourceId)
+          ? {
+            ...sourceSiteChangedWarning,
+            evidence: `${srcName} served its verification check again after ${CHALLENGE_LOOP_MAX_ATTEMPTS} solved attempts, so it could not be passed from the scraper's browser. Every listing collected before that was kept and the rest of this source was skipped.`,
+            suggestion: `The site's refusal usually clears within about an hour of the last attempt. Retry unlocks after that wait; Skip continues now with the listings already collected, and the next search resumes ${srcName} at its unfinished queries.`,
+            // An earlier retry is refused again and renews the site's refusal,
+            // so the card counts this wait down before it offers Retry.
+            refusedSolvedChecks: true,
+            shortLabel: 'Wait, then retry',
+            retryAfterAt: Date.now() + CHALLENGE_LOOP_MEMORY_MS,
+          }
+          : sourceSiteChangedWarning) || providerTotalShortfallWarning || null,
         // A detail block does not stop the walk, so `stopReason` legitimately
         // stays `completed` — but the rows it produced carry no description and
         // are dropped by the scoring-evidence gate. Report it as its own fact

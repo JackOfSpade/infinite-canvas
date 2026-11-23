@@ -754,9 +754,18 @@ export function recordJobSourceProgress(payload = {}, { updatePipeline = true, e
   }
 
   if (updatePipeline) {
+    // A selected source that has not announced yet stays pending until it
+    // reports a terminal status; rebuilding from 'searching' events alone
+    // dropped queued sources as soon as another source reported.
+    const isTerminal = status => status === 'done' || status === 'error' || status === 'skipped';
     const pendingSources = Object.entries(jobsTelemetry.sourceEvents)
       .filter(([, events]) => events?.at(-1)?.status === 'searching')
       .map(([sourceId]) => sourceId);
+    const previousPending = Array.isArray(jobsTelemetry.pipeline?.pendingSources) ? jobsTelemetry.pipeline.pendingSources : [];
+    for (const sourceId of previousPending) {
+      if (pendingSources.includes(sourceId)) continue;
+      if (!isTerminal(jobsTelemetry.sourceEvents[sourceId]?.at(-1)?.status)) pendingSources.push(sourceId);
+    }
     jobsTelemetry.pipeline = {
       ...(jobsTelemetry.pipeline || {}),
       ts: Date.now(),

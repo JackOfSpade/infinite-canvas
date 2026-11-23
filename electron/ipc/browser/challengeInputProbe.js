@@ -15,6 +15,13 @@
 // The site may reload the page while the check is open (a solve usually ends in
 // a redirect), which wipes the page's counters; each document gets its own id
 // and the counts are summed across documents on the Node side.
+//
+// It also counts refused attempts. When a document that received a click or key
+// is replaced by another document, and the wait then reads the new one as still
+// a check, the site took the person's input and served the check again. The
+// wait uses that count to stop asking a person to solve a check the site will
+// not let them pass. A reload with no input before it (Cloudflare refreshes its
+// own page every few minutes) is never counted.
 
 // Installs once per document, then returns that document's counts. Pure reads
 // and passive listeners: it never changes the page or any event.
@@ -24,7 +31,9 @@ export const CHALLENGE_INPUT_PROBE_SOURCE = `(() => {
     const s = { id: Math.random().toString(36).slice(2) + Date.now().toString(36), clicks: 0, keys: 0, moves: 0, frameFocus: 0 };
     w.__icChallengeInput = s;
     const opts = { capture: true, passive: true };
-    w.addEventListener('pointerdown', e => { if (e.isTrusted) s.clicks += 1; }, opts);
+    // A click on the scraper's own panel (its Pause button) is not an attempt at the check.
+    const onPanel = e => { try { return !!(e.target && e.target.closest && e.target.closest('#__ic-panel')); } catch { return false; } };
+    w.addEventListener('pointerdown', e => { if (e.isTrusted && !onPanel(e)) s.clicks += 1; }, opts);
     w.addEventListener('keydown', e => { if (e.isTrusted) s.keys += 1; }, opts);
     w.addEventListener('pointermove', e => { if (e.isTrusted) s.moves += 1; }, opts);
     w.addEventListener('blur', e => {
@@ -38,16 +47,25 @@ export const CHALLENGE_INPUT_PROBE_SOURCE = `(() => {
 
 const FIELDS = ['clicks', 'keys', 'moves', 'frameFocus'];
 
+// How long a check page that replaced a clicked one must stay an unsolved check
+// before the click counts as refused. The same length the wait gives a solved
+// check's own transition (CHALLENGE_TERMINAL_TRANSITION_GRACE_MS).
+export const REFUSAL_SETTLE_MS = 10_000;
+
 /**
  * One probe per open check. poll() after each wait-loop read; summary() when it
  * ends. Every failure is swallowed: diagnostics must never break a scrape.
  */
-export function createChallengeInputProbe(page, { now = () => Date.now() } = {}) {
+export function createChallengeInputProbe(page, { now = () => Date.now(), refusalSettleMs = REFUSAL_SETTLE_MS } = {}) {
   const perDocument = new Map();
   const startedAt = now();
   let polls = 0;
   let failedPolls = 0;
   let firstInputAt = null;
+  let currentDocumentId = null;
+  let replacedAfterInputAt = null; // when a document that had input was seen replaced
+  let failedAttempts = 0;
+  const attempted = counts => !!counts && counts.clicks + counts.keys + counts.frameFocus > 0;
   return {
     async poll() {
       polls += 1;
@@ -55,6 +73,11 @@ export function createChallengeInputProbe(page, { now = () => Date.now() } = {})
         const counts = await page.evaluate(CHALLENGE_INPUT_PROBE_SOURCE);
         if (!counts || typeof counts.id !== 'string') { failedPolls += 1; return; }
         const before = perDocument.get(counts.id);
+        if (currentDocumentId !== null && counts.id !== currentDocumentId
+          && attempted(perDocument.get(currentDocumentId))) {
+          replacedAfterInputAt = now();
+        }
+        currentDocumentId = counts.id;
         const next = Object.fromEntries(FIELDS.map(field => [field, Math.max(0, Number(counts[field]) || 0)]));
         perDocument.set(counts.id, next);
         const gained = !before ? next.clicks + next.keys + next.frameFocus > 0
@@ -64,12 +87,30 @@ export function createChallengeInputProbe(page, { now = () => Date.now() } = {})
         failedPolls += 1;
       }
     },
+    /**
+     * Call once per wait-loop turn in which the page was read as an UNSOLVED
+     * check, after poll(). Returns the refused attempts so far. A replacement
+     * is counted only once the new document has stayed an unsolved check for
+     * REFUSAL_SETTLE_MS: a correct solve also replaces the document, and its
+     * redirect can pass through a check-looking page for a few seconds.
+     */
+    confirmStillChallenged() {
+      if (replacedAfterInputAt !== null && now() - replacedAfterInputAt >= refusalSettleMs) {
+        failedAttempts += 1;
+        replacedAfterInputAt = null;
+      }
+      return failedAttempts;
+    },
+    /** The page left the check, or says it was solved: the replacement was the solve itself. */
+    noteCleanRead() { replacedAfterInputAt = null; },
+    documentId: () => currentDocumentId,
     summary() {
       const totals = { clicks: 0, keys: 0, moves: 0, frameFocus: 0 };
       for (const counts of perDocument.values()) for (const field of FIELDS) totals[field] += counts[field];
       return {
         ...totals,
         documents: perDocument.size,
+        failedAttempts,
         polls,
         failedPolls,
         firstInputAfterMs: firstInputAt === null ? null : Math.max(0, firstInputAt - startedAt),

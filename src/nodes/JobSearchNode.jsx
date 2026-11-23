@@ -1352,6 +1352,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // resume scoring before React commits the paused node data.
   const gatheredCountRef = useRef(data.gatheredCount ?? 0);
   const jobRunIdRef = useRef(data.jobRunId || null);
+  const lastCommittedJobRunIdRef = useRef(data.jobRunId || null);
   // An explicit career-file clear is a durable recovery boundary. Keep the
   // current watermark in a ref too: a peekJobRun request already in flight
   // when the person clears can then retire its stale result before React has
@@ -2127,7 +2128,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // failure fixtures-canvas.js guards for. Every path that must clear the
     // token (resetHandler, handleRerun, handleClearCareerFiles, runPipeline's
     // start) assigns this ref explicitly, so nothing relies on it clearing here.
-    if (data.jobRunId) jobRunIdRef.current = data.jobRunId;
+    //
+    // Nor may it replace a live token with a committed one that did not change.
+    // A crash-recovery resume sets this ref to the resumed run while node data
+    // still names the previous finished run until the resume completes. This
+    // effect re-runs on every progress write, so it put the old id back, and
+    // Pause & save then sent it: the app process refused the pause as an
+    // ownership mismatch and the search kept running (2026-11-23).
+    const committedRunId = data.jobRunId || null;
+    const committedRunIdChanged = committedRunId !== lastCommittedJobRunIdRef.current;
+    lastCommittedJobRunIdRef.current = committedRunId;
+    if (committedRunId && (committedRunIdChanged || !jobRunIdRef.current)) jobRunIdRef.current = committedRunId;
   }, [data.scrapeWarnings, data.hubState, data.pendingJobs, data.gatheredCount, data.jobRunId]);
 
   useEffect(() => {
@@ -8933,7 +8944,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         if (acknowledgement?.settled !== true) {
           const reason = acknowledgement?.operationAuthorityMismatch ? 'operation-authority-mismatch'
             : acknowledgement?.reason || 'stop-not-settled';
-          EventLogger.log(`[JobSearch][${id}] Pause & save backend refused reason=${reason}`);
+          EventLogger.log(`[JobSearch][${id}] Pause & save backend refused reason=${reason}`
+            + (acknowledgement?.tokenMismatch
+              ? ` sent-run=${jobRunIdRef.current ? 'held' : 'none'} sent-is-committed-run=${jobRunIdRef.current && jobRunIdRef.current === lastCommittedJobRunIdRef.current ? 'yes' : 'no'} backend-run=${acknowledgement?.runId ? (acknowledgement.runId === jobRunIdRef.current ? 'same' : 'different') : 'not-returned'}`
+              : ''));
           throw new Error(acknowledgement?.operationAuthorityMismatch
             ? 'The saved recovery receipt changed. Your saved jobs were kept; resume from the Job Board after updating the app.'
             : acknowledgement?.tokenMismatch

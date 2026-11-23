@@ -221,7 +221,7 @@ export default [
         const noop = () => {};
         const pauseBoard = runInNewContext(`(${board.slice(boardStart, boardEnd)})`, {
           id: 'board', data: {}, canvasFilePath: null, getNode: () => ({ data: live }), jobWorkflowNeedsQuitPause,
-          scanRunRef: ref(null), scanPreflightRef: ref(null), combineRunRef: ref(busy ? Symbol('combine') : null),
+          scanRunRef: ref(null), scanPreflightRef: ref(null), boardPauseAttemptRef: ref(0), pauseRefusalMessageRef: ref(null), combineRunRef: ref(busy ? Symbol('combine') : null),
           combineRecoveryTokenClaimRef: ref(null), activeCombineManualAiRunRef: ref(busy ? { runId: 'accepted-run', startedAt: 1 } : null),
           activeSearchModuleIdRef: ref(null), activeSearchModuleIdsRef: ref(new Set()),
           combineInputSignaturesRef: ref(new Map()), combineSourceRunsRef: ref(new Map()), compensationRequestIdRef: ref(null),

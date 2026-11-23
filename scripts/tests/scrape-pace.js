@@ -4,6 +4,7 @@ import {
   formatScrapePaceLine,
   getManualScraperTelemetry,
   notePaceChallengeEnd,
+  notePaceChallengeProgress,
   notePaceChallengeStart,
   notePaceDetailOpened,
   notePaceListPage,
@@ -12,6 +13,8 @@ import {
   recordManualScraperTelemetry,
   resetManualScraperTelemetry,
   resetScrapePace,
+  resetChallengeLoopMemory,
+  sourceRefusedSolvedChecks,
   waitForReady,
 } from '../../electron/ipc/browser/manualScraper.js';
 import { buildJobsPipelineSnapshot, renderScrapePaceLines } from '../../electron/ipc/bugReport/jobsSnapshot.js';
@@ -233,6 +236,95 @@ export default [{
     assert.match(describeChallengeInput(broken.summary()), /unknown/);
   },
 }, {
+  name: 'a check the site serves again after each click is counted as refused, and a reload nobody clicked is not',
+  async run() {
+    const doc = (id, clicks = 0) => ({ id, clicks, keys: 0, moves: 0, frameFocus: 0 });
+    // Cloudflare reloads its own page every few minutes: no input, no count.
+    const idle = [doc('a'), doc('b'), doc('b'), doc('c'), doc('c')];
+    const untouched = createChallengeInputProbe({ evaluate: async () => idle.shift() });
+    for (let i = 0; i < 5; i++) { await untouched.poll(); untouched.confirmStillChallenged(); }
+    assert.equal(untouched.summary().failedAttempts, 0);
+    assert.equal(untouched.summary().documents, 3);
+
+    // Click, new document, and the new one stays an unsolved check: one refusal,
+    // counted only once it has stood for the settle time.
+    let t = 0;
+    const reads = [doc('a'), doc('a', 1), doc('b'), doc('b'), doc('b'), doc('b', 2), doc('c'), doc('c')];
+    const probe = createChallengeInputProbe({ evaluate: async () => reads.shift() }, { now: () => t, refusalSettleMs: 10_000 });
+    const seen = [];
+    for (const at of [0, 1_000, 2_000, 8_000, 12_000, 13_000, 14_000, 24_000]) { t = at; await probe.poll(); seen.push(probe.confirmStillChallenged()); }
+    assert.deepEqual(seen, [0, 0, 0, 0, 1, 1, 1, 2], 'counted after the new check page has stood 10 s, not on the next read');
+    assert.equal(probe.documentId(), 'c');
+
+    // A click followed by a redirect that looks like a check for a few seconds,
+    // then the real page: the solve, not a refusal.
+    t = 0;
+    const solved = [doc('a', 1), doc('b'), doc('b')];
+    const passing = createChallengeInputProbe({ evaluate: async () => solved.shift() }, { now: () => t, refusalSettleMs: 10_000 });
+    await passing.poll(); passing.confirmStillChallenged();
+    t = 1_000; await passing.poll(); assert.equal(passing.confirmStillChallenged(), 0);
+    t = 4_000; await passing.poll(); assert.equal(passing.confirmStillChallenged(), 0, 'a slow redirect is not a refusal');
+    passing.noteCleanRead();
+    t = 60_000;
+    assert.equal(passing.confirmStillChallenged(), 0, 'and it is not counted later either');
+  },
+}, {
+  name: 'the verification wait ends, keeping the source, once the site has served its check again after three solved attempts',
+  async run() {
+    startPace();
+    resetChallengeLoopMemory();
+    const challenge = {
+      isChallenge: true, isHardBlock: false, reason: 'just-a-moment-title',
+      url: 'https://example.test/job', title: 'Just a moment...', bodyHead: '',
+      bodyTextLength: 300, matchedVerificationMarkers: [], hasNormalContent: false,
+    };
+    // Each probe read is one wait-loop turn: a click lands, the site loads its check again.
+    const docs = ['a', 'a', 'b', 'b', 'c', 'c', 'd', 'd', 'd'];
+    let turn = 0;
+    const painted = [];
+    const page = {
+      evaluate: async (script, ...args) => {
+        if (typeof script === 'string' && script.includes('__icChallengeInput')) {
+          const id = docs[Math.min(turn, docs.length - 1)];
+          const clicked = turn % 2 === 1 || turn >= docs.length;
+          turn += 1;
+          return { id, clicks: clicked ? 1 : 0, keys: 0, moves: 0, frameFocus: 0 };
+        }
+        const state = args.find(arg => arg && typeof arg === 'object' && typeof arg.status === 'string');
+        if (state) { painted.push(state); return undefined; }
+        return challenge;
+      },
+      url: () => 'https://example.test/job', isClosed: () => false, mouse: {}, on() {}, off() {}, frames: () => [], mainFrame: () => ({}),
+    };
+    const outcome = await waitForReady(page, SOURCE, { srcName: 'ZipRecruiter', count: 568 }, { aborted: false }, null, { challengeOnly: true, refusalSettleMs: 0 });
+    assert.equal(outcome, 'skip', 'every caller already treats skip as "stop this source and keep its jobs"');
+    assert.equal(paceOf().openChallengeSince, null, 'the check is closed in the pace record');
+    assert.equal(sourceRefusedSolvedChecks(SOURCE), true);
+    const loop = getManualScraperTelemetry().events.find(e => e.phase === 'challenge-loop');
+    assert.equal(loop.closeCause, 'refused-after-input');
+    assert.equal(loop.refusedAttempts, 3);
+    assert(painted.some(state => /served its check again after your click \(1 of 3 tries\)/u.test(state.status) && state.count === 568), 'the reloaded check page is told what happened, with the count');
+    assert.match(JSON.stringify(report()), /challenge-loop ZipRecruiter.*ended=refused-after-input served-again-after-input=3/u);
+
+    // The next check from the same source is not put in front of the person again.
+    const again = await waitForReady(page, SOURCE, { srcName: 'ZipRecruiter' }, { aborted: false });
+    assert.equal(again, 'skip');
+    resetChallengeLoopMemory();
+    assert.equal(sourceRefusedSolvedChecks(SOURCE), false);
+  },
+}, {
+  name: 'a report written during an open check says what input the page has seen so far',
+  run() {
+    startPace();
+    notePaceChallengeStart(SOURCE, { srcName: 'ZipRecruiter', challengeOnly: true, now: 1_000 });
+    assert.match(formatScrapePaceLine(paceOf(), 61_000), /\(check still open\)/u);
+    notePaceChallengeProgress(SOURCE, { srcName: 'ZipRecruiter', counts: { clicks: 4, keys: 0, frameFocus: 0, documents: 5, failedAttempts: 2 } });
+    assert.match(formatScrapePaceLine(paceOf(), 61_000), /check still open: 4 click\(s\), 0 key press\(es\), 0 into-check focus, check page loaded 5 time\(s\), served again after input 2 time\(s\)/u);
+    notePaceChallengeEnd(SOURCE, { srcName: 'ZipRecruiter', now: 90_000, input: 'input' });
+    assert.equal(paceOf().openChallenge, null);
+    assert.doesNotMatch(formatScrapePaceLine(paceOf(), 95_000), /check still open/u);
+  },
+}, {
   name: 'pace line and bug report say how each finished check ended',
   run() {
     startPace();
@@ -270,5 +362,21 @@ export default [{
     recordChallengeDetectedTelemetry({ phase: 'challenge-detected', srcName: 'ZipRecruiter' }, Promise.reject(new Error('offline')));
     await new Promise((r) => setImmediate(r));
     assert.equal(getManualScraperTelemetry().events.find((e) => e.phase === 'challenge-detected').egressIp, null);
+  },
+}, {
+  name: 'a platform that refused solved checks while listings were opened ends as blocked, not complete',
+  async run() {
+    // Source-text pin: the walk needs a live browser, so this checks the rule
+    // is in the per-page loop and placed after the page's rows are saved.
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(new URL('../../electron/ipc/browser/manualScraper.js', import.meta.url), 'utf8');
+    const saved = source.indexOf('if (onPageJobs) await onPageJobs({ sourceId, query: task.query');
+    const rule = source.indexOf('if (sourceRefusedSolvedChecks(sourceId)) {', saved);
+    const partial = source.indexOf('if (descWarning) {', saved);
+    assert(saved !== -1 && rule > saved && partial > rule, 'the refused-check rule runs after the page is saved and before a partial-detail warning');
+    const body = source.slice(rule, partial);
+    assert.match(body, /code:\s+'session-blocked'/u);
+    assert.match(body, /severity:\s+'block'/u);
+    assert.match(body, /sourceSkipped = true;\s+break;/u);
   },
 }];

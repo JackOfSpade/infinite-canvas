@@ -58,12 +58,15 @@ import {
   CHALLENGE_ACTIVITY_BEAT_MS,
   CHALLENGE_ESCALATE_MS,
   CHALLENGE_INTERSTITIAL_MAX_CHARS,
+  CHALLENGE_LOOP_MAX_ATTEMPTS,
   challengeHeartbeatIntervalMs,
   detectChallengePage,
   formatChallengeEvidence,
   getChallengeSignals,
   recoverFromChallengeHomeLanding,
   resolveManualDetailChallengeDisposition,
+  noteSourceRefusedSolvedChecks,
+  sourceRefusedSolvedChecks,
   waitForReady,
 } from './pageReadiness.js';
 import { challengeInputVerdict, createChallengeInputProbe, describeChallengeInput } from '../challengeInputProbe.js';
@@ -792,7 +795,9 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
               detailWaitResult = await waitForReady(
                 detailPage,
                 sourceId,
-                overlayBase,
+                // The count rides along so a check page the site loads again
+                // is repainted with it instead of a bare "0 jobs collected".
+                { ...overlayBase, count: baseCount + i + 1 },
                 signal,
                 viewUrl,
                 {
@@ -869,6 +874,9 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
             if (!detailChallengeResolved) {
               const hardBlock = detailChallengeAction === 'terminal-stop' || detailWaitResult === 'hard-block';
               const detailTabDetached = detailWaitResult === 'page-detached';
+              // The wait ended because the site kept serving its check again
+              // after it was solved (pageReadiness CHALLENGE_LOOP_MAX_ATTEMPTS).
+              const checkRefused = detailWaitResult === 'skip' && sourceRefusedSolvedChecks(sourceId);
               logger.warn(`[BrowserScraper] ${overlayBase.srcName}: detail enrichment ${hardBlock ? 'hard-blocked' : detailTabDetached ? 'stopped: the detail tab stopped responding during the check wait' : 'remained session-blocked'}; retaining list rows and stopping detail pass (${evidence})`);
               recordManualScraperTelemetry({
                 phase: 'desc-miss', srcName: overlayBase.srcName,
@@ -892,12 +900,16 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
                   ? `${overlayBase.srcName} returned a non-interactive human-verification hard block while fetching "${job.title || 'an untitled listing'}" (${challengeSignals?.title || 'untitled page'} at ${challengeSignals?.url || fetchPage.url()}). Detail requests stopped immediately.`
                   : detailTabDetached
                     ? `The ${overlayBase.srcName} detail tab stopped responding to the scraper while it waited on a check for "${job.title || 'an untitled listing'}". Relevant listing rows were retained, but this and later rows may lack full descriptions.`
-                    : `${overlayBase.srcName} re-served a verification challenge while fetching "${job.title || 'an untitled listing'}" after the detail tab was presented for solving. Relevant listing rows were retained, but this and later rows may lack full descriptions.`,
+                    : checkRefused
+                      ? `${overlayBase.srcName} served its verification check again after ${CHALLENGE_LOOP_MAX_ATTEMPTS} solved attempts while fetching "${job.title || 'an untitled listing'}", so it could not be passed from the scraper's browser. Every listing collected so far was kept, but this and later rows may lack full descriptions.`
+                      : `${overlayBase.srcName} re-served a verification challenge while fetching "${job.title || 'an untitled listing'}" after the detail tab was presented for solving. Relevant listing rows were retained, but this and later rows may lack full descriptions.`,
                 suggestion: hardBlock
                   ? `Retry unlocks after the wait. Let the IP/session restriction on ${overlayBase.srcName} cool down, confirm the site opens normally in Chrome, then choose Retry. Skip continues without these listings.`
                   : detailTabDetached
                     ? `Rerun ${overlayBase.srcName} for full descriptions.`
-                    : `Complete the site verification in normal Chrome, then rerun ${overlayBase.srcName} for full descriptions.`,
+                    : checkRefused
+                      ? `The site's refusal usually clears within about an hour of the last attempt. Rerun ${overlayBase.srcName} after that for the remaining descriptions.`
+                      : `Complete the site verification in normal Chrome, then rerun ${overlayBase.srcName} for full descriptions.`,
               };
               // A terminal/session-level stop must remain visible for every
               // later row whose list-time description stays empty.
@@ -941,6 +953,24 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
             await descInputProbe.poll();
             const stillChallenge = await detectChallengePage(page);
             if (!stillChallenge) { solved = true; break; }
+            // Same exit as waitForReady: a check the site serves again after
+            // each solved attempt cannot be passed here, so stop asking.
+            if (descInputProbe.confirmStillChallenged() >= CHALLENGE_LOOP_MAX_ATTEMPTS) {
+              noteSourceRefusedSolvedChecks(sourceId);
+              logger.warn(`[BrowserScraper] ${overlayBase.srcName}: description-expansion check was served again after ${CHALLENGE_LOOP_MAX_ATTEMPTS} solved attempts — ending the wait; collected jobs are kept`);
+              recordManualScraperTelemetry({
+                phase: 'challenge-loop', srcName: overlayBase.srcName, context: 'description-expansion',
+                closeCause: 'refused-after-input', refusedAttempts: CHALLENGE_LOOP_MAX_ATTEMPTS,
+                inputCounts: descInputProbe.summary(),
+                waitedFor: formatWaitDuration(Date.now() - descChallengeStart),
+              });
+              descWarning ||= {
+                code: 'description-detail-challenge', severity: 'warn',
+                evidence: `${overlayBase.srcName} served its verification check again after ${CHALLENGE_LOOP_MAX_ATTEMPTS} solved attempts while fetching "${job.title || 'an untitled listing'}", so it could not be passed from the scraper's browser. Every listing collected so far was kept, but this and later rows may lack full descriptions.`,
+                suggestion: `The site's refusal usually clears within about an hour of the last attempt. Rerun ${overlayBase.srcName} after that for the remaining descriptions.`,
+              };
+              break;
+            }
             const descElapsedSec = Math.floor((Date.now() - descChallengeStart) / 1000);
             const descElapsedLabel = descElapsedSec < 60
               ? `${descElapsedSec}s`

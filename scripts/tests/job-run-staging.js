@@ -917,6 +917,11 @@ export default [
         && preserveStart >= 0 && preserveEnd > preserveStart
         && savedStop.includes('pauseJobRunAndCancel({')
         && savedStop.includes('runId: jobRunIdRef.current || null')
+        // A committed run id that did not change must never replace the live
+        // token (a crash-recovery resume holds the resumed run while node data
+        // still names the previous finished one).
+        && search.includes('if (committedRunId && (committedRunIdChanged || !jobRunIdRef.current)) jobRunIdRef.current = committedRunId;')
+        && !search.includes('if (data.jobRunId) jobRunIdRef.current = data.jobRunId;')
         && !savedStop.includes('cancelNodeTaskAndWait(')
         && savedStop.includes('setResumeOffer(stoppedOffer)')
         && !savedStop.includes('discardJobRun')

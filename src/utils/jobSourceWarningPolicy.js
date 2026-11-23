@@ -248,7 +248,18 @@ export function isHardBlockSourceWarning(warning) {
  * `isHardBlockSourceWarning` keeps its narrower hard-block meaning.
  */
 export function isTimedRetrySourceWarning(warning) {
-  return TIMED_RETRY_WARNING_CODES.has(warning?.code);
+  return TIMED_RETRY_WARNING_CODES.has(warning?.code) || isRefusedSolvedChecksWarning(warning);
+}
+
+/**
+ * A platform that kept serving its verification check again after solved
+ * attempts (the scraper stamps `refusedSolvedChecks`). There is nothing left to
+ * solve: every further attempt is refused and renews the site's own refusal,
+ * which lapses about an hour after the last attempt. So it waits like a hard
+ * block, with the wait the scraper stamped in `retryAfterAt`.
+ */
+export function isRefusedSolvedChecksWarning(warning) {
+  return warning?.code === 'session-blocked' && warning?.refusedSolvedChecks === true;
 }
 
 /**

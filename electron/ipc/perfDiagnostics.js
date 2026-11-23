@@ -13,13 +13,18 @@ const RENDERER_KINDS = Object.freeze({
   stall: 'Window could not respond (what a person feels as lag)',
   'undo-snapshot': 'Recording an undo step after an edit (blocks the window)',
   'save-prepare': 'Auto-save: gathering the canvas (blocks the window)',
-  'save-handoff': 'Auto-save: handing the canvas to the app process (blocks the window)',
-  'save-total': 'Auto-save: start to confirmed write (does not block)',
+  'save-handoff': 'Auto-save: longest single blocked stretch handing the canvas to the app process (one copy call; a save makes several, so this is not their sum)',
+  'save-total': 'Auto-save: whole attempt, from gathering the canvas to the app process\'s reply (includes the blocked stretches; the window can paint in between)',
 });
 // Fixed reason codes a kind may carry; anything else is dropped.
 const MAIN_KIND_REASONS = Object.freeze({
   'save-compress-failed': Object.freeze(['timeout', 'exit', 'no-result', 'other']),
 });
+// Node type words a receipt may name; the window sends the same list.
+const SENT_LARGEST = new Set(['document', 'text', 'group', 'link', 'jobcard', 'jobhub', 'jobboard', 'sellhub',
+  'marketplacecard', 'marketplacestatus', 'compsourcecard', 'jobsourcecard', 'jobgroup', 'part', 'other']);
+// Kinds stamped when the stall was reported, which is just after it ended.
+const ENDED_KINDS = new Set(['main-stall', 'stall']);
 const KEEP_PER_KIND = 30;
 const SHOWN_PER_KIND = 8;
 const STALL_SAMPLE_MS = 100;
@@ -69,23 +74,36 @@ function reasonSummary(reasons) {
   return parts.length ? ` · by reason: ${parts.join(', ')}` : '';
 }
 
+function sentSummary(sent) {
+  const count = value => (Number.isInteger(value) && value >= 0 ? value : null);
+  const records = count(sent?.records);
+  const parts = count(sent?.parts);
+  const calls = count(sent?.calls);
+  if (records === null || parts === null || calls === null) return '';
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const what = sent.whole === true ? 'the whole canvas' : `${plural(records, 'record')} (${plural(parts, 'part')})`;
+  const largest = SENT_LARGEST.has(sent.largest) ? ` · largest: ${sent.largest}` : '';
+  return ` · sent ${what} in ${plural(calls, 'call')}${largest}`;
+}
+
 function cleanRecord(record) {
   const at = Number(record?.at);
   const ms = Number(record?.ms);
   if (!Number.isFinite(at) || !Number.isFinite(ms) || ms < 0) return null;
   const size = Number.isInteger(record?.nodes) && record.nodes >= 0 ? ` · ${record.nodes} nodes on the open level`
     : Number.isFinite(record?.mb) ? ` · ${record.mb} MB` : '';
+  const sent = sentSummary(record?.sent);
   const reason = REASON_CODES.has(record?.reason) ? ` · ${record.reason}` : '';
-  return { at, text: `${new Date(at).toISOString()} · ${Math.round(ms)} ms${size}${reason}` };
+  return { at, text: `${new Date(at).toISOString()} · ${Math.round(ms)} ms${size}${sent}${reason}` };
 }
 
-function kindLines(label, total, records) {
+function kindLines(label, total, records, endedNote = '') {
   const rows = (Array.isArray(records) ? records : []).map(cleanRecord).filter(Boolean)
     .sort((a, b) => b.at - a.at).slice(0, SHOWN_PER_KIND);
   const count = Number.isInteger(total?.count) && total.count >= 0 ? total.count : rows.length;
   const worst = Number.isFinite(total?.worstMs) ? Math.round(total.worstMs) : 0;
   if (!count) return [`- **${label}:** none recorded.`];
-  return [`- **${label}:** ${count} recorded · worst ${worst} ms${reasonSummary(total?.reasons)} · newest first:`, ...rows.map(row => `  - ${row.text}`)];
+  return [`- **${label}:** ${count} recorded · worst ${worst} ms${reasonSummary(total?.reasons)} · newest first${endedNote}:`, ...rows.map(row => `  - ${row.text}`)];
 }
 
 const minutes = ms => (Number.isFinite(ms) && ms >= 0 ? `${Math.round(ms / 60000)} min` : 'unknown time');
@@ -97,11 +115,11 @@ export function performanceDiagnosticsMarkdown(rendererPerf = null) {
     `- Window observed for ${minutes(Number(rendererPerf?.observedForMs))} · stall detection: ${['active', 'unsupported', 'unavailable'].includes(rendererPerf?.stallObserver) ? rendererPerf.stallObserver : 'not reported'}.`];
   for (const [kind, label] of Object.entries(RENDERER_KINDS)) {
     const entry = rendererPerf?.kinds?.[kind];
-    lines.push(...kindLines(label, entry, entry?.recent));
+    lines.push(...kindLines(label, entry, entry?.recent, ENDED_KINDS.has(kind) ? ' · each time is when the stall ended' : ''));
   }
   lines.push(`- App process observed for ${minutes(Date.now() - startedAt)}.`);
   for (const [kind, label] of Object.entries(MAIN_KINDS)) {
-    lines.push(...kindLines(label, totals.get(kind), rings.get(kind)));
+    lines.push(...kindLines(label, totals.get(kind), rings.get(kind), ENDED_KINDS.has(kind) ? ' · each time is when the stall ended' : ''));
   }
   return `${lines.join('\n')}\n`;
 }
