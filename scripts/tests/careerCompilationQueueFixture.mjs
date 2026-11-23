@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { createModuleRunQueue } from '../../src/utils/moduleRunQueue.js';
 import { createRunOwnershipGuard } from '../../src/utils/runOwnership.js';
 import * as receipts from '../../src/utils/jobCareerCompilationReceipt.js';
-import { buildSavedJobsRescoreMarker } from '../../src/utils/jobSearchSplitClear.js';
+import { buildSavedJobsRescoreMarker, currentSavedJobsRescoreSkip, savedJobVersionsToCompare, savedJobsRescoreDecision, savedJobsRescoreSkipPatch } from '../../src/utils/jobSearchSplitClear.js';
 
 const source = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
 function callback(name, env) {
@@ -23,15 +23,17 @@ function harness(queue = createModuleRunQueue()) {
   const nodes = new Map();
   const parses = [];
   const searches = [];
-  function hub(id, { savedJobs = false, approvalCommitFrames = 0, completionCleanupSucceeds = true } = {}) {
+  function hub(id, { savedJobs = false, approvalCommitFrames = 0, completionCleanupSucceeds = true,
+    savedJobRows = [{ id: 'saved-listing' }], compareCareerSnapshots = null } = {}) {
     const node = { id, type: 'jobhub', data: savedJobs
-      ? { hubState: 'done', scoredJobs: [{ id: 'saved-listing' }] }
+      ? { hubState: 'done', scoredJobs: savedJobRows }
       : { hubState: 'empty' } };
     nodes.set(id, node);
     let revision = 0;
     let pendingApproval = null; let frames = 0; const retirements = [];
     const env = {
       ...receipts, buildSavedJobsRescoreMarker,
+      currentSavedJobsRescoreSkip, savedJobVersionsToCompare, savedJobsRescoreDecision, savedJobsRescoreSkipPatch,
       isJobBoardUserCancellation: error => error?.message === 'Manual AI job cancelled',
       id, moduleRunQueue: queue,
       localQueueAdmissionRef: { current: null },
@@ -59,7 +61,7 @@ function harness(queue = createModuleRunQueue()) {
         const gate = deferred();
         parses.push({ id, args, ...gate });
         return gate.promise;
-      } } },
+      }, ...(compareCareerSnapshots ? { compareCareerSnapshots } : {}) } },
     };
     const compile = callback('compileCareerFiles', env);
     const followup = async (_profile, options) => {
@@ -378,6 +380,50 @@ export default [
       assert.equal((await first.compile(['/fixture/other.md'])).status, 'busy');
       await tick(); assert.equal(h.parses.length, 1);
       h.approve(0); assert.equal((await one).status, 'compiled');
+    },
+  },
+  {
+    name: 'A replacement career drop under 10% different keeps the saved scores and starts no re-score',
+    async run() {
+      const APPROVED = 'a'.repeat(64); const EARLIER = 'b'.repeat(64);
+      // Same career data as the saved jobs were scored with: no comparison call at all.
+      const h = harness();
+      let compared = 0;
+      const same = h.hub('same', { savedJobs: true, savedJobRows: [{ id: 'kept', matchScore: 80, careerSnapshotId: APPROVED }],
+        compareCareerSnapshots: async () => { compared++; return { differences: {} }; } });
+      same.accept(['/fixture/replacement.md']);
+      await tick(); h.approve(0); await tick(); await tick();
+      assert.equal(compared, 0);
+      assert.equal(h.searches.length, 0, 'no re-score may start');
+      assert.equal(same.node.data.savedJobsRescore, null);
+      assert.equal(same.node.data.savedJobsRescoreSkip.careerSnapshotId, APPROVED);
+      assert.equal(same.node.data.hubState, 'done');
+      assert.equal(same.node.data.scoredJobs[0].matchScore, 80);
+
+      // A small edit: measured once, scores kept, rows re-bound.
+      const h2 = harness();
+      const requests = [];
+      const edited = h2.hub('edited', { savedJobs: true, savedJobRows: [{ id: 'kept', matchScore: 80, careerSnapshotId: EARLIER }],
+        compareCareerSnapshots: async args => { requests.push(args); return { differences: { [EARLIER]: 0.03 } }; } });
+      edited.accept(['/fixture/replacement.md']);
+      await tick(); h2.approve(0); await tick(); await tick();
+      assert.deepEqual(requests, [{ currentSnapshotId: APPROVED, previousSnapshotIds: [EARLIER] }]);
+      assert.equal(h2.searches.length, 0);
+      assert.equal(edited.node.data.savedJobsRescore, null);
+      assert.deepEqual(edited.node.data.scoredJobs, [{ id: 'kept', matchScore: 80, careerSnapshotId: APPROVED, scoredCareerSnapshotId: EARLIER }]);
+
+      // 10% or more: the re-score is owed exactly as before.
+      const h3 = harness();
+      const changed = h3.hub('changed', { savedJobs: true, savedJobRows: [{ id: 'kept', matchScore: 80, careerSnapshotId: EARLIER }],
+        compareCareerSnapshots: async () => ({ differences: { [EARLIER]: 0.1 } }) });
+      changed.accept(['/fixture/replacement.md']);
+      await tick(); h3.approve(0); await tick(); await tick();
+      assert.equal(h3.searches.length, 1);
+      assert.equal(h3.searches[0].options.savedJobsRescore, true);
+      assert.equal(changed.node.data.savedJobsRescore.careerSnapshotId, APPROVED);
+      assert.equal(changed.node.data.savedJobsRescoreSkip, null);
+      assert.equal(changed.node.data.scoredJobs[0].careerSnapshotId, EARLIER);
+      h3.searches[0].resolve({ status: 'completed' }); await tick();
     },
   },
 ];

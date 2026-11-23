@@ -1114,7 +1114,12 @@ export function registerBoardHandlers(ctx) {
     const { scored, failed } = await scoreRowsOnCareerRecord({ jobs, careerSnapshotId, nodeId, signal, callScore: runScoreBatch, runGapReview,
       readPinned: resolvePinnedScoringInputForHandler, attemptKind: 'board-preferences' });
     const unscored = failed.map(job => buildScoredJob(job, null, { fallbackScore: UNSCORED_FALLBACK_SCORE, allNull: false }));
-    return { success: true, scoredJobs: [...scored, ...unscored].map(row => ({ ...row, careerSnapshotId })) };
+    // A new score is for this career version; drop any record of an earlier one.
+    return { success: true, scoredJobs: [...scored, ...unscored].map((row) => {
+      const next = { ...row, careerSnapshotId };
+      delete next.scoredCareerSnapshotId;
+      return next;
+    }) };
   });
 
   // ── Board research for jobs at or above the fit threshold ────────────────

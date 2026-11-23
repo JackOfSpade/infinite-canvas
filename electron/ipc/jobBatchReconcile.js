@@ -34,6 +34,10 @@ export function buildScoredJob(job, scoreOrNull, { fallbackScore, allNull }) {
     'requirementAssessments', 'materialGaps', 'confidence', 'compensationContext',
     'strengths', 'experienceAssessment', 'fitAssessment', 'scoringEvidenceReceipt',
     'scoreStatus',
+    // A row whose scores were kept across a small career change remembers
+    // the version it was really scored with. A new score is for the version
+    // it is scored against now.
+    'scoredCareerSnapshotId',
   ]) delete cleanJob[key];
   if (scoreOrNull) {
     return { ...cleanJob, ...scoreOrNull };

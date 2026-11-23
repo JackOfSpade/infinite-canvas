@@ -691,9 +691,22 @@ Return a JSON object with four arrays of search query strings:
     if (!revoked?.revoked && !(
       revoked?.receipt && authorityReceiptMatches(revoked.receipt, authority)
     )) {
+      logger.warn(`[Jobs][${nodeId}] Board cancel cleanup refused: this turn's receipt is no longer the card's current one`);
       return { ok: false, cleared: false, operationAuthorityMismatch: true, operationSuperseded: true };
     }
-    return discardCancelledBoardRunArtifacts(canvasFilePath, nodeId, runId, authority);
+    const discarded = await discardCancelledBoardRunArtifacts(canvasFilePath, nodeId, runId, authority);
+    if (discarded?.ok !== true) {
+      // Fixed reason codes only, so a bug report can tell a refusal (the run
+      // is not this turn's) from a file that could not be removed.
+      const reason = discarded?.operationSuperseded ? 'receipt-superseded'
+        : discarded?.operationAuthorityMismatch
+          ? (authority.semanticBase?.runId != null && authority.semanticBase.runId !== runId
+            ? 'receipt-names-another-run'
+            : 'receipt-mismatch')
+          : (discarded?.runCleanup?.reason || discarded?.reason || 'file-removal-failed');
+      logger.warn(`[Jobs][${nodeId}] Board cancel cleanup refused or failed: ${reason} (receipt kind ${authority.semanticBase?.kind || 'unknown'})`);
+    }
+    return discarded;
   });
 
   handleSafe('get-job-description-recovery-checkpoints', async (_event, { canvasFilePath } = {}) => {

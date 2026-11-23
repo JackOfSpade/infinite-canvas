@@ -205,6 +205,9 @@ export default [
       const job = { title: 'X', company: 'Y' };
       const matched = buildScoredJob(job, { matchScore: 80, careerDirection: 'Eng' }, { fallbackScore: 50, allNull: false });
       assert(matched.matchScore === 80 && matched.careerDirection === 'Eng' && matched.title === 'X', 'matched: score fields spread onto the job');
+      assert(!('scoredCareerSnapshotId' in buildScoredJob({ ...job, scoredCareerSnapshotId: 'a'.repeat(64) }, { matchScore: 70 }, { fallbackScore: 50, allNull: false }))
+        && !('scoredCareerSnapshotId' in buildScoredJob({ ...job, scoredCareerSnapshotId: 'a'.repeat(64) }, null, { fallbackScore: 50, allNull: false })),
+      'a new score does not inherit the career version an earlier kept score was made with');
       const lone = buildScoredJob(job, null, { fallbackScore: 50, allNull: false });
       assert(lone.matchScore === 50 && lone.reasoning === 'Unable to score' && lone.careerDirection === 'Other', 'lone miss → Unable to score');
       const dead = buildScoredJob(job, null, { fallbackScore: 50, allNull: true });

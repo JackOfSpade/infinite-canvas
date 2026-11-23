@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { careerChangeLiftsCooldown, careerTextDifference, CAREER_CHANGE_RESCRAPE_THRESHOLD } from '../../src/utils/careerTextDifference.js';
+import { careerChangeKeepsSavedScores, careerChangeLiftsCooldown, careerTextDifference, CAREER_CHANGE_RESCORE_THRESHOLD, CAREER_CHANGE_RESCRAPE_THRESHOLD } from '../../src/utils/careerTextDifference.js';
 import {
   buildSourceCoverageCommitPatch,
   careerCooldownComparisonPatch,
@@ -124,6 +124,19 @@ export default [
       const unreadable = { ...data, ...careerCooldownComparisonPatch(data, NEW, { [OLD]: null }) };
       assert.deepEqual(jobSearchRescrapeAvailability(unreadable, NOW).due, [], 'an unreadable earlier version keeps the cooldown');
       assert.deepEqual(coolingCareerSnapshotIds(unreadable, null, NOW, { unsavedOnly: true }), [], 'and is not asked about again');
+    },
+  },
+  {
+    name: 'saved scores are kept only for a measured career change strictly under 10%',
+    run() {
+      assert.equal(CAREER_CHANGE_RESCORE_THRESHOLD, 0.1);
+      assert.equal(careerChangeKeepsSavedScores(0), true);
+      assert.equal(careerChangeKeepsSavedScores(0.0999), true);
+      assert.equal(careerChangeKeepsSavedScores(0.1), false, 'exactly 10% re-scores');
+      assert.equal(careerChangeKeepsSavedScores(0.5), false);
+      for (const unmeasured of [null, undefined, NaN, -0.2, '0.05', Infinity]) {
+        assert.equal(careerChangeKeepsSavedScores(unmeasured), false, 'an unmeasured change re-scores');
+      }
     },
   },
 ];

@@ -7,7 +7,7 @@ import { hasLegacyPageScoring, JOB_SCORING_CONTRACT } from '../../src/utils/jobS
 import { hasStoredPreferenceVerdicts, mergeScoredJobs, splitKeptScores } from '../../src/utils/jobSearchPreferenceReevaluation.js';
 import { jobBoardHasSavedAiContinuation } from '../../src/utils/jobBoardSavedAiContinuation.js';
 import assert from 'node:assert';
-import { jobCareerImportBoardAdmission } from '../../src/utils/jobCareerImportCapability.js';
+import { createJobCareerImportCapability, jobCareerImportBoardAdmission } from '../../src/utils/jobCareerImportCapability.js';
 
 import {
   SAVED_JOBS_RESCORE_VERSION,
@@ -20,7 +20,14 @@ import {
   savedJobCount,
   savedJobsReevaluationKeepsScores,
   savedJobsRescoreCompletionPatch,
+  currentSavedJobsRescoreSkip,
+  savedJobScoringSnapshotIds,
+  savedJobVersionsToCompare,
+  savedJobsRescoreDecision,
+  savedJobsRescoreSkipPatch,
+  leftoverRunToDiscardOnClear,
 } from '../../src/utils/jobSearchSplitClear.js';
+import { boardCancelOwnsFoundRun, boardCancelRecordNamesForeignRun } from '../../src/utils/jobBoardCancelRunOwnership.js';
 import {
   classifyJobBoardSourceAdmission,
   partitionJobBoardSourceAdmissions,
@@ -1061,6 +1068,126 @@ export default [
       for (const file of ['src/nodes/JobBoardNode.jsx', 'src/nodes/JobSearchNode.jsx']) {
         assert(fs.readFileSync(file, 'utf8').includes('withRescoreFollowUpRollbacks('), `${file} must route the follow-up rollback through the helper`);
       }
+    },
+  },
+  {
+    name: 'saved jobs keep their scores when new career data is the same or under 10% different from the version they were scored with',
+    run: () => {
+      const V1 = '1'.repeat(64); const V2 = '2'.repeat(64); const V3 = '3'.repeat(64);
+      const rows = [{ id: 'a', matchScore: 80, careerSnapshotId: V1 }, { id: 'b', matchScore: 60, careerSnapshotId: V1 }];
+      const hub = { hubState: 'done', scoredJobs: rows, careerSnapshotId: V2, careerImportFreshCapability: createJobCareerImportCapability('hub'), careerImportGeneration: 'unused' };
+      hub.careerImportGeneration = hub.careerImportFreshCapability;
+
+      // Same career data: nothing to measure, scores kept, rows untouched.
+      assert.deepStrictEqual(savedJobVersionsToCompare(hub, V1), []);
+      const same = savedJobsRescoreDecision(hub, { careerSnapshotId: V1 });
+      assert(same.keepScores && same.maxDifference === 0 && same.reason === 'same-career-data');
+      const samePatch = savedJobsRescoreSkipPatch({ ...hub, careerSnapshotId: V1 }, { careerSnapshotId: V1, nodeId: 'hub', now: 5 });
+      assert(!('scoredJobs' in samePatch), 'rows already on this version are not rewritten');
+      assert(samePatch.savedJobsRescore === null && samePatch.savedJobsCareerClearedAt === null);
+      assert(samePatch.savedJobsRescoreSkip.careerSnapshotId === V1 && samePatch.savedJobsRescoreSkip.threshold === 0.1);
+
+      // Under 10%: kept, rows re-bound, each remembering its true version.
+      assert.deepStrictEqual(savedJobVersionsToCompare(hub, V2), [V1]);
+      const small = savedJobsRescoreDecision(hub, { careerSnapshotId: V2, differences: { [V1]: 0.04 } });
+      assert(small.keepScores && small.maxDifference === 0.04 && small.reason === 'career-nearly-unchanged');
+      const patch = savedJobsRescoreSkipPatch(hub, { careerSnapshotId: V2, maxDifference: 0.04, nodeId: 'hub', now: 5 });
+      assert(patch.scoredJobs.every(row => row.careerSnapshotId === V2 && row.scoredCareerSnapshotId === V1));
+      assert(patch.scoredJobs[0].matchScore === 80, 'scores are untouched');
+      assert(patch.scoringCareerSnapshotId === V2);
+      assert(patch.careerImportFreshCapability === null
+        && patch.careerImportConsumption.origin === 'saved-jobs-rescore-skipped'
+        && patch.careerImportConsumption.capability === hub.careerImportFreshCapability,
+      'keeping the scores spends the one-shot import permission, as a finished re-score does');
+      const kept = { ...hub, ...patch };
+      assert(currentSavedJobsRescoreSkip(kept)?.maxDifference === 0.04);
+      assert(currentSavedJobsRescoreSkip({ ...kept, careerSnapshotId: V3 }) === null, 'a later career change voids the record');
+      assert(currentSavedJobsRescoreSkip({ ...kept, savedJobsRescore: { version: 1 } }) === null);
+      assert(pendingSavedJobsRescore(kept) === null, 'no re-score is requested');
+      // The re-bound rows are what a later search on the same Board carries forward.
+      assert(carriedJobsForTerminal(
+        { ...kept, carriedResults: { runId: 'old-run', careerSnapshotId: V2 } },
+        { jobRunId: 'new-run', careerSnapshotId: V2 },
+      ).length === 2);
+
+      // Small edits cannot add up unnoticed: the next comparison is against V1.
+      assert.deepStrictEqual(savedJobScoringSnapshotIds(kept), [V1]);
+      assert.deepStrictEqual(savedJobVersionsToCompare(kept, V3), [V1]);
+      const drifted = savedJobsRescoreDecision(kept, { careerSnapshotId: V3, differences: { [V1]: 0.12, [V2]: 0.05 } });
+      assert(!drifted.keepScores && drifted.reason === 'career-changed');
+      // Going back to the true version drops the separate record.
+      const back = savedJobsRescoreSkipPatch(kept, { careerSnapshotId: V1, nodeId: 'hub' });
+      assert(back.scoredJobs.every(row => row.careerSnapshotId === V1 && !('scoredCareerSnapshotId' in row)));
+
+      // Everything else re-scores.
+      assert(!savedJobsRescoreDecision(hub, { careerSnapshotId: V2, differences: { [V1]: 0.1 } }).keepScores, 'exactly 10% re-scores');
+      assert(!savedJobsRescoreDecision(hub, { careerSnapshotId: V2, differences: { [V1]: null } }).keepScores, 'an unreadable earlier version re-scores');
+      assert(!savedJobsRescoreDecision(hub, { careerSnapshotId: V2 }).keepScores, 'no measurement re-scores');
+      assert(!savedJobsRescoreDecision({ ...hub, scoredJobs: [...rows, { id: 'c', matchScore: 50 }] }, { careerSnapshotId: V1 }).keepScores,
+        'a saved row with no recorded version re-scores');
+      assert(savedJobScoringSnapshotIds({ scoredJobs: [] }) === null && !savedJobsRescoreDecision({ scoredJobs: [] }, { careerSnapshotId: V1 }).keepScores);
+      const many = Array.from({ length: 22 }, (_, index) => ({ id: `r${index}`, careerSnapshotId: index.toString(16).padStart(2, '0').repeat(32) }));
+      assert(savedJobVersionsToCompare({ scoredJobs: many }, V1) === null, 'more versions than one comparison reads re-scores');
+      assert(buildJobHubCareerOnlyClearPatch({}).savedJobsRescoreSkip === null, 'Clear Career Data drops the record');
+
+      // With no re-score owed, a card already shown on its Board is searched again or reused, never re-scored.
+      const admitted = classifyJobBoardSourceAdmission({ id: 'hub', type: 'jobhub', data: {
+        ...kept, jobRunId: 'old-run', resultDisposition: 'scored',
+        careerImportCompilation: null,
+      } }, { boardId: 'board' });
+      assert(admitted.kind !== 'rescore-saved-jobs', `admission must not be a re-score (was ${admitted.kind})`);
+    },
+  },
+  {
+    name: 'a cancelled Board turn may remove only the unfinished search it started or was resuming',
+    run: () => {
+      const rescore = { operationId: 'op-rescore', semanticBase: { kind: 'saved-jobs-reanalysis', runId: 'completed-run' } };
+      const fresh = { operationId: 'op-fresh', semanticBase: { kind: 'job-board-scan', runId: null } };
+      const resume = { operationId: 'op-resume', semanticBase: { kind: 'crash-resume', runId: 'run-x' } };
+      assert(!boardCancelOwnsFoundRun({ runId: 'stale', authority: rescore }), 'a re-score receipt names the completed run, not this one');
+      assert(!boardCancelOwnsFoundRun({ runId: 'stale', rescoreOnly: true }), 'a re-score starts no run, receipt or not');
+      assert(boardCancelOwnsFoundRun({ runId: 'run-x', authority: resume }));
+      assert(!boardCancelOwnsFoundRun({ runId: 'run-y', authority: resume }));
+      assert(boardCancelOwnsFoundRun({ runId: 'new', authority: fresh, manifestAuthority: fresh }), 'a fresh search owns the run recorded under its operation');
+      assert(boardCancelOwnsFoundRun({ runId: 'new', authority: fresh, manifestAuthority: null }));
+      assert(!boardCancelOwnsFoundRun({ runId: 'stale', authority: fresh, manifestAuthority: { operationId: 'someone-else' } }));
+      assert(boardCancelOwnsFoundRun({ runId: 'stale', authority: rescore, ownsExistingRecoveryRun: true }), 'a turn resuming a saved run owns it');
+      assert(boardCancelOwnsFoundRun({ runId: 'known', knownRunId: 'known', authority: rescore }));
+      assert(boardCancelOwnsFoundRun({ runId: 'legacy' }), 'an interruption with no receipt keeps the earlier behaviour');
+      assert(!boardCancelOwnsFoundRun({ runId: '' }) && !boardCancelOwnsFoundRun({}));
+      assert(boardCancelRecordNamesForeignRun({ runId: 'stale', runCleanupAuthorized: true, operationAuthority: rescore }));
+      assert(!boardCancelRecordNamesForeignRun({ runId: 'completed-run', operationAuthority: rescore }));
+      assert(!boardCancelRecordNamesForeignRun({ runId: 'stale', operationAuthority: rescore, ownsExistingRecoveryRun: true }));
+      assert(!boardCancelRecordNamesForeignRun({ runId: 'new', operationAuthority: fresh }));
+      assert(!boardCancelRecordNamesForeignRun({ runId: 'legacy' }) && !boardCancelRecordNamesForeignRun(null));
+    },
+  },
+  {
+    name: 'Clear Career Data removes only this card\'s older unfinished search, never the protected run or a newer one',
+    run: () => {
+      const info = { found: true, nodeId: 'hub', runId: 'leftover' };
+      const at = { nodeId: 'hub', clearedAt: 100, startedAt: 50 };
+      assert(leftoverRunToDiscardOnClear(info, { ...at, protectedRunId: 'kept-run' }) === 'leftover');
+      assert(leftoverRunToDiscardOnClear(info, { ...at, protectedRunId: null }) === 'leftover');
+      assert(leftoverRunToDiscardOnClear(info, { ...at, startedAt: 100 }) === 'leftover', 'started exactly at the Clear still predates it');
+      assert(leftoverRunToDiscardOnClear(info, { ...at, protectedRunId: 'leftover' }) === null, 'the kept jobs\' own run stays');
+      assert(leftoverRunToDiscardOnClear(info, { ...at, startedAt: 101 }) === null, 'a run started after the Clear is a newer search');
+      assert(leftoverRunToDiscardOnClear(info, { ...at, startedAt: null }) === null);
+      assert(leftoverRunToDiscardOnClear(info, { ...at, clearedAt: null }) === null);
+      assert(leftoverRunToDiscardOnClear({ ...info, nodeId: 'other' }, at) === null, 'another card\'s run is never touched');
+      assert(leftoverRunToDiscardOnClear({ ...info, nodeId: null }, at) === null, 'an owner-unknown run has its own path');
+      assert(leftoverRunToDiscardOnClear({ found: false }, at) === null && leftoverRunToDiscardOnClear(null, at) === null);
+      const search = readSource('../../src/nodes/JobSearchNode.jsx');
+      assert(search.includes('protectedRunId: clearsResults ? runId : (liveData.jobRunId || null),'),
+        'a career-only Clear protects the run recorded on the card, not an in-memory id');
+      const runner = sliceBetween(search, 'const runForJobBoard = useCallback(async ({', 'const handleReanalyze = useCallback');
+      const marked = runner.indexOf('control.rescoreOnly = true;');
+      const reanalyze = runner.indexOf('await handleReanalyzeRef.current?.({', marked);
+      const unmarked = runner.indexOf('control.rescoreOnly = false;');
+      const followUpSearch = runner.indexOf('const scrape = await runFreshBoardImport(capability, manualAiRunId);');
+      assert(marked > 0 && reanalyze > marked, 'the turn is marked re-score-only before the re-score starts');
+      assert(unmarked > 0 && followUpSearch > unmarked && followUpSearch - unmarked < 120,
+        'the mark is lifted immediately before the follow-up search starts its own run');
     },
   },
 ];

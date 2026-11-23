@@ -368,7 +368,7 @@ export function JobSearchDoneState({
                 ? `Career compilation failed${careerCompileError ? `: ${careerCompileError}` : ''}.`
                 : careerCompileUnstarted
                   ? 'Career files retained. Compile them when you are ready; saved jobs are kept.'
-                : `Drop new career files to re-score ${savedJobCount} saved job${savedJobCount === 1 ? '' : 's'}. Jobs are kept.`}
+                : `Drop new career files. ${savedJobCount} saved job${savedJobCount === 1 ? ' is' : 's are'} kept, and re-scored only when the career data changed by 10% or more.`}
           </p>}
           {!careerCompiling && (careerCompileFailed || careerCompileUnstarted) && onRetryCareerCompile && (
             <button

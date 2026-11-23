@@ -83,6 +83,7 @@ import {
 import { isJobBoardUserCancellation } from '../utils/jobBoardAiProvider';
 import { isMergeableTerminalJobSearchOutcome, terminalJobSearchOutcome } from '../utils/jobBoardPausedSourceContinuation';
 import { exactInterruptedRecoveryBackendFailure, hasCheckpointedPostCollectionAnalysis } from '../utils/jobBoardRecoveryAdmission';
+import { boardCancelOwnsFoundRun, boardCancelRecordNamesForeignRun } from '../utils/jobBoardCancelRunOwnership';
 import { classifyJobBoardSourceAdmission, savedJobsRescoreFollowUp } from '../utils/jobBoardSourceAdmission';
 import { jobSearchScrapeSetupProblem } from '../utils/jobSearchScrapeSetup';
 import { getSavedAnalysisAvailability, publishSavedAnalysisAvailability, savedAnalysisResumeAdmission } from '../utils/jobSavedAnalysisAvailability';
@@ -96,7 +97,7 @@ import {
   upsertManualAiCleanupReceipt,
   waitForRendererCommitFrame,
 } from './jobsearch/manualAiRunReceipts';
-import { buildJobHubCareerOnlyClearPatch, buildJobHubRescanCapabilityPatch, buildSavedJobsRescoreMarker, hubRetainsSavedJobs, isCareerClearedWithSavedJobs, pendingSavedJobsRescore, savedJobCount as countSavedJobs, savedJobsReevaluationKeepsScores, savedJobsRescoreCompletionPatch } from '../utils/jobSearchSplitClear';
+import { buildJobHubCareerOnlyClearPatch, buildJobHubRescanCapabilityPatch, buildSavedJobsRescoreMarker, currentSavedJobsRescoreSkip, leftoverRunToDiscardOnClear, savedJobVersionsToCompare, savedJobsRescoreDecision, savedJobsRescoreSkipPatch, hubRetainsSavedJobs, isCareerClearedWithSavedJobs, pendingSavedJobsRescore, savedJobCount as countSavedJobs, savedJobsReevaluationKeepsScores, savedJobsRescoreCompletionPatch } from '../utils/jobSearchSplitClear';
 import { createJobCareerImportCapability, freshJobCareerImportCapability, jobCareerImportBoardAdmission, jobCareerImportConsumptionPatch, retryableUnstartedJobCareerImportCapability, retryableCancelledJobCareerImportCapability } from '../utils/jobCareerImportCapability';
 import { isCareerCompilerTask } from '../utils/careerCompilerTasks';
 import { pausedCareerImportCompilation, restartCareerImportCompilationPatch, approveCareerImportCompilation, beginCareerImportCompilation, careerCompileResumeExplanation, careerImportCompilationAdmission, careerResumeBannerStatus, careerImportCompilationMatches, careerResumeInputPaths, currentApprovedCareerImportSnapshot, failCareerImportCompilation, resumableCareerImportCompilation } from '../utils/jobCareerCompilationReceipt';
@@ -1082,6 +1083,8 @@ function boardRunRollbackPatch(previousData, nodeId) {
     hubState: restoreDone ? 'done' : 'empty',
     queuedModuleRun: null,
     manualAiResume: null,
+    // A notice written by the cancelled turn is not part of the earlier state.
+    reanalysisNotice: prior.reanalysisNotice ?? null,
     // A Board-managed run can be cancelled while one of these fields names
     // the abandoned run. Previous completed results are safe to restore, but
     // no paused/manual continuation may survive the rollback.
@@ -5651,13 +5654,50 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           profileFingerprint: String(parseResult.fingerprint || ''),
         });
         if (!approvedCompilation) throw new Error('The career compiler did not return an approved snapshot id.');
+        // Saved jobs keep their scores when the new career data is under 10%
+        // different from the version they were scored with. The difference is
+        // measured in the app process from the saved career versions; with
+        // nothing to measure (same version, or a version unknown) this adds
+        // no wait and the decision below falls back to a re-score.
+        let savedJobsCareerDifferences = null;
+        if (retainSavedJobs) {
+          const versionsToCompare = savedJobVersionsToCompare(getNode(id)?.data, parseResult.careerSnapshotId);
+          if (versionsToCompare?.length > 0 && window.electronAPI?.compareCareerSnapshots) {
+            try {
+              const comparison = await window.electronAPI.compareCareerSnapshots({
+                currentSnapshotId: parseResult.careerSnapshotId,
+                previousSnapshotIds: versionsToCompare,
+              });
+              savedJobsCareerDifferences = comparison?.differences || null;
+            } catch (error) {
+              EventLogger.log(`[JobSearch][${id}] Career data comparison failed; saved jobs will be re-scored: ${error?.message || error}`);
+            }
+            if (locallyCancelled()) return searchRunOutcome('cancelled');
+          }
+        }
+        let savedScoresKept = null;
         updateGlobal(id, (node) => {
           const current = node?.data || {};
           if (
             !careerImportCompilationMatches(current.careerImportCompilation, compilationAttempt)
             || !exactRecoveryStillOwns(current)
           ) return null;
-          const rescoreMarker = retainSavedJobs
+          // Decided on the live rows, so a change during the comparison is seen.
+          const rescoreDecision = retainSavedJobs
+            ? savedJobsRescoreDecision(current, {
+              careerSnapshotId: parseResult.careerSnapshotId,
+              differences: savedJobsCareerDifferences,
+            })
+            : null;
+          const keepSavedScoresPatch = rescoreDecision?.keepScores
+            ? savedJobsRescoreSkipPatch(current, {
+              careerSnapshotId: parseResult.careerSnapshotId,
+              maxDifference: rescoreDecision.maxDifference,
+              nodeId: id,
+            })
+            : null;
+          savedScoresKept = keepSavedScoresPatch ? rescoreDecision : null;
+          const rescoreMarker = retainSavedJobs && !keepSavedScoresPatch
             ? buildSavedJobsRescoreMarker({
               careerSnapshotId: parseResult.careerSnapshotId,
               generation: compilationGeneration,
@@ -5669,6 +5709,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           // Saved jobs instead stay listed until their re-score replaces them.
           hubState: retainSavedJobs ? 'done' : 'empty',
           ...(retainSavedJobs ? { savedJobsRescore: rescoreMarker, savedJobsCareerClearedAt: null } : {}),
+          ...(retainSavedJobs ? { savedJobsRescoreSkip: null } : {}),
+          ...(keepSavedScoresPatch || {}),
           careerSnapshotId: typeof parseResult.careerSnapshotId === 'string' && parseResult.careerSnapshotId
             ? parseResult.careerSnapshotId
             : null,
@@ -5721,6 +5763,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             error: 'Career snapshot is approved, but manual-AI completion cleanup did not finish.' });
         }
         EventLogger.log(`[JobSearch][${id}] Career snapshot compiled; provider admission remains separate`);
+        if (savedScoresKept) {
+          EventLogger.log(
+            `[JobSearch][${id}] Saved job scores kept: new career data is ${Math.round(savedScoresKept.maxDifference * 100)}% different from the version they were scored with (under 10% keeps them)`,
+          );
+        }
         return {
           status: 'compiled',
           profile,
@@ -6601,7 +6648,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           // already durable, and keeping the stale manifest visible while a
           // best-effort deletion settles invites an accidental resume.
           // The explicit clear action owns the matching clear receipt and
-          // performs discard atomically. This later probe must only hide the
+          // removes the run's files itself (including a run whose id differs
+          // from the hub's own). This later probe must only hide the
           // stale offer; it must not issue a receipt-less destructive retry.
           if (!cancelled) {
             setResumeOffer(null);
@@ -7193,12 +7241,31 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             ?? null;
         }
       }
-      updateGlobal(currentId, {
-        hubState: 'searching',
-        providerPhaseAwaitingResume: false,
-        activeJobPreferences,
-        jobPreferencePlan: jobPreferencesInterpretation,
-        jobPreferencesInterpretation,
+      updateGlobal(currentId, (node) => {
+        const current = node?.data || {};
+        // A card can still show the results of an EARLIER completed run while
+        // this unfinished run is resumed (a search that followed a re-score,
+        // cut off by a quit). The resumed run can only commit on a card that
+        // no longer carries the earlier run's id, exactly like a fresh search;
+        // otherwise it finishes its whole scrape and is then dropped. Decide
+        // here, as a fresh search does, whether its jobs are added to the ones
+        // the Board still shows.
+        const showsEarlierRun = typeof current.jobRunId === 'string'
+          && !!current.jobRunId
+          && current.jobRunId !== offer.runId;
+        return {
+          hubState: 'searching',
+          providerPhaseAwaitingResume: false,
+          activeJobPreferences,
+          jobPreferencePlan: jobPreferencesInterpretation,
+          jobPreferencesInterpretation,
+          ...(showsEarlierRun ? {
+            jobRunId: null,
+            carriedResults: current.carriedResults ?? jobSearchCarriedResultsMarker(current, {
+              orchestratorNodeId: queueManagedByBoard ? orchestratorNodeId : null,
+            }),
+          } : {}),
+        };
       });
       terminalSourceWarningProjectionRef.current.clear();
       terminalSourceWarningProjectionOpenRef.current = true;
@@ -8419,6 +8486,21 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     if (compiled?.status !== 'compiled' || compiled.retainedSavedJobs !== true) return compiled;
     const count = countSavedJobs(getNode(id)?.data);
     const jobsText = `${count} saved job${count === 1 ? '' : 's'}`;
+    // Read from the card, not the compile result: a compile recovered after a
+    // restart reaches here without that result.
+    const keptScores = currentSavedJobsRescoreSkip(getNode(id)?.data);
+    if (keptScores) {
+      const percent = Math.round(keptScores.maxDifference * 100);
+      addToast({
+        title: 'Career data ready',
+        description: keptScores.maxDifference > 0
+          ? `Scores for ${jobsText} were kept: the new career data is ${percent < 1 ? 'under 1' : percent}% different from the version they were scored with. A change of 10% or more re-scores them.`
+          : `Scores for ${jobsText} were kept: the career data is the same as the version they were scored with.`,
+        type: 'info',
+        dedupeKey: `job-search-saved-scores-kept:${id}`,
+      });
+      return compiled;
+    }
     if (isJobSearchConnectedToBoard(id, getNodes(), getEdges())) {
       EventLogger.log(`[JobSearch][${id}] New career snapshot ready; saved-job re-score waits for the connected Job Board`);
       addToast({
@@ -9987,10 +10069,23 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const durableClaim = exactPersistedMarker || durablePlanClaim;
       if (!durableClaim) return { status: 'stale', cancelled: false };
 
-      const persistedCleanup = boardPlan?.cancellationCleanupsBySource?.[id]
+      const savedCleanup = boardPlan?.cancellationCleanupsBySource?.[id]
         || (boardPlan?.cancellationCleanup?.sourceId === id
           ? boardPlan.cancellationCleanup
           : null);
+      // An earlier build could save a run here that the cancelled turn never
+      // started (an older unfinished search found on disk). Its own receipt
+      // names a different run, so the app process refuses that removal on
+      // every retry. Drop the run id; the rest of the record stays valid.
+      const savedCleanupNamedForeignRun = boardCancelRecordNamesForeignRun(savedCleanup);
+      const persistedCleanup = savedCleanupNamedForeignRun
+        ? { ...savedCleanup, runId: null, runCleanupAuthorized: false }
+        : savedCleanup;
+      if (savedCleanupNamedForeignRun) {
+        EventLogger.log(
+          `[JobSearch][${id}] Board cancel retry dropped a saved search it did not start from its cleanup record`,
+        );
+      }
       let cancelledAuthority = persistedCleanup?.operationAuthority || null;
       const persistedCleanupHasPriorRun = Object.prototype.hasOwnProperty.call(
         persistedCleanup || {},
@@ -10159,6 +10254,25 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             && info?.nodeId === id
             && typeof info?.runId === 'string'
             && info.runId
+            // Same rule as the live cancel: an unfinished run this turn did
+            // not start or resume stays on disk untouched.
+            && boardCancelOwnsFoundRun({
+              runId: info.runId,
+              knownRunId: recoveredRunId,
+              ownsExistingRecoveryRun: persistedCleanup?.ownsExistingRecoveryRun === true,
+              // With no saved record (the app closed mid-turn before any
+              // cancel), the card itself still says what the turn was: a
+              // re-score still owed, or a receipt that names a run. The
+              // card's receipt is used for this test only, never for removal.
+              rescoreOnly: persistedCleanup?.rescoreOnly === true
+                || (!cancelledAuthority && !!pendingSavedJobsRescore(getNode(id)?.data)),
+              authority: cancelledAuthority || (
+                getNode(id)?.data?.analysisOperation?.authority?.semanticBase?.runId
+                  ? getNode(id).data.analysisOperation.authority
+                  : null
+              ),
+              manifestAuthority: info.operationAuthority || null,
+            })
           ) {
             if (recoveredRunId && recoveredRunId !== info.runId) {
               throw new Error('The Job Search recovery token changed while cancellation was settling.');
@@ -10389,6 +10503,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         ownsExistingRecoveryRun: control.ownsExistingRecoveryRun === true,
         runCleanupAuthorized: control.runCleanupAuthorized === true || runCleanupAuthorized,
         operationAuthority: control.cancelledAuthority,
+        // Kept on the saved record so a retry after a reload still knows this
+        // turn started no search run of its own.
+        rescoreOnly: control.rescoreOnly === true,
       });
       if (!window.electronAPI?.cancelNodeTaskAndWait) {
         window.electronAPI?.cancelNodeTask?.(id, reason);
@@ -10447,6 +10564,22 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       ) {
         if (control.cancelledRunId && control.cancelledRunId !== info.runId) {
           throw new Error('The Job Search recovery token changed while cancellation was settling.');
+        }
+        // The lookup returns any unfinished run saved for this hub, including
+        // one an earlier session left behind. Only the run this turn started
+        // or was resuming is this cancellation's to remove.
+        if (!boardCancelOwnsFoundRun({
+          runId: info.runId,
+          knownRunId: control.cancelledRunId,
+          ownsExistingRecoveryRun: control.ownsExistingRecoveryRun === true,
+          rescoreOnly: control.rescoreOnly === true,
+          authority: control.cancelledAuthority,
+          manifestAuthority: info.operationAuthority || null,
+        })) {
+          EventLogger.log(
+            `[JobSearch][${id}] Board cancel kept an earlier unfinished search; this turn did not start it`,
+          );
+          return;
         }
         control.cancelledRunId = info.runId;
         control.cancelledAuthority ||= info.operationAuthority || null;
@@ -10906,6 +11039,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       manualAiRunId = createManualAiRunId(id);
       control.manualAiRunId = manualAiRunId;
       EventLogger.log(`[JobSearch][${id}] Saved jobs re-scored; searching platforms past their cooldown in the same Board run (${(follow.dueSourceIds || []).join(', ') || 'none named'})`);
+      // From here the turn starts a search run of its own, so a cancel may
+      // remove that run again.
+      control.rescoreOnly = false;
       const scrape = await runFreshBoardImport(capability, manualAiRunId);
       if (cancelled() || scrape?.status === 'completed' || scrape?.status === 'cancelled' || scrape?.status === 'paused') {
         return scrape;
@@ -11081,6 +11217,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // search"), so a re-score that leaves nothing to show cannot start a
         // search the button did not promise.
         const rescoreAnnouncedSearch = savedJobsRescoreFollowUp(liveNode, { boardId: orchestratorNodeId }).scrape;
+        // While only the re-score runs, this turn has started no search run.
+        // A cancel must then leave any older unfinished search on disk alone.
+        control.rescoreOnly = true;
         outcome = providerPhaseOnlyRecovery && !allowFreshProviderBootstrap
           ? searchRunOutcome('paused', {
             reason: 'awaiting-explicit-ai-continue',
@@ -11971,6 +12110,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         return searchRunOutcome('cancelled');
       }
       await completeManualAiRun(manualAiRunId);
+      // A Board cancel can stop the AI handoff a moment before it marks this
+      // run cancelled, so the first check above can pass. By now the Board has
+      // put the card back as it was; writing a failure notice on top would
+      // undo part of that.
+      if (cancelled()) return searchRunOutcome('cancelled');
       EventLogger.error('[JobSearch] Saved-job hiring-fit re-analysis failed:', error);
       // No mutation of scoredJobs occurs until finishScoringAndSpawn succeeds.
       // Restore all summary fields explicitly as a defense against a queued or
@@ -11978,6 +12122,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const liveRestorePatch = restorePatch || reanalysisRestorePatch(runData);
       let reanalysisFailureRestoreAccepted = false;
       updateGlobal(currentId, (node) => {
+        if (cancelled()) return null;
         if (!careerSnapshotBindingMatches({ careerSnapshotId: node?.data?.careerSnapshotId }, admittedReanalysisCareerSnapshotId)) return null;
         reanalysisFailureRestoreAccepted = true;
         return {
@@ -12197,6 +12342,45 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         cleanupPromises.push({ kind: 'unknown-run', promise: Promise.reject(new Error('Legacy job run cleanup is unavailable')) });
       }
     }
+    // An interrupted search can leave its saved files on disk under a run id
+    // this hub no longer carries (for example a search that followed a
+    // re-score and was cut off by a quit). Once career data is cleared that
+    // run can never be resumed, its Resume offer is hidden, and while it
+    // stays on disk every new search on this hub is refused. Clear owns its
+    // removal, in both modes. The kept jobs' own run (same id as the hub's)
+    // is never touched here.
+    if (canvasFilePath && window.electronAPI?.peekJobRun && window.electronAPI?.discardJobRun) {
+      cleanupPromises.push({
+        kind: 'leftover-run',
+        promise: Promise.resolve().then(async () => {
+          const info = await window.electronAPI.peekJobRun({ canvasFilePath, nodeId: id });
+          if (info?.success === false) {
+            throw new Error(info.error || 'Could not check for an interrupted search to remove.');
+          }
+          // Career-only: protect the kept jobs' own run, read from the card
+          // (the in-memory run id can still name an abandoned resume).
+          const leftoverRunId = leftoverRunToDiscardOnClear(info, {
+            nodeId: id,
+            protectedRunId: clearsResults ? runId : (liveData.jobRunId || null),
+            clearedAt: jobAnalysisClearedAt,
+            startedAt: normalizeJobAnalysisClearWatermark(info?.startedAt),
+          });
+          if (!leftoverRunId) {
+            return { success: true, ok: true, cleared: false, absent: true };
+          }
+          EventLogger.log(`[JobSearch][${id}] Clear career files (${mode}) is removing an interrupted search left from an earlier session`);
+          const discarded = await window.electronAPI.discardJobRun({
+            canvasFilePath, nodeId: id, runId: leftoverRunId, operationAuthority: clearAuthority,
+          });
+          if (discarded?.ok === true && (discarded.cleared === true || discarded.absent === true)) {
+            document.dispatchEvent(new CustomEvent('job-run-recovery-ledger-changed', {
+              detail: { hubId: id, canvasFilePath, runId: leftoverRunId },
+            }));
+          }
+          return discarded;
+        }),
+      });
+    }
     if (window.electronAPI?.discardJobAnalysisSnapshot) {
       cleanupPromises.push({
         kind: 'analysis',
@@ -12325,7 +12509,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       } else if (mode === 'career') {
         addToast({
           title: 'Career Data Cleared',
-          description: `${clearedJobCount} saved job${clearedJobCount === 1 ? ' was' : 's were'} kept. Drop new career files to re-score ${clearedJobCount === 1 ? 'it' : 'them'}.`,
+          description: `${clearedJobCount} saved job${clearedJobCount === 1 ? ' was' : 's were'} kept. Drop new career files: ${clearedJobCount === 1 ? 'it is' : 'they are'} re-scored only when the career data changed by 10% or more.`,
           type: 'info',
         });
       } else {

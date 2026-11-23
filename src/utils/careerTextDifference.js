@@ -12,9 +12,12 @@
  * The result is 1 - 2 * shared / (characters in A + characters in B).
  *
  * Used to decide whether new career data is different enough (more than half
- * changed) to search platforms again inside their 24-hour cooldown.
+ * changed) to search platforms again inside their 24-hour cooldown, and
+ * whether it is close enough (under a tenth changed) to the version a card's
+ * saved jobs were scored with that their scores still stand.
  */
 export const CAREER_CHANGE_RESCRAPE_THRESHOLD = 0.5;
+export const CAREER_CHANGE_RESCORE_THRESHOLD = 0.1;
 
 function wordPairBag(text) {
   const words = String(text || '').toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
@@ -45,4 +48,13 @@ export function careerTextDifference(previousText, currentText) {
 /** True only for a measured difference strictly above the threshold. */
 export function careerChangeLiftsCooldown(difference) {
   return Number.isFinite(difference) && difference > CAREER_CHANGE_RESCRAPE_THRESHOLD;
+}
+
+/**
+ * True only for a measured difference strictly below the re-score threshold:
+ * the saved jobs' scores are kept. Exactly 10%, more, or an unmeasured
+ * difference re-scores.
+ */
+export function careerChangeKeepsSavedScores(difference) {
+  return Number.isFinite(difference) && difference >= 0 && difference < CAREER_CHANGE_RESCORE_THRESHOLD;
 }

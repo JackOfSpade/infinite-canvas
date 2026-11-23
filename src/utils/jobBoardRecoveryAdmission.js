@@ -25,10 +25,16 @@ export function exactInterruptedRecoveryAdmission({
   nodeId,
   sourceData,
   platformsVerifying = false,
+  // The Board's own interrupted child: the run's age is not a reason to stop
+  // (the 24-hour mark is a display hint; the resume itself has no age limit,
+  // and refusing here would leave only Cancel, which discards the run).
+  allowAged = false,
 } = {}) {
   if (platformsVerifying) return { ok: false, reason: 'platforms-verifying' };
   if (!info?.found) return { ok: false, reason: 'not-found' };
-  if (info.resumable !== true) return { ok: false, reason: 'not-resumable' };
+  if (info.resumable !== true && !(allowAged === true && info.incomplete === true)) {
+    return { ok: false, reason: 'not-resumable' };
+  }
   if (typeof nodeId !== 'string' || !nodeId || info.nodeId !== nodeId) {
     return { ok: false, reason: 'wrong-owner' };
   }
@@ -69,6 +75,54 @@ export function exactInterruptedRecoveryAdmission({
     canonicalLocation: manifestLocation,
     profileFingerprint: manifestFingerprint,
   };
+}
+
+// True when the Board's saved plan names this Search as a child it had already
+// started: the app closed (or was paused) while that child was running.
+export function isInterruptedBoardChild(plan, sourceId) {
+  if (!plan || plan.phase !== 'searches' || typeof sourceId !== 'string' || !sourceId) return false;
+  return plan.activeSourceId === sourceId
+    || (Array.isArray(plan.activeSourceIds) && plan.activeSourceIds.includes(sourceId));
+}
+
+/**
+ * Whether the Board may look on disk for this Search's unfinished run before
+ * deciding the Search is not ready.
+ *
+ * A paused source still belongs to its Source-card Resolve/Skip path, so a
+ * `sources-ready` card never probes. Otherwise a probe is allowed when:
+ *   - the only obstacle is the current platform selection or an already
+ *     consumed import (the unfinished run carries its own frozen inputs); or
+ *   - the Board's own saved plan had already started this Search and the card
+ *     now reads as "needs new career data". An interrupted search leaves its
+ *     AI-handoff marker on the card, and that marker alone makes a completed
+ *     card read that way; the unfinished run on disk is the real state.
+ * Only an exact run can continue; a missing one stays not-ready.
+ */
+export function boardMayProbeInterruptedRun(readiness, sourceData, { interruptedBoardChild = false } = {}) {
+  const probeReason = readiness?.statusLabel === 'Needs platform'
+    || readiness?.boardAction === 'fresh-import-blocked'
+    || (interruptedBoardChild === true && readiness?.boardAction === 'terminal-blocked');
+  return probeReason
+    && sourceData?.hubState !== 'sources-ready'
+    && !!sourceData?.resumeProfile
+    && typeof sourceData.resumeProfile === 'object';
+}
+
+/**
+ * The id of an unfinished search run on disk that belongs to this Search and
+ * is not the run its saved results came from, or null.
+ */
+/** True when the lookup itself failed, so nothing is known about the disk. */
+export function unfinishedRunLookupFailed(info) {
+  return !info || info.success === false;
+}
+
+export function ownedUnfinishedRunOnDisk(info, { nodeId, savedRunId = null } = {}) {
+  if (info?.found !== true || typeof nodeId !== 'string' || !nodeId || info.nodeId !== nodeId) return null;
+  const runId = typeof info.runId === 'string' ? info.runId.trim() : '';
+  if (!runId || runId === savedRunId) return null;
+  return runId;
 }
 
 // `resumeRunId` is a compare-and-clear capability. When the main process
