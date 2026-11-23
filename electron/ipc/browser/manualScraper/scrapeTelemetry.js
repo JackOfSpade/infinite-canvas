@@ -417,7 +417,7 @@ function collapseRepeatedCardWalk(events, entry) {
 }
 
 const FIELD_ANOMALY_PHASES = new Set([
-  'desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort', 'detail-appcast-restriction', 'detail-panel-rate-limit', 'detail-panel-http-error', 'google-apply-links-rate-limited', 'detail-block-reprobe', 'detail-block-reprobe-partial', 'detail-block-reprobe-failed', 'detail-block-cleared', 'challenge-text-suppressed', 'challenge-resolved', 'panel-walk-interrupt',
+  'desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-offsite-challenge', 'detail-navigation-abort', 'detail-appcast-restriction', 'detail-panel-rate-limit', 'detail-panel-http-error', 'google-apply-links-rate-limited', 'detail-block-reprobe', 'detail-block-reprobe-partial', 'detail-block-reprobe-failed', 'detail-block-cleared', 'challenge-text-suppressed', 'challenge-resolved', 'panel-walk-interrupt',
 ]);
 
 const ACTIVE_CONTEXT_RESET_PHASES = new Set(['source-start', 'query-start', 'page-extract', 'source-finished', 'recovery-start']);

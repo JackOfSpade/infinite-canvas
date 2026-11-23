@@ -348,6 +348,26 @@ export function shouldNavigateForDescription(sourceId, rawUrl, context = {}) {
 }
 
 /**
+ * A ZipRecruiter "job-redirect" row opens another site: the employer's page,
+ * an applicant tracker, or another job board (jooble.org's search results for
+ * a closed listing, 2026-11-23). A check shown there is that site's, not
+ * ZipRecruiter's: solving it gains nothing ZipRecruiter needs, and the app does
+ * not support those sites, so the row keeps its list fields and the pass moves
+ * on instead of waiting for a person. Appcast's click host is excluded: its
+ * restriction has its own bounded recovery.
+ */
+export function isOffSiteZipRecruiterDetail(sourceId, rawUrl) {
+  if (sourceId !== 'ziprecruiter') return false;
+  try {
+    const host = new URL(String(rawUrl || '').trim()).hostname.toLowerCase();
+    if (!host) return false;
+    return host !== 'ziprecruiter.com' && !host.endsWith('.ziprecruiter.com') && host !== 'click.appcast.io';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * ZipRecruiter redirects a closed posting to its authenticated jobseeker home
  * page instead of returning a 404. Keep this URL-only so the live page probe
  * and deterministic regression tests share the same narrow classification.

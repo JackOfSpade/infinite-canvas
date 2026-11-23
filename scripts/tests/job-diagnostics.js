@@ -1,3 +1,4 @@
+import { isOffSiteZipRecruiterDetail } from '../../electron/ipc/browser/manualScraper/detailParsing.js';
 import { ALL_COMP_SOURCE_IDS, buildJobCompletionAssessment, filterJobsByAge, getJobSearchTransientKeysForSave, COL_X, assert, applyBugReportCode, buildCoverLetterDocument, buildJobRecoverySnapshot, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildScoringAudit, calibratedScoreForJob, canonicalSalaryRangeLabel, chunkScoringBatches, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, assertRetainedResumeRoleBullets, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getGlassdoorLocIdCache, getJobAnalysisPaths, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, inspectJobBoardRoleByIndex, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeRecoveredScoreRows, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeJobBoardRoleByIndex, normalizeRangesWithRepairs, parseSalaryToNumeric, path, planJobCardDeletionCleanup, prepareLiveScoringResults, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, salaryRangeMetadata, sanitizeJobTaxonomy, saveGlassdoorLocId, scoringAuditRowsFromBatches, shouldNavigateForDescription, descriptionNavigationDecision, isUnavailableDetailPage, shouldReflowMeasuredJobCard, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, tryGetStore, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, validateJobBoardRoleTaxonomy, validateJobScoringSubmission, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
 import { readJobsSource, readJobsSources } from './jobsSourceFixture.mjs';
 import { readManualScraperSources } from './manualScraperSourceFixture.mjs';
@@ -174,6 +175,24 @@ async function assertRendererCancellationCause() {
 }
 
 export default [
+  {
+    name: 'A check on another site after a ZipRecruiter redirect is skipped, never waited on',
+    run() {
+      // 2026-11-23: a job-redirect row landed on jooble.org's search results
+      // (closedJob=True) behind Cloudflare, and the pass waited for a person.
+      assert(isOffSiteZipRecruiterDetail('ziprecruiter', 'https://jooble.org/SearchResult?ukw=x&closedJob=True'));
+      assert(isOffSiteZipRecruiterDetail('ziprecruiter', 'https://boards.greenhouse.io/acme/jobs/1'));
+      assert(!isOffSiteZipRecruiterDetail('ziprecruiter', 'https://www.ziprecruiter.com/c/Acme/Job/x'), 'ZipRecruiter\'s own check is still shown');
+      assert(!isOffSiteZipRecruiterDetail('ziprecruiter', 'https://ziprecruiter.com/jobseeker/home'));
+      assert(!isOffSiteZipRecruiterDetail('ziprecruiter', 'https://click.appcast.io/t/x'), 'Appcast keeps its own recovery');
+      assert(!isOffSiteZipRecruiterDetail('indeed', 'https://jooble.org/x'), 'other sources are unchanged');
+      assert(!isOffSiteZipRecruiterDetail('ziprecruiter', 'not a url'));
+      const loop = fs.readFileSync('electron/ipc/browser/manualScraper/expandByNavigation.js', 'utf8');
+      const skip = loop.indexOf("phase: 'detail-offsite-challenge'");
+      assert(skip > 0 && skip < loop.indexOf("phase: 'detail-challenge', srcName: overlayBase.srcName,"), 'the off-site skip runs before any check is presented');
+      assert(loop.indexOf("reason: 'offsite-rate-limit'") > 0 && loop.indexOf("reason: 'offsite-rate-limit'") < loop.indexOf('zipRecruiter429Retries++'), 'another site\'s rate limit never starts ZipRecruiter\'s own wait and stop');
+    },
+  },
   ...jobSearchDateReportTests,
   {
     name: 'Official posting audit captures collapsed and nested saved results without private listing fields',

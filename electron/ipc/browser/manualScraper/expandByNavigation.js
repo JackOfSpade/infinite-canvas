@@ -15,6 +15,7 @@ import {
   inertDescriptionText,
   isAppcastTemporaryRestriction,
   isDetachedDetailFrameError,
+  isOffSiteZipRecruiterDetail,
   isUnavailableDetailPage,
   isZipRecruiterClosedDetailRedirect,
   isZipRecruiterDetailErrorShell,
@@ -603,6 +604,18 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
           break;
         }
 
+        // Another site's rate limit after a redirect is not ZipRecruiter's: it
+        // must not slow or stop this pass (the row is simply left as listed).
+        if (sourceId === 'ziprecruiter' && (navigationStatus === 429 || pageInfo.isRateLimited)
+          && isOffSiteZipRecruiterDetail(sourceId, rawPageInfo.finalUrl || fetchPage.url())) {
+          recordManualScraperTelemetry({
+            phase: 'desc-miss', srcName: overlayBase.srcName,
+            key: `${(job.title || job.url || '?').slice(0, 65)} | off-site rate limit`,
+            reason: 'offsite-rate-limit', status: navigationStatus,
+            expectedUrl: viewUrl.slice(0, 240), finalUrl: String(rawPageInfo.finalUrl || fetchPage.url()).slice(0, 240),
+          }, { updateActive: false });
+          continue;
+        }
         if (sourceId === 'ziprecruiter' && (navigationStatus === 429 || pageInfo.isRateLimited)) {
           const retryAfter = navigationResponse?.headers?.()?.['retry-after'];
           const waitMs = zipRecruiterRetryAfterMs(retryAfter);
@@ -638,6 +651,26 @@ export async function expandDescriptionsByNavigation(page, jobs, sourceId, overl
             reason: 'rate-limit-detail-pass-stopped', status: navigationStatus,
           }, { updateActive: false });
           break;
+        }
+
+        // Another site's check after a ZipRecruiter redirect is never shown
+        // to the person and never stops the pass: keep this row's list fields
+        // and go on to the next row.
+        const offSiteChallengeUrl = String(challengeSignals?.url || rawPageInfo.finalUrl || fetchPage.url() || '');
+        if (detailChallengeAction !== 'none' && isOffSiteZipRecruiterDetail(sourceId, offSiteChallengeUrl)) {
+          let offSiteHost = '';
+          try { offSiteHost = new URL(offSiteChallengeUrl).hostname; } catch { /* unparseable */ }
+          logger.info(`[BrowserScraper] ${overlayBase.srcName} redirected "${job.title || job.url || '?'}" to ${offSiteHost || 'another site'}, which showed a check; keeping the listing without its description`);
+          recordManualScraperTelemetry({
+            phase: 'detail-offsite-challenge', sourceId, srcName: overlayBase.srcName,
+            key: (job.title || job.url || '?').slice(0, 80),
+            reason: challengeSignals?.reason, title: challengeSignals?.title,
+            disposition: detailChallengeAction,
+            navigationStatus,
+            expectedUrl: viewUrl.slice(0, 240),
+            finalUrl: offSiteChallengeUrl.slice(0, 240),
+          }, { updateActive: false });
+          continue;
         }
 
         if (detailChallengeAction !== 'none') {
