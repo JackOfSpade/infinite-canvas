@@ -4,8 +4,9 @@
 const MAIN_KINDS = Object.freeze({
   'main-stall': 'App process could not respond (delays every button that asks the app for something)',
   'save-serialize': 'Auto-save: turning the canvas into text on the app process (blocks it)',
-  'save-compress': 'Auto-save: removing repeated content and proving it restores (worker thread, does not block)',
-  'save-compress-fallback': 'Auto-save: the same work done on the app process because the worker failed (blocks it)',
+  'save-compress': 'Auto-save: removing repeated content and proving it restores (separate process, does not block the app)',
+  'save-compress-unpooled': 'Auto-save: separate process finished but kept the plain form (nothing repeated, or the pooled form did not restore identically)',
+  'save-compress-failed': 'Auto-save: separate process failed; saved without removing repeated content',
   'save-request': 'Auto-save: whole request inside the app process, including the disk write',
 });
 const RENDERER_KINDS = Object.freeze({
@@ -15,23 +16,36 @@ const RENDERER_KINDS = Object.freeze({
   'save-handoff': 'Auto-save: handing the canvas to the app process (blocks the window)',
   'save-total': 'Auto-save: start to confirmed write (does not block)',
 });
+// Fixed reason codes a kind may carry; anything else is dropped.
+const MAIN_KIND_REASONS = Object.freeze({
+  'save-compress-failed': Object.freeze(['timeout', 'exit', 'no-result', 'other']),
+});
 const KEEP_PER_KIND = 30;
 const SHOWN_PER_KIND = 8;
 const STALL_SAMPLE_MS = 100;
 const STALL_MINIMUM_MS = 200;
 
 const rings = new Map(Object.keys(MAIN_KINDS).map(kind => [kind, []]));
-const totals = new Map(Object.keys(MAIN_KINDS).map(kind => [kind, { count: 0, worstMs: 0 }]));
+const totals = new Map(Object.keys(MAIN_KINDS).map(kind => [kind, {
+  count: 0, worstMs: 0, ...(MAIN_KIND_REASONS[kind] ? { reasons: {} } : {}),
+}]));
 const startedAt = Date.now();
 
-export function recordMainPerf(kind, ms, megabytes = null) {
+/** `reason` is kept only when it is one of the kind's fixed codes. */
+export function recordMainPerf(kind, ms, megabytes = null, reason = null) {
   const ring = rings.get(kind);
   const duration = Math.round(Number(ms));
   if (!ring || !Number.isFinite(duration) || duration < 0) return;
   const total = totals.get(kind);
   total.count += 1;
   total.worstMs = Math.max(total.worstMs, duration);
-  ring.push({ at: Date.now(), ms: duration, ...(Number.isFinite(megabytes) ? { mb: Math.round(megabytes * 10) / 10 } : {}) });
+  const code = MAIN_KIND_REASONS[kind]?.includes(reason) ? reason : null;
+  if (code) total.reasons[code] = (total.reasons[code] || 0) + 1;
+  ring.push({
+    at: Date.now(), ms: duration,
+    ...(Number.isFinite(megabytes) ? { mb: Math.round(megabytes * 10) / 10 } : {}),
+    ...(code ? { reason: code } : {}),
+  });
   if (ring.length > KEEP_PER_KIND) ring.shift();
 }
 
@@ -45,13 +59,24 @@ const stallTimer = setInterval(() => {
 }, STALL_SAMPLE_MS);
 stallTimer.unref?.();
 
+const REASON_CODES = new Set(Object.values(MAIN_KIND_REASONS).flat());
+
+function reasonSummary(reasons) {
+  if (!reasons || typeof reasons !== 'object') return '';
+  const parts = [...REASON_CODES]
+    .filter(code => Number.isInteger(reasons[code]) && reasons[code] > 0)
+    .map(code => `${code} ${reasons[code]}`);
+  return parts.length ? ` · by reason: ${parts.join(', ')}` : '';
+}
+
 function cleanRecord(record) {
   const at = Number(record?.at);
   const ms = Number(record?.ms);
   if (!Number.isFinite(at) || !Number.isFinite(ms) || ms < 0) return null;
   const size = Number.isInteger(record?.nodes) && record.nodes >= 0 ? ` · ${record.nodes} nodes on the open level`
     : Number.isFinite(record?.mb) ? ` · ${record.mb} MB` : '';
-  return { at, text: `${new Date(at).toISOString()} · ${Math.round(ms)} ms${size}` };
+  const reason = REASON_CODES.has(record?.reason) ? ` · ${record.reason}` : '';
+  return { at, text: `${new Date(at).toISOString()} · ${Math.round(ms)} ms${size}${reason}` };
 }
 
 function kindLines(label, total, records) {
@@ -60,7 +85,7 @@ function kindLines(label, total, records) {
   const count = Number.isInteger(total?.count) && total.count >= 0 ? total.count : rows.length;
   const worst = Number.isFinite(total?.worstMs) ? Math.round(total.worstMs) : 0;
   if (!count) return [`- **${label}:** none recorded.`];
-  return [`- **${label}:** ${count} recorded · worst ${worst} ms · newest first:`, ...rows.map(row => `  - ${row.text}`)];
+  return [`- **${label}:** ${count} recorded · worst ${worst} ms${reasonSummary(total?.reasons)} · newest first:`, ...rows.map(row => `  - ${row.text}`)];
 }
 
 const minutes = ms => (Number.isFinite(ms) && ms >= 0 ? `${Math.round(ms / 60000)} min` : 'unknown time');

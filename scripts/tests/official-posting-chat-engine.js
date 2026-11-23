@@ -331,13 +331,13 @@ export default [
           assert.equal(observation.candidateCount, 2);
           assert.equal(observation.comparisonRuns, 2);
           assert.equal(observation.outcome, 'found'); assert.equal(observation.settled, true);
-          assert.deepEqual(observation.chatStats, { finderCalls: 1, judgeRounds: 1, judgeCalls: 2,
-            snapshotReads: 0, snapshotFailures: 2, truncatedSnapshots: 0, postingDataSnapshots: 0, renderedSnapshots: 0, renderFailures: 0 });
+          assert.deepEqual(observation.chatStats, { finderCalls: 1, judgeRounds: 1, judgeCalls: 2, judgeAddedLeads: 0,
+            snapshotReads: 0, snapshotFailures: 2, notFoundSnapshots: 0, truncatedSnapshots: 0, postingDataSnapshots: 0, renderedSnapshots: 0, renderFailures: 0 });
           await resolveOfficialPostings([row], { store, snapshotFetch: offline, callRaw: () => { throw new Error('cached'); } });
           assert.deepEqual(getOfficialPostingDiscoveryDiagnosticsSnapshot(), before);
           const markdown = buildOfficialPostingDiscoveryMarkdown();
           assert.match(markdown, /candidates 2 · validated comparison runs 2/);
-          assert.match(markdown, /finder calls 1 · judge rounds 1 · judge calls 2 · snapshots read 0 · with posting data 0 · snapshot failures 2/);
+          assert.match(markdown, /finder calls 1 · judge rounds 1 · judge calls 2 · judge-added leads 0 · snapshots read 0 · with posting data 0 · answered not found 0 · snapshot failures 2/);
           for (const privateText of [DESCRIPTION, POSTING, CAREERS, row.company, row.title]) assert.equal(markdown.includes(privateText), false);
         });
       } finally { _resetOfficialPostingDiscoveryDiagnosticsForTests(); }
@@ -355,8 +355,8 @@ export default [
           assert.equal(observation.candidateCount, 0); assert.equal(observation.comparisonRuns, 0);
           assert.equal(observation.settled, false);
           assert.deepEqual(observation.resolutionReasons, ['research-miss']);
-          assert.deepEqual(observation.chatStats, { finderCalls: 2, judgeRounds: 0, judgeCalls: 0,
-            snapshotReads: 0, snapshotFailures: 0, truncatedSnapshots: 0, postingDataSnapshots: 0, renderedSnapshots: 0, renderFailures: 0 });
+          assert.deepEqual(observation.chatStats, { finderCalls: 2, judgeRounds: 0, judgeCalls: 0, judgeAddedLeads: 0,
+            snapshotReads: 0, snapshotFailures: 0, notFoundSnapshots: 0, truncatedSnapshots: 0, postingDataSnapshots: 0, renderedSnapshots: 0, renderFailures: 0 });
           const callRaw = async (prompt, options) => options.task === 'job-official-posting-research'
             ? research(requestedIds(prompt)) : JSON.stringify(unresolvedAnswer('uncertain'));
           await resolveOfficialPostings([job()], { store, snapshotFetch: offline, callRaw });
@@ -366,6 +366,35 @@ export default [
           assert.equal(observation.settled, false); assert.equal(observation.outcome, 'ambiguous');
           assert.deepEqual(observation.resolutionReasons, ['semantic-uncertain']);
           assert.equal(observation.chatStats.judgeCalls, 4); assert.equal(observation.chatStats.judgeRounds, 2);
+        });
+      } finally { _resetOfficialPostingDiscoveryDiagnosticsForTests(); }
+    },
+  },
+  {
+    name: 'Production discovery recounts snapshots after a judge-added lead, and a page that answered not found is not a snapshot failure',
+    async run() {
+      _resetOfficialPostingDiscoveryDiagnosticsForTests();
+      try {
+        await withStore(async store => {
+          const ADDED = 'https://northwind.test/careers/dispatch-engineer-closed';
+          const snapshotFetch = async url => {
+            const error = new Error('synthetic');
+            error.code = url === ADDED ? 'closed' : 'fetch-failed';
+            throw error;
+          };
+          const callRaw = async (prompt, options) => options.task === 'job-official-posting-research'
+            ? research(requestedIds(prompt)) : JSON.stringify({ ...unresolvedAnswer('uncertain'), conflicts: [`The employer may list it at ${ADDED}.`] });
+          await resolveOfficialPostings([job()], { store, snapshotFetch, callRaw });
+          const observation = getOfficialPostingDiscoveryDiagnosticsSnapshot().observations[0];
+          assert.equal(observation.candidateCount, 2, 'candidates stay the finder-supplied leads');
+          assert.equal(observation.chatStats.judgeRounds, 2);
+          assert.equal(observation.chatStats.judgeAddedLeads, 1);
+          assert.equal(observation.chatStats.notFoundSnapshots, 1);
+          assert.equal(observation.chatStats.snapshotFailures, 2);
+          assert.equal(observation.chatStats.snapshotReads, 0);
+          const markdown = buildOfficialPostingDiscoveryMarkdown();
+          assert.match(markdown, /judge-added leads 1 · snapshots read 0 · with posting data 0 · answered not found 1 · snapshot failures 2/);
+          assert.equal(markdown.includes(ADDED), false);
         });
       } finally { _resetOfficialPostingDiscoveryDiagnosticsForTests(); }
     },

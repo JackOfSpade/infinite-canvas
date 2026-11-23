@@ -5,6 +5,26 @@ export const COMPENSATION_REPORT_STATUSES = new Set(['competitive', 'lower_marke
 export const COMPENSATION_THRESHOLD_CHECKS = new Set(['consistent', 'inconsistent', 'no_comparison']);
 export const COMPENSATION_RECOMMENDATION_STATUSES = new Set(['personalized', 'market_estimate', 'unavailable', 'absent']);
 export const COMPENSATION_RECOMMENDATION_CHECKS = new Set(['valid_saved_guidance', 'invalid_saved_guidance', 'unavailable', 'absent']);
+// Title of the work-location receipt that salary research appends to
+// sourceLinks (locationSourceLink in electron/ipc/jobLocationLookup.js). It
+// records where the work location was read, not salary evidence, so the
+// report counts it apart from market sources. A test pins the two together.
+export const COMPENSATION_LOCATION_RECEIPT_TITLE = 'Employer posting (work location)';
+
+// Counts saved source links from the raw assessment, because the normalized
+// copy keeps only five and could drop the receipt. Only link-shaped entries
+// with a URL count, matching what the card can show.
+function sourceLinkCounts(rawLinks) {
+  let marketSourceCount = 0;
+  let locationReceipt = false;
+  for (const link of Array.isArray(rawLinks) ? rawLinks.slice(0, 50) : []) {
+    const url = typeof link === 'string' ? link : link && typeof link === 'object' ? (link.url ?? link.href ?? link.link) : '';
+    if (typeof url !== 'string' || !url.trim()) continue;
+    if (link?.title === COMPENSATION_LOCATION_RECEIPT_TITLE) locationReceipt = true;
+    else marketSourceCount++;
+  }
+  return { marketSourceCount, locationReceipt };
+}
 
 // Capture before report filters remove nodes; never retain salary prose,
 // source URLs, career evidence, personal desired salary, or justification text.
@@ -39,6 +59,9 @@ export function collectJobCompensationReport(nodes, { flat = false } = {}) {
       const gapPercent = display.determined && threshold > 0 && assessment.offered.max > 0
         ? Math.max(-999, Math.min(999, Math.round((assessment.offered.max / threshold - 1) * 1000) / 10)) : null;
       const personal = assessment.personalRecommendation;
+      const rawAssessment = job.compensationAssessment;
+      const links = sourceLinkCounts(rawAssessment && typeof rawAssessment === 'object'
+        ? rawAssessment.sourceLinks ?? rawAssessment.sources ?? rawAssessment.evidence : null);
       const rawPersonal = job.compensationAssessment?.personalRecommendation;
       rows.push({
         id: typeof node.id === 'string' ? node.id.slice(0, 256) : '',
@@ -47,7 +70,8 @@ export function collectJobCompensationReport(nodes, { flat = false } = {}) {
         offerReason: display.offerReason,
         advertised: display.hasAdvertisedPay,
         marketRange: assessment.competitiveRange.min > 0 && assessment.competitiveRange.max > 0,
-        sourceCount: assessment.sourceLinks.length,
+        marketSourceCount: links.marketSourceCount,
+        locationReceipt: links.locationReceipt,
         thresholdCheck: assessment.reasonCode === 'inconsistent_comparison_verdict' ? 'inconsistent'
           : !display.determined ? 'no_comparison'
           : assessment.status === expectedStatus ? 'consistent' : 'inconsistent',

@@ -358,6 +358,19 @@ async function recordJudgment(store, entry) {
   } catch { /* Diagnostics must not affect the lookup. */ }
 }
 
+/** Per-row snapshot counts from every snapshot the judges were given. A page that answered
+ * not found (404, 410 or closed) was reached, so it is counted apart from pages that could not be read. */
+function tallySnapshots(counts, snapshots) {
+  counts.snapshotReads = snapshots.filter(snapshot => snapshot.read === true).length;
+  counts.notFoundSnapshots = snapshots.filter(snapshot => snapshot.read !== true && snapshot.notFound === true).length;
+  counts.snapshotFailures = snapshots.filter(snapshot => snapshot.read !== true && snapshot.notFound !== true).length;
+  counts.truncatedSnapshots = snapshots.filter(snapshot => snapshot.descriptionTruncated || snapshot.pageTextTruncated).length;
+  // A read page can be an empty shell. Only these held a posting's own fields rather than the whole page's text.
+  counts.postingDataSnapshots = snapshots.filter(snapshot => snapshot.read === true && (snapshot.title || snapshot.description)).length;
+  counts.renderedSnapshots = snapshots.filter(snapshot => snapshot.rendered === true).length;
+  counts.renderFailures = snapshots.filter(snapshot => snapshot.renderFailed).length;
+}
+
 /** Claude does all finding and judging. The host sends handoffs, checks each answer's format and quotes,
  * compares the two judgments (each its own session) for equality, and stores the agreed result. */
 export async function resolveOfficialPostings(jobs, {
@@ -374,7 +387,7 @@ export async function resolveOfficialPostings(jobs, {
   const stats = telemetryBlock();
   const results = new Map(); const finished = new Set(); const found = new Map();
   const discovery = new Map(members.map(member => [member, { finderCalls: 0, judgeRounds: 0, judgeCalls: 0,
-    comparisonRuns: 0, snapshotReads: 0, snapshotFailures: 0, truncatedSnapshots: 0, postingDataSnapshots: 0, renderedSnapshots: 0, renderFailures: 0, failureCodes: [] }]));
+    comparisonRuns: 0, judgeAddedLeads: 0, snapshotReads: 0, snapshotFailures: 0, notFoundSnapshots: 0, truncatedSnapshots: 0, postingDataSnapshots: 0, renderedSnapshots: 0, renderFailures: 0, failureCodes: [] }]));
   const rowIndex = new Map();
   rows.forEach((job, index) => { if (!rowIndex.has(job)) rowIndex.set(job, index); });
   for (const member of members) {
@@ -566,13 +579,7 @@ export async function resolveOfficialPostings(jobs, {
     // One download of every lead, shared by both rounds: it is the judges' main input, since WebFetch cannot run JavaScript.
     let snapshots = signal?.aborted ? [] : await snapshotOfficialPostingLeads(leads, { fetch: snapshotSession.fetch, render: renderSession, signal, observe: readHealth.observe, readPage: pageReader });
     const counts = discovery.get(member);
-    counts.snapshotReads = snapshots.filter(snapshot => snapshot.read === true).length;
-    counts.snapshotFailures = snapshots.filter(snapshot => snapshot.read !== true).length;
-    counts.truncatedSnapshots = snapshots.filter(snapshot => snapshot.descriptionTruncated || snapshot.pageTextTruncated).length;
-    // A read page can be an empty shell. Only these held a posting's own fields rather than the whole page's text.
-    counts.postingDataSnapshots = snapshots.filter(snapshot => snapshot.read === true && (snapshot.title || snapshot.description)).length;
-    counts.renderedSnapshots = snapshots.filter(snapshot => snapshot.rendered === true).length;
-    counts.renderFailures = snapshots.filter(snapshot => snapshot.renderFailed).length;
+    tallySnapshots(counts, snapshots);
     const decide = answers => decideOfficialPostingJudgments(member.job, { leads, totalLeads: total, snapshots, answerA: answers.A, answerB: answers.B, now: clock,
       fallback: unresolvedOfficialPosting, comparativeTrail: officialPostingComparativeTrail,
       inputHash: officialPostingSemanticInputHash(member.job), extractRoute: url => extractAtsTenant(url),
@@ -611,6 +618,9 @@ export async function resolveOfficialPostings(jobs, {
     if (added.length) {
       leads = [...leads, ...added];
       snapshots = trimOfficialPostingSnapshots([...snapshots, ...await snapshotOfficialPostingLeads(added, { fetch: snapshotSession.fetch, render: renderSession, signal, observe: readHealth.observe, readPage: pageReader })]);
+      // The merged list holds every round's snapshots, so its tally replaces the first round's.
+      counts.judgeAddedLeads = added.length;
+      tallySnapshots(counts, snapshots);
     }
     const second = await judgePair(member, leads, 2, snapshots);
     answers.push(...Object.values(second.answers));

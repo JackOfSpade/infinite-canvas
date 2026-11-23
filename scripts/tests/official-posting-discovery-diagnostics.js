@@ -109,15 +109,16 @@ export default [
           sourceUrl: 'https://private.example.test/PRIVATE_ID', error: 'PRIVATE_ERROR',
         } }));
         const snapshot = getOfficialPostingDiscoveryDiagnosticsSnapshot();
-        assert.deepEqual(snapshot.observations[0].chatStats, { finderCalls: 1, judgeRounds: 2, judgeCalls: 5,
-          snapshotReads: null, snapshotFailures: 1_000_000_000, truncatedSnapshots: null, postingDataSnapshots: null, renderedSnapshots: null, renderFailures: null });
+        assert.deepEqual(snapshot.observations[0].chatStats, { finderCalls: 1, judgeRounds: 2, judgeCalls: 5, judgeAddedLeads: null,
+          snapshotReads: null, snapshotFailures: 1_000_000_000, notFoundSnapshots: null, truncatedSnapshots: null, postingDataSnapshots: null, renderedSnapshots: null, renderFailures: null });
         assert.deepEqual(snapshot.observations[0].resolutionReasons, ['source-unproven']);
         snapshot.observations[0].resolutionReasons.push('PRIVATE_MUTATION');
         assert.deepEqual(getOfficialPostingDiscoveryDiagnosticsSnapshot().observations[0].resolutionReasons, ['source-unproven']);
         snapshot.observations[0].chatStats.finderCalls = 99;
         assert.equal(getOfficialPostingDiscoveryDiagnosticsSnapshot().observations[0].chatStats.finderCalls, 1);
         const markdown = buildOfficialPostingDiscoveryMarkdown();
-        assert.match(markdown, /Chat discovery: finder calls 1 · judge rounds 2 · judge calls 5/);
+        assert.match(markdown, /Chat discovery: finder calls 1 · judge rounds 2 · judge calls 5 · judge-added leads not recorded/);
+        assert.match(markdown, /answered not found not recorded · snapshot failures 1000000000/);
         assert.match(markdown, /outcome link-only/);
         assert.match(markdown, /Chat resolution reasons: source-unproven/);
         assert.match(markdown, /not transport-owned correction attempts/);

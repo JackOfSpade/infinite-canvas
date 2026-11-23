@@ -13,7 +13,7 @@
  */
 import puppeteer from 'puppeteer-extra';
 import puppeteerCore from 'puppeteer-core';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { createStealthPlugins } from './browser/stealthPlugins.js';
 import electronPkg from 'electron';
 const { app } = electronPkg;
 import fs from 'fs';
@@ -32,7 +32,7 @@ import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 import { runRollingWorkers } from '../../src/utils/handoffScheduler.js';
 
 // Apply stealth evasions
-puppeteer.use(StealthPlugin());
+for (const plugin of createStealthPlugins({ onUnexpectedError: (error) => logger.warn(`[StealthBrowser] user-agent override failed: ${error?.message || error}`) })) puppeteer.use(plugin);
 
 // ── Tracker-URL patterns for the image request filter ───────────────────────
 // Only tracking pixels / beacons are allowed through; all other images are

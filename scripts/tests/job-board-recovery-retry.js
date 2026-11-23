@@ -5,7 +5,7 @@ import {
   terminalJobSearchOutcome,
 } from '../../src/utils/jobBoardPausedSourceContinuation.js';
 import { SAVED_HANDOFF_READY_MESSAGE, SAVED_SEARCH_PAUSE_MESSAGE } from '../../src/nodes/jobboard/boardRecoveryNotice.js';
-import { boardSelectorRuntimeDiagnostic, boardSelectorRuntimeSummary, recoveryClaimMap, sourceSelectorAdmissionDiagnostic } from '../../electron/ipc/bugReport/jobsSnapshot.js';
+import { JOB_BOARD_DIAGNOSTIC_ADMISSION_KINDS, boardSelectorRuntimeDiagnostic, boardSelectorRuntimeSummary, recoveryClaimMap, sourceSelectorAdmissionDiagnostic } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 
 // The exact source generation the paused Board recorded in
 // `boardScanResume.awaitingSourceResolution.jobRunId`.
@@ -308,6 +308,22 @@ export default [
       const liveClaims = recoveryClaimMap(rows(false)).get('root').get('source-1');
       assert(liveClaims.length > 0 && liveClaims.every(claim => claim.paused === false),
         'a Board run that is still live is not reported as paused');
+    },
+  },
+  {
+    name: 'Every source admission kind the Board selector acts on gets its own diagnostic verdict, re-scrape due included',
+    run() {
+      const source = { id: 'source-1', data: { hubState: 'done' } };
+      for (const kind of JOB_BOARD_DIAGNOSTIC_ADMISSION_KINDS) {
+        if (kind === 'intermediate-or-setup' || kind === 'invalid') continue;
+        const verdict = sourceSelectorAdmissionDiagnostic(source, kind);
+        assert.notStrictEqual(verdict.status, 'Not reproducible', `${kind} fell through to the default verdict`);
+      }
+      assert.deepStrictEqual(sourceSelectorAdmissionDiagnostic(source, 'rescrape-terminal'), {
+        ready: null,
+        status: 'Search & combine (re-scrape due) passes admission',
+        reason: 'live platform/location/verification checks not retained',
+      });
     },
   },
 ];

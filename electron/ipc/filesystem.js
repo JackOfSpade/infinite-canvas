@@ -1893,6 +1893,15 @@ function workspaceSaveWorkerPath() {
 // must not hold a save forever.
 const WORKSPACE_SAVE_WORKER_TIMEOUT_MS = 120_000;
 
+// Fixed failure classes for the PERF report: timeout, exit (the process ended
+// with an error code or signal, including running out of memory), no-result
+// (it ended cleanly without a readable reply) and other (could not start).
+function saveWorkerError(message, reason) {
+  const error = new Error(message);
+  error.saveWorkerReason = reason;
+  return error;
+}
+
 /**
  * Pools `plain` in a short-lived child process. Not a worker thread: Electron
  * shares one 4 GB heap between the main thread and all worker threads, so a
@@ -1922,7 +1931,7 @@ export function pooledFormInChildProcess(plain, {
     let settled = false;
     const timer = setTimeout(() => {
       try { child.kill('SIGKILL'); } catch { /* already gone */ }
-      settle(reject, new Error(`Canvas save worker took over ${Math.round(timeoutMs / 1000)}s.`));
+      settle(reject, saveWorkerError(`Canvas save worker took over ${Math.round(timeoutMs / 1000)}s.`, 'timeout'));
     }, timeoutMs);
     function settle(fn, value) {
       if (settled) return;
@@ -1934,7 +1943,7 @@ export function pooledFormInChildProcess(plain, {
     child.stdout.on('data', chunk => chunks.push(chunk));
     child.on('close', (code, signal) => {
       if (code !== 0) {
-        settle(reject, new Error(`Canvas save worker stopped early (${signal ? `signal ${signal}` : `code ${code}`}).`));
+        settle(reject, saveWorkerError(`Canvas save worker stopped early (${signal ? `signal ${signal}` : `code ${code}`}).`, 'exit'));
         return;
       }
       const output = Buffer.concat(chunks);
@@ -1945,7 +1954,7 @@ export function pooledFormInChildProcess(plain, {
       else if (status === 'M') {
         logger.warn('[FileSystem] Canvas content pool did not restore identically; saving without it.');
         settle(resolve, null);
-      } else settle(reject, new Error('Canvas save worker returned no readable result.'));
+      } else settle(reject, saveWorkerError('Canvas save worker returned no readable result.', 'no-result'));
     });
     // A worker that dies mid-read is reported by close.
     child.stdin.on('error', () => {});
@@ -1970,8 +1979,13 @@ export async function serializeWorkspaceForSaveOffThread(data, workerOptions = {
   started = performance.now();
   try {
     pooled = await pooledFormInChildProcess(plain, workerOptions);
-    recordMainPerf('save-compress', performance.now() - started, megabytes(pooled ?? plain));
+    // A null result (nothing repeated, or the pooled form did not restore
+    // identically) is its own kind, so it is not read as a pooled save.
+    recordMainPerf(pooled == null ? 'save-compress-unpooled' : 'save-compress',
+      performance.now() - started, megabytes(pooled ?? plain));
   } catch (error) {
+    const reason = ['timeout', 'exit', 'no-result'].includes(error?.saveWorkerReason) ? error.saveWorkerReason : 'other';
+    recordMainPerf('save-compress-failed', performance.now() - started, megabytes(plain), reason);
     logger.warn(`[FileSystem] Canvas save worker failed; saving the canvas without pooling: ${error?.message || error}`);
   }
   return pooled ?? plain;

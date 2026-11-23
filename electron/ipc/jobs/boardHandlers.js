@@ -1033,6 +1033,9 @@ export function registerBoardHandlers(ctx) {
         unscoredJobCount: unscored,
         failedBatchCount: failedBatches,
         candidatePoolJobCount: Array.isArray(snapshot.jobs) ? snapshot.jobs.length : null,
+        // Counts only: how the re-run Job Preferences split the candidate pool.
+        preferenceMatchedCount: preferenceEvaluation?.counts?.accepted ?? null,
+        preferenceFilteredCount: preferenceEvaluation?.counts?.filtered ?? null,
       });
     }
 

@@ -35,8 +35,8 @@ function count(value) {
 
 function chatCounts(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  return Object.freeze(Object.fromEntries(['finderCalls', 'judgeRounds', 'judgeCalls', 'snapshotReads',
-    'snapshotFailures', 'truncatedSnapshots', 'postingDataSnapshots', 'renderedSnapshots', 'renderFailures'].map(key => [key, count(value[key])])));
+  return Object.freeze(Object.fromEntries(['finderCalls', 'judgeRounds', 'judgeCalls', 'judgeAddedLeads', 'snapshotReads',
+    'snapshotFailures', 'notFoundSnapshots', 'truncatedSnapshots', 'postingDataSnapshots', 'renderedSnapshots', 'renderFailures'].map(key => [key, count(value[key])])));
 }
 
 /** Closed error classes only: arbitrary codes, messages and names may contain private data. */
@@ -107,7 +107,7 @@ export function buildOfficialPostingDiscoveryMarkdown() {
     '> Process-local, latest observation per source input, newest first; at most 200 inputs. Earlier attempts are replaced, not added to totals. No prior-process reconstruction is available after a restart.',
     '> Counts, closed handoff error classes and opaque input digests only. No listing identities, URLs, prompts, candidate text, raw errors or semantic proof hashes are retained.',
     '> Validated comparison runs count responses that passed host validation, not attempted calls, failed responses or research calls.',
-    '> Chat lookups report supplied leads as candidates. Chat resolution reasons retain final unsettled trail codes only. Chat counts include service calls across all review rounds, not transport-owned correction attempts. Snapshot failures do not prove the judges could not read a page themselves. Cache reuse does not create or relabel an observation.',
+    '> Chat lookups report finder-supplied leads as candidates; pages a judge named for the second review round are counted separately as judge-added leads. Chat resolution reasons retain final unsettled trail codes only. Chat counts include service calls and snapshots across all review rounds, not transport-owned correction attempts. Pages that answered not found (404, 410 or closed) are counted as answered not found, not as snapshot failures. Snapshot failures do not prove the judges could not read a page themselves. Cache reuse does not create or relabel an observation.',
     '> `worker-aborted` means the lookup was stopped from the app side (your Cancel, a removed card, or quitting the app), not that a worker failed; Non-API AI Handoff Lifecycle names the exact cancel cause.',
     `- Captured: ${new Date().toISOString()} · ${rows.length} input observation(s) retained`,
   ];
@@ -119,7 +119,7 @@ export function buildOfficialPostingDiscoveryMarkdown() {
       lines.push(`- ${row.at} · input #${row.input.slice(0, 10)} · candidates ${row.candidateCount ?? 'not recorded'} · validated comparison runs ${row.comparisonRuns ?? 'not recorded'} · outcome ${row.outcome} · settled ${row.settled === null ? 'not recorded' : row.settled ? 'yes' : 'no'}`);
       if (row.chatStats) {
         const chat = row.chatStats;
-        lines.push(`  - Chat discovery: finder calls ${chat.finderCalls ?? 'not recorded'} · judge rounds ${chat.judgeRounds ?? 'not recorded'} · judge calls ${chat.judgeCalls ?? 'not recorded'} · snapshots read ${chat.snapshotReads ?? 'not recorded'} · with posting data ${chat.postingDataSnapshots ?? 'not recorded'} · snapshot failures ${chat.snapshotFailures ?? 'not recorded'} · truncated snapshots ${chat.truncatedSnapshots ?? 'not recorded'} · opened in browser ${chat.renderedSnapshots ?? 'not recorded'} · browser attempts failed ${chat.renderFailures ?? 'not recorded'}`);
+        lines.push(`  - Chat discovery: finder calls ${chat.finderCalls ?? 'not recorded'} · judge rounds ${chat.judgeRounds ?? 'not recorded'} · judge calls ${chat.judgeCalls ?? 'not recorded'} · judge-added leads ${chat.judgeAddedLeads ?? 'not recorded'} · snapshots read ${chat.snapshotReads ?? 'not recorded'} · with posting data ${chat.postingDataSnapshots ?? 'not recorded'} · answered not found ${chat.notFoundSnapshots ?? 'not recorded'} · snapshot failures ${chat.snapshotFailures ?? 'not recorded'} · truncated snapshots ${chat.truncatedSnapshots ?? 'not recorded'} · opened in browser ${chat.renderedSnapshots ?? 'not recorded'} · browser attempts failed ${chat.renderFailures ?? 'not recorded'}`);
         lines.push(`  - Chat resolution reasons: ${row.resolutionReasons.length ? row.resolutionReasons.join(', ') : 'none'}`);
       }
       if (row.failureCodes.length) lines.push(`  - Handoff failure classes: ${row.failureCodes.join(', ')}`);

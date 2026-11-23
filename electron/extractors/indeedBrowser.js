@@ -9,7 +9,7 @@
 
 import { partitionAlreadyReadJobs } from '../ipc/browser/manualScraper/walkRules.js';
 import puppeteer from 'puppeteer-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { createStealthPlugins } from '../ipc/browser/stealthPlugins.js';
 import path from 'path';
 import electronPkg from 'electron';
 import { logger } from '../logger.js';
@@ -72,7 +72,7 @@ const injectOverlay  = (page) => page.evaluate(OVERLAY_SCRIPT).catch(() => {});
 
 const { app } = electronPkg;
 
-puppeteer.use(StealthPlugin());
+for (const plugin of createStealthPlugins({ onUnexpectedError: (error) => logger.warn(`[IndeedBrowser] user-agent override failed: ${error?.message || error}`) })) puppeteer.use(plugin);
 
 function getProfileDir() {
   try {

@@ -44,8 +44,9 @@ import { resolveNodePresence } from '../../src/utils/nodePresence.js';
 import { canAttemptJobSourceResolve, isJobSourceWarningGating } from '../../src/utils/jobSourceWarningPolicy.js';
 import { findJobSearchBoardActiveRecoveryOwner } from '../../src/utils/jobBoardSearchSelection.js';
 import { jobSearchRescrapeAvailability, resolveNextJobSearchRunWindow } from '../../src/utils/jobSearchSourceCoverage.js';
+import { pendingSavedJobsRescore } from '../../src/utils/jobSearchSplitClear.js';
 import { isGoogleJobsInternalUrl, normalizeJobListingExternalUrl } from '../../src/utils/jobListingUrl.js';
-import { buildApplicationOutputReportSnapshot, buildJobBoardDiagnostics, buildJobCompletionAssessment, buildJobLinkSnapshot, buildJobRecoveryOfferSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown, jobSourceHealthAlarmItems } from './bugReport/jobsSnapshot.js';
+import { buildApplicationOutputReportSnapshot, buildJobBoardDiagnostics, buildJobCompletionAssessment, buildJobLinkSnapshot, buildJobRecoveryOfferSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown, jobSourceHealthAlarmItems, sourceAdmissionKind } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
 import { buildMarketplaceModuleRollup } from './bugReport/marketplaceModuleRollup.js';
 import { buildSellHubPriceDropRollup } from './bugReport/sellHubPriceDropRollup.js';
@@ -1093,6 +1094,9 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
         const cleanupPending = !!d.terminalFinalizationRecovery
           || !!d.manualAiResume?.retirementPending
           || (Array.isArray(d.manualAiCleanupReceipts) && d.manualAiCleanupReceipts.length > 0);
+        if ((() => { try { return !!pendingSavedJobsRescore(d); } catch { return false; } })()) {
+          previewParts.push('savedJobsRescore: pending');
+        }
         const rescanReadiness = d.hubState !== 'done'
           ? `unavailable (hubState=${d.hubState || 'unknown'})`
           : recoveryOwner
@@ -1100,17 +1104,22 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
             : d.locked || d.queuedModuleRun || cleanupPending
               ? 'blocked (Search is busy or completing saved cleanup)'
               : (() => {
-                // Searches run only from a Job Board; say whether the next one
-                // would scrape this card again (see classifyJobBoardSourceAdmission).
-                const shown = !!d.jobRunId && d.boardShownRun?.runId === d.jobRunId;
-                const savedCount = Array.isArray(d.scoredJobs) ? d.scoredJobs.length : (Number(d.scoredJobsCount) || 0);
-                const availability = jobSearchRescrapeAvailability(d);
-                if (availability.due.length === 0 && availability.sourceIds.length > 0) {
+                // Searches run only from a Job Board. Ask the Board's own
+                // admission (career re-import and saved-job re-score come
+                // before any re-scrape) and word it as the Board section does.
+                const kind = sourceAdmissionKind({ id: n.id, type: n.type, data: d });
+                if (kind === 'rescrape-terminal') return 'due from the Job Board';
+                if (kind === 'rescrape-cooldown') {
+                  const availability = jobSearchRescrapeAvailability(d);
                   return `cooling down (next platform due ${Number.isFinite(availability.nextEligibleAt) ? new Date(availability.nextEligibleAt).toISOString() : 'unknown'})`;
                 }
-                return shown || savedCount === 0
-                  ? 'due from the Job Board'
-                  : 'not yet (its jobs have not been shown on a Board)';
+                if (kind === 'reuse-terminal') {
+                  const shown = !!d.jobRunId && d.boardShownRun?.runId === d.jobRunId;
+                  return shown
+                    ? 'cooling down (a Board reuses its shown jobs)'
+                    : 'not yet (its jobs have not been shown on a Board)';
+                }
+                return `not from this admission (${kind})`;
               })();
         // The same per-platform resolution the Job Search card previews, so
         // the report names the date the next scan really starts from.

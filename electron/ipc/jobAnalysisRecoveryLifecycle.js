@@ -92,6 +92,10 @@ function normalizeEvent(input = {}, { persisted = false } = {}) {
   const placeholders = finiteCount(input.placeholderCount);
   const unscored = finiteCount(input.unscoredJobCount);
   const failedBatches = finiteCount(input.failedBatchCount);
+  // Job Preferences outcome over the candidate pool this re-score evaluated.
+  // Optional: older receipts and runs without preferences do not carry them.
+  const preferenceMatched = finiteCount(input.preferenceMatchedCount);
+  const preferenceFiltered = finiteCount(input.preferenceFilteredCount);
   const revision = persistedOpaque(input.analysisRevision, input.analysisRevisionId);
   const snapshotCreatedAt = safeTimestampMs(input.snapshotCreatedAtMs);
   if (operation === 'reanalysis-score-complete'
@@ -113,6 +117,8 @@ function normalizeEvent(input = {}, { persisted = false } = {}) {
   if (placeholders != null) event.placeholderCount = placeholders;
   if (unscored != null) event.unscoredJobCount = unscored;
   if (failedBatches != null) event.failedBatchCount = failedBatches;
+  if (preferenceMatched != null) event.preferenceMatchedCount = preferenceMatched;
+  if (preferenceFiltered != null) event.preferenceFilteredCount = preferenceFiltered;
   if (snapshotCreatedAt != null) event.snapshotCreatedAtMs = snapshotCreatedAt;
   return event;
 }

@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { serializeWorkspaceForSave, serializeWorkspaceForSaveOffThread } from '../../electron/ipc/filesystem.js';
+import { performanceDiagnosticsMarkdown } from '../../electron/ipc/perfDiagnostics.js';
 import { fingerprint } from '../../src/utils/serializationUtils.js';
 import { undoHistoryLimit } from '../../src/utils/undoMemoryBudget.js';
 
@@ -31,6 +32,18 @@ function repeatedCanvas() {
     edges: [], drawings: [],
   };
 }
+
+// Reads one app-process PERF kind's run count and reason counts from the report.
+function perfKind(labelStart) {
+  const line = performanceDiagnosticsMarkdown().split('\n').find(row => row.startsWith(`- **${labelStart}`)) || '';
+  const count = /:\*\* (\d+) recorded/u.exec(line)?.[1];
+  const reasons = Object.fromEntries([...(/by reason: ([^·]+)/u.exec(line)?.[1] || '').matchAll(/([a-z-]+) (\d+)/gu)]
+    .map(([, code, n]) => [code, Number(n)]));
+  return { line, count: count ? Number(count) : 0, reasons };
+}
+const POOLED = 'Auto-save: removing repeated content';
+const UNPOOLED = 'Auto-save: separate process finished but kept the plain form';
+const FAILED = 'Auto-save: separate process failed';
 
 export default [
   { name: 'Canvas pool stores repeated content once and restores the exact saved text', run() {
@@ -84,9 +97,14 @@ export default [
   } },
   { name: 'Saving in the worker process writes exactly what saving on the main thread writes', async run() {
     const repeated = repeatedCanvas();
+    const pooledBefore = perfKind(POOLED).count;
+    const unpooledBefore = perfKind(UNPOOLED).count;
     assert.equal(await serializeWorkspaceForSaveOffThread(repeated), serializeWorkspaceForSave(repeated));
+    assert.equal(perfKind(POOLED).count, pooledBefore + 1, 'a pooled save is recorded as pooled');
     const plain = { schemaVersion: 11, nodes: [{ id: 'n', data: { text: 'short' } }], edges: [] };
     assert.equal(await serializeWorkspaceForSaveOffThread(plain), JSON.stringify(plain));
+    assert.equal(perfKind(POOLED).count, pooledBefore + 1, 'a plain result is not counted as a pooled save');
+    assert.equal(perfKind(UNPOOLED).count, unpooledBefore + 1, 'a plain result has its own PERF kind');
   } },
   { name: 'A save worker that dies (out of memory, crash, timeout) saves the canvas plain and leaves the app running', async run() {
     // 2026-11-22: a save worker *thread* that ran out of memory aborted the whole
@@ -96,6 +114,7 @@ export default [
     try {
       const repeated = repeatedCanvas();
       const plainText = JSON.stringify(repeated);
+      const failedBefore = perfKind(FAILED);
       const aborts = path.join(dir, 'aborts.mjs');
       fs.writeFileSync(aborts, "process.stdin.resume(); process.stdin.on('end', () => process.abort());\n");
       assert.equal(await serializeWorkspaceForSaveOffThread(repeated, { workerPath: aborts }), plainText, 'an aborted worker means a plain save');
@@ -107,6 +126,13 @@ export default [
       assert.equal(await serializeWorkspaceForSaveOffThread(repeated, { workerPath: stuck, timeoutMs: 300 }), plainText, 'a stuck worker is killed and the save goes out plain');
       assert.equal(await serializeWorkspaceForSaveOffThread(repeated, { workerPath: path.join(dir, 'missing.mjs') }), plainText, 'a missing worker file means a plain save');
       assert.equal(parseWorkspaceText(plainText).nodes.length, repeated.nodes.length, 'the plain save restores the same canvas');
+      const failed = perfKind(FAILED);
+      assert.equal(failed.count, failedBefore.count + 4, 'every failed process leaves a PERF row');
+      const grew = code => (failed.reasons[code] || 0) - (failedBefore.reasons[code] || 0);
+      assert.deepEqual({ exit: grew('exit'), 'no-result': grew('no-result'), timeout: grew('timeout'), other: grew('other') },
+        { exit: 2, 'no-result': 1, timeout: 1, other: 0 }, 'each failure is filed under its fixed reason');
+      assert.match(failed.line, /by reason: /u);
+      assert.doesNotMatch(performanceDiagnosticsMarkdown(), /app process because the worker failed|worker thread/u, 'the removed retry and the old worker thread are not described');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

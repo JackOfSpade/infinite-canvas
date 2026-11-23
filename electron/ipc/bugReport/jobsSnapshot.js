@@ -3255,6 +3255,19 @@ export function buildJobCompletionAssessment(
     const completionScored = nonnegativeCount(completion?.scoredJobCount ?? completion?.scored);
     const evidenceSource = reanalysisEvidence.lifecycle ? 'durable lifecycle receipt' : 'live scoring telemetry';
     const sourceReceiptFact = sourceReceiptFactFor();
+    // The prior source receipt and this re-score count different things: the
+    // re-score re-ran Job Preferences over the saved pool, so its score-ready
+    // total can differ. Say why instead of leaving two bare numbers side by side.
+    const reanalysisScoreReady = nonnegativeCount(reanalysisSnapshot.jobs);
+    const preferenceKept = nonnegativeCount(reanalysisEvidence.lifecycle?.preferenceMatchedCount);
+    const preferenceRemoved = nonnegativeCount(reanalysisEvidence.lifecycle?.preferenceFilteredCount);
+    const reanalysisPool = nonnegativeCount(reanalysisSnapshot.candidatePoolJobs);
+    const scoreReadyDiffLine = receipt && receiptScoreReady != null && reanalysisScoreReady != null
+      && receiptScoreReady !== reanalysisScoreReady
+      ? (preferenceKept != null && preferenceRemoved != null
+        ? `- Score-ready differs from the prior source receipt (${receiptScoreReady} → ${reanalysisScoreReady}): Job Preferences for this re-score kept ${preferenceKept} and removed ${preferenceRemoved}${reanalysisPool != null ? ` of the ${reanalysisPool}-job candidate pool` : ''}.\n`
+        : `- Score-ready differs from the prior source receipt (${receiptScoreReady} → ${reanalysisScoreReady}): this re-score's Job Preferences counts were not recorded, so the cause is not known.\n`)
+      : '';
     const verdict = completion
       ? `✅ **SAVED-JOB REANALYSIS SCORING COMPLETE** — ${completionInput} input → ${completionScored} scored with no placeholders, unscored rows, or failed batches.`
       : '⚠️ **INDETERMINATE** — saved-job reanalysis has a current owned snapshot, but no matching clean scoring completion evidence was retained.';
@@ -3266,7 +3279,7 @@ export function buildJobCompletionAssessment(
 - Saved-job reanalysis: owner + canvas + revision agree on the current snapshot${completion ? ` and ${evidenceSource}` : ''} · ${reanalysisSnapshot.jobs ?? '?'} score-ready job(s) · ${reanalysisSnapshot.candidatePoolJobs ?? '?'} candidate job(s). This proves scoring completion only; it does not by itself prove that the renderer applied or saved the scored result.
 - Source collection/search: not rerun for this operation; the prior terminal receipt remains a separate source-run fact.
 - Prior source terminal receipt: ${sourceReceiptFact}.
-- Reanalysis scoring: ${completion ? `input ${completionInput} → scored ${completionScored} · placeholders 0 · unscored 0 · failed batches 0` : 'completion not retained or does not correlate to this saved-job revision'}.
+${scoreReadyDiffLine}- Reanalysis scoring: ${completion ? `input ${completionInput} → scored ${completionScored} · placeholders 0 · unscored 0 · failed batches 0` : 'completion not retained or does not correlate to this saved-job revision'}.
 - Saved reanalysis snapshot: metadata schema v2 · source run ${reanalysisSnapshot.runId ? `\`${snapshotRunIdentifier(reanalysisSnapshot.runId)}\`` : 'not recorded (valid for saved-job reanalysis)'} · revision \`${reportCorrelationDigest(reanalysisSnapshot.analysisRevisionId)}\`${reanalysisSnapshot.metadataOnly ? ' · verified from bounded ownership/count metadata only; payload not inspected' : ''}.
 `;
   }
@@ -4207,7 +4220,7 @@ const JOB_BOARD_DIAGNOSTIC_ACTIVE_SEARCH_STATES = new Set([
   'queued', 'parsing', 'interpreting-preferences', 'querying', 'searching',
   'evaluating-preferences', 'scoring',
 ]);
-const JOB_BOARD_DIAGNOSTIC_ADMISSION_KINDS = new Set([
+export const JOB_BOARD_DIAGNOSTIC_ADMISSION_KINDS = new Set([
   'rescore-saved-jobs', 'career-import-paused', 'career-cleared-awaiting-files',
   'invalid', 'reuse-terminal', 'rescrape-terminal', 'rescrape-cooldown', 'terminal-requires-fresh-input',
   'fresh-imported-input', 'fresh-import-requires-clear', 'continue-existing',
@@ -4221,7 +4234,8 @@ function diagnosticSourceData(source) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
-function sourceAdmissionKind(source, boardId = null) {
+// Exported so Node Diagnostics reads the same admission as the Board section.
+export function sourceAdmissionKind(source, boardId = null) {
   const sourceData = diagnosticSourceData(source);
   // Renderer report redaction replaces `scoredJobs` with a count. Terminal
   // admission needs only its zero/nonzero distinction, so restore one inert
@@ -4299,6 +4313,16 @@ export function sourceSelectorAdmissionDiagnostic(source, admissionKind, { heldB
   }
   if (admissionKind === 'career-import-failed' || admissionKind === 'career-import-requires-approval') {
     return { ready: false, status: 'Career compilation required', reason: `admission:${admissionKind}` };
+  }
+  if (admissionKind === 'rescrape-terminal') {
+    // The Board searches the platforms past their 24-hour cooldown again. The
+    // live selector still applies its platform-connection check, which is
+    // never retained, so say it passes admission rather than that it is ready.
+    return {
+      ready: null,
+      status: 'Search & combine (re-scrape due) passes admission',
+      reason: 'live platform/location/verification checks not retained',
+    };
   }
   if (admissionKind === 'fresh-imported-input') {
     return {
@@ -6202,6 +6226,46 @@ export function renderCareerConvergenceLines(rounds, evicted) {
   return out;
 }
 
+/**
+ * Employer-posting location lookup (one batched grounded handoff, run before
+ * the location gate). Counts and enum codes only: no URL, title or company ever
+ * reaches this report. Absent on telemetry recorded before the lookup existed,
+ * in which case nothing is rendered. Shared by the hub salary section and the
+ * per-Board work section; `indent` prefixes every line.
+ */
+function compensationLocationLookupLines(locationLookup, indent = '') {
+  const lookup = locationLookup && typeof locationLookup === 'object' ? locationLookup : null;
+  if (!lookup) return [];
+  const n = (v) => nonnegativeCount(v) ?? 'not recorded';
+  if (!nonnegativeCount(lookup.postings)) {
+    return [`${indent}- Employer-posting location lookup: no posting was sent${nonnegativeCount(lookup.noIdentityJobs) ? ` (${n(lookup.noIdentityJobs)} job(s) lacked a title or company to look up)` : ''}.`];
+  }
+  const out = [`${indent}- Employer-posting location lookup: ${n(lookup.jobs)} job(s) / ${n(lookup.postings)} posting(s) sent in ${n(lookup.handoffs)} handoff(s)${lookup.cacheHit ? ' (answered from the in-memory cache)' : ''} → ${n(lookup.resolved)} now have a comparison location, ${n(lookup.foundUnresolved)} found a posting but still no market location, ${n(lookup.rejected)} rejected by host checks, ${n(lookup.notFound)} not found, ${n(lookup.failed)} failed, ${n(lookup.interrupted)} interrupted.`];
+  const reasons = Object.entries(lookup.rejectionReasons && typeof lookup.rejectionReasons === 'object' ? lookup.rejectionReasons : {})
+    .filter(([code, count]) => /^[A-Z_]{3,40}$/.test(code) && nonnegativeCount(count))
+    .map(([code, count]) => `${code}=${count}`);
+  if (reasons.length) out.push(`${indent}  - host-check rejections: ${reasons.join(', ')}`);
+  if (nonnegativeCount(lookup.overflowPostings)) out.push(`${indent}  - ${n(lookup.overflowPostings)} further posting(s) were not sent because one handoff is capped; those jobs kept the no-location fallback.`);
+  return out;
+}
+
+/**
+ * The rest of a Board's retained compensation counts, beneath its one-line
+ * summary. A field the record does not carry prints "not recorded", never 0.
+ */
+function boardCompensationDetailLines(compensation) {
+  const rec = (v) => nonnegativeCount(v) ?? 'not recorded';
+  const c = compensation;
+  const out = [
+    `    - Fit gate: ${rec(c.skippedBelowFit)} below the fit threshold ${rec(c.minFitScore)} · ${rec(c.eligible)} fit-qualified`,
+    `    - Missing/unusable advertised salary: ${rec(c.missingOffer)} · market recommendations produced: ${rec(c.recommendedNoOffer)}`,
+    `    - Role-band work: ${rec(c.roleBandLookups)} lookup(s) · ${rec(c.roleBandResearches)} researched · ${rec(c.roleBandCacheHits)} cache hit(s) · ${rec(c.roleBandFailures)} failed lookup(s) · ${rec(c.roleBandFailureJobs)} job(s) affected by failed lookups · ${rec(c.roleBandUnavailableJobs)} job(s) without an auditable ladder · ${rec(c.roleBandInterruptedJobs)} interrupted · ${rec(c.roleBandFallbackJobs)} listing-level fallback`,
+    `    - Market cohorts: ${rec(c.marketCandidates)} job(s) → ${rec(c.cohorts)} cohort(s) · cache hit(s): ${rec(c.cacheHits)}`,
+  ];
+  out.push(...compensationLocationLookupLines(c.locationLookup, '    '));
+  return out;
+}
+
 function boardWorkTelemetryLines(records, ownership = {}) {
   const ambiguous = nonnegativeCount(ownership.ambiguousOwnerIds) || 0;
   if (!records.length && !ambiguous && !ownership.topologyBounded) return [];
@@ -6216,6 +6280,7 @@ function boardWorkTelemetryLines(records, ownership = {}) {
     if (taxonomy) lines.push(`  - Taxonomy${ago(taxonomy.ts)}: input ${count(taxonomy.input)} · placed ${count(taxonomy.placed)} · missing ${count(taxonomy.missing)} · duplicated ${count(taxonomy.duplicated)} · ${taxonomy.error || taxonomy.blocked ? 'failed or blocked' : 'stage recorded'}.`);
     const compensation = record.compensation;
     if (compensation) lines.push(`  - Compensation${ago(compensation.ts)}: input ${count(compensation.scoredInput)} · eligible ${count(compensation.eligible)} · assessed ${count(compensation.assessed)} · researched cohorts ${count(compensation.researched)} · failed cohorts ${count(compensation.failedCohorts)}${compensationSkipDetail(compensation)}.`);
+    if (compensation) lines.push(...boardCompensationDetailLines(compensation));
     const research = record.research;
     if (research) lines.push(`  - Research gate${ago(research.ts)}: at or above ${count(research.minFitScore)}: ${count(research.eligible)} of ${count(research.total)} · skipped below fit ${count(research.skippedBelowFit)} · skipped unscored ${count(research.skippedUnscored)} · official lookups ${count(research.officialLookups)} · official duplicates removed ${count(research.officialDuplicatesDropped)} · closed removed ${count(research.closedDropped)} · below-fit closed removed ${count(research.belowFitClosedDropped)} · listings rechecked ${count(research.livenessRechecked)} of ${count(research.livenessVisited)} visited, ${count(research.livenessStillPending)} still pending · rescored ${count(research.rescoreAttempted)} (changed ${count(research.rescoreChanged)}, fell below ${count(research.rescoreFellBelow)}, failed ${count(research.rescoreFailed)}) · company research ${count(research.preferenceRequests)} request(s) for ${count(research.preferenceRows)} job(s), ${count(research.preferenceFiltered)} removed by preferences, ${count(research.preferenceFailed)} failed${research.error ? ` · error ${research.errorCode || 'OTHER'}` : ''}`);
     const history = record.history?.boardDisplay;
@@ -9174,20 +9239,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // before the location gate). Counts and enum codes only: no URL, title or
     // company ever reaches this report. Absent on telemetry recorded before
     // the lookup existed, in which case nothing is rendered.
-    const lookup = c.locationLookup && typeof c.locationLookup === 'object' ? c.locationLookup : null;
-    if (lookup) {
-      const n = (v) => nonnegativeCount(v) ?? 'not recorded';
-      if (!nonnegativeCount(lookup.postings)) {
-        lines.push(`- Employer-posting location lookup: no posting was sent${nonnegativeCount(lookup.noIdentityJobs) ? ` (${n(lookup.noIdentityJobs)} job(s) lacked a title or company to look up)` : ''}.`);
-      } else {
-        lines.push(`- Employer-posting location lookup: ${n(lookup.jobs)} job(s) / ${n(lookup.postings)} posting(s) sent in ${n(lookup.handoffs)} handoff(s)${lookup.cacheHit ? ' (answered from the in-memory cache)' : ''} → ${n(lookup.resolved)} now have a comparison location, ${n(lookup.foundUnresolved)} found a posting but still no market location, ${n(lookup.rejected)} rejected by host checks, ${n(lookup.notFound)} not found, ${n(lookup.failed)} failed, ${n(lookup.interrupted)} interrupted.`);
-        const reasons = Object.entries(lookup.rejectionReasons && typeof lookup.rejectionReasons === 'object' ? lookup.rejectionReasons : {})
-          .filter(([code, count]) => /^[A-Z_]{3,40}$/.test(code) && nonnegativeCount(count))
-          .map(([code, count]) => `${code}=${count}`);
-        if (reasons.length) lines.push(`  - host-check rejections: ${reasons.join(', ')}`);
-        if (nonnegativeCount(lookup.overflowPostings)) lines.push(`  - ${n(lookup.overflowPostings)} further posting(s) were not sent because one handoff is capped; those jobs kept the no-location fallback.`);
-      }
-    }
+    lines.push(...compensationLocationLookupLines(c.locationLookup));
     lines.push(`- Missing/unusable advertised salary: ${rec(c.missingOffer)} · market recommendations produced: ${rec(c.recommendedNoOffer)}`);
     lines.push(hasRoleBandTelemetry
       ? `- Market cohorts (after role-band work): ${rec(c.marketCandidates)} job(s) → ${rec(c.cohorts)} cohort(s) → researched ${rec(c.researched)}, failed ${rec(c.failedCohorts)}.`

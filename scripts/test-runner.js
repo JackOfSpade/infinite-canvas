@@ -11,6 +11,7 @@ import job_board_reporting from './tests/job-board-reporting.js';
 import job_board_official_posting_refresh from './tests/job-board-official-posting-refresh.js';
 import fs from 'node:fs';
 import base64 from './tests/base64.js';
+import stealth_plugins from './tests/stealth-plugins.js';
 import atomic_write from './tests/atomic-write.js';
 import marketplace_monitor from './tests/marketplace-monitor.js';
 import ai_models from './tests/ai-models.js';
@@ -293,6 +294,7 @@ const testGroups = [
   ['job-board-reporting.js', job_board_reporting],
   ['job-board-official-posting-refresh.js', job_board_official_posting_refresh],
   ['base64.js', base64],
+  ['stealth-plugins.js', stealth_plugins],
   ['atomic-write.js', atomic_write],
   ['marketplace-monitor.js', marketplace_monitor],
   ['ai-models.js', ai_models],

@@ -84,8 +84,9 @@ import os from 'node:os';
 import { appendJobsHistory, loadJobsHistory } from '../../electron/ipc/jobsHistory.js';
 import { claimJobAnalysisOperationAuthority } from '../../electron/ipc/jobAnalysisOperationAuthorityStore.js';
 import { checkListingForGeneration } from '../../electron/ipc/listingLivenessProbe.js';
-import { collectJobCompensationReport } from '../../src/utils/jobCompensationReport.js';
+import { collectJobCompensationReport, COMPENSATION_LOCATION_RECEIPT_TITLE } from '../../src/utils/jobCompensationReport.js';
 import { buildJobCompensationSnapshot } from '../../electron/ipc/bugReport/jobCompensationSnapshot.js';
+import { locationSourceLink } from '../../electron/ipc/jobLocationLookup.js';
 import { normalizeBands, normalizeCompensationAssessment, placeBand } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { collectOfficialPostingReport } from '../../src/utils/officialPostingReport.js';
 import { buildOfficialPostingSnapshot } from '../../electron/ipc/bugReport/officialPostingSnapshot.js';
@@ -345,6 +346,34 @@ export default [
         assert(report.includes('Job Card Salary Audit (JOBPAY)') && report.includes('1 inspected'));
         assert(report.includes('below_fit_threshold') && report.includes('advertised pay absent'));
       }
+    },
+  },
+  {
+    name: 'JOBPAY counts market sources apart from the work-location receipt and shows 5+ past five',
+    run() {
+      const receipt = locationSourceLink({ sourceUrl: 'https://example.test/PRIVATE_RECEIPT_URL' });
+      assert(receipt.title === COMPENSATION_LOCATION_RECEIPT_TITLE, 'the report must recognize the receipt title salary research writes');
+      const market = index => ({ title: `PRIVATE_SOURCE_${index}`, url: `https://example.test/PRIVATE_MARKET_${index}`, min: 90000, max: 120000, currency: 'CAD' });
+      const card = (id, sourceLinks) => ({ id, type: 'jobcard', data: { compensationAssessment: {
+        schemaVersion: 1, status: 'not_evaluated', reasonCode: 'below_fit_threshold', sourceLinks } } });
+      const snapshot = collectJobCompensationReport([
+        card('synthetic-receipt-only', [receipt]),
+        card('synthetic-mixed', [market(1), market(2), receipt]),
+        card('synthetic-many', [1, 2, 3, 4, 5, 6].map(market).concat(receipt)),
+        card('synthetic-none', undefined),
+      ]);
+      assert(JSON.stringify(snapshot.rows.map(row => [row.marketSourceCount, row.locationReceipt]))
+        === JSON.stringify([[0, true], [2, true], [6, true], [0, false]]), 'market source counts exclude the receipt');
+      const report = buildJobCompensationSnapshot([], snapshot);
+      assert(report.includes('market sources 0 · location receipt yes'));
+      assert(report.includes('market sources 2 · location receipt yes'));
+      assert(report.includes('market sources 5+ · location receipt yes'));
+      assert(report.includes('market sources 0 · location receipt no'));
+      assert(report.includes('Market sources counts saved salary evidence links only'));
+      assert(!/ sources \d/.test(report.replace(/market sources /g, '')), 'the old combined sources count is gone');
+      assert(!report.includes('PRIVATE_') && !report.includes('example.test'), 'no source titles or URLs in the report');
+      const hostile = buildJobCompensationSnapshot([], { rows: [{ id: 'synthetic', marketSourceCount: 'PRIVATE_COUNT', locationReceipt: 'yes' }] });
+      assert(!hostile.includes('PRIVATE_') && hostile.includes('market sources 0 · location receipt no'));
     },
   },
   {
@@ -2863,7 +2892,8 @@ export default [
             && reanalysisCompletion.includes('✅ **SAVED-JOB REANALYSIS SCORING COMPLETE**')
             && reanalysisCompletion.includes('Source collection/search: not rerun for this operation')
             && reanalysisCompletion.includes('Prior source terminal receipt: completed · terminal score-ready 0')
-            && !reanalysisCompletion.includes('terminal score-ready 0 ≠ scored 96'),
+            && !reanalysisCompletion.includes('terminal score-ready 0 ≠ scored 96')
+            && reanalysisCompletion.includes('Score-ready differs from the prior source receipt (0 → 96): this re-score\'s Job Preferences counts were not recorded, so the cause is not known.'),
           'an oversized 96-style v2 saved-job reanalysis is bounded, physically envelope-owned, and reconciles independently from a zero-result prior source receipt');
 
           reanalysisTelemetry.scoring = null;
@@ -2880,10 +2910,12 @@ export default [
             analysisRevisionId: 'oversized-saved-job-revision', snapshotCreatedAtMs: Date.parse(createdAt),
             candidatePoolJobCount: 96, scoringInputCount: 96, scoredJobCount: 96,
             placeholderCount: 0, unscoredJobCount: 0, failedBatchCount: 0,
+            preferenceMatchedCount: 96, preferenceFilteredCount: 0,
           });
           const lifecycleReanalysis = buildJobCompletionAssessment(canvas, new Set([hubId]), [], 0, new Set([hubId]));
           assert(lifecycleReanalysis.includes('✅ **SAVED-JOB REANALYSIS SCORING COMPLETE**')
-            && lifecycleReanalysis.includes('durable lifecycle receipt'),
+            && lifecycleReanalysis.includes('durable lifecycle receipt')
+            && lifecycleReanalysis.includes('Score-ready differs from the prior source receipt (0 → 96): Job Preferences for this re-score kept 96 and removed 0 of the 96-job candidate pool.'),
           'a current v2 snapshot can prove saved-job scoring after restart from its exact lifecycle receipt without live scoring telemetry');
 
           const newerCreatedAt = '2026-10-13T08:00:00.000Z';
@@ -5750,6 +5782,36 @@ export default [
         && authenticatedIndeedScrapeStatus({ preflightStatus: 'unknown', hasPPID: false }, null) === null,
       'only the scraper\'s affirmative authenticated observation can replace stale restored cache provenance');
       return { manual: true, freshSession: true };
+    },
+  },
+{
+    name: 'Job-hub Node Diagnostics re-scan line follows the Board admission (pending saved-job re-score)',
+    run: () => {
+      const snapshotId = 'b'.repeat(64);
+      const data = {
+        hubState: 'done', scoredJobs: [{}, {}], enabledSourceIds: ['indeed'],
+        jobRunId: 'node-diag-run', boardShownRun: { runId: 'node-diag-run', boardId: 'some-board' },
+        careerImportGeneration: 'generation', careerSnapshotId: snapshotId,
+        careerImportCompilation: { version: 1, status: 'approved', generation: 'generation', careerSnapshotId: snapshotId },
+        savedJobsRescore: { version: 1, generation: 'generation', careerSnapshotId: snapshotId },
+      };
+      const render = (nodeData) => generateMarkdown({
+        description: 'Pending re-score Node Diagnostics fixture.',
+        nodes: [{ id: 'job-hub-rescore-fixture', type: 'jobhub', data: nodeData }],
+        edges: [], drawings: [], frontEndState: {}, nodeComponentStates: [],
+        nodeInternals: [{ id: 'job-hub-rescore-fixture', type: 'jobhub', position: { x: 0, y: 0 }, measured: { width: 260, height: 140 } }],
+      }).markdown;
+      const report = render(data);
+      assert(!report.includes('due from the Job Board')
+        && report.includes('re-scan: not from this admission (rescore-saved-jobs)')
+        && report.includes('savedJobsRescore: pending')
+        && !report.includes(snapshotId),
+      'a done hub with a pending saved-job re-score must not read as due for a re-scan, and must say the re-score is pending');
+      const { savedJobsRescore: _marker, ...withoutMarker } = data;
+      const plain = render(withoutMarker);
+      assert(plain.includes('re-scan: due from the Job Board') && !plain.includes('savedJobsRescore: pending'),
+        'without the marker the shown run is due from the Job Board again');
+      return { rescorePending: true };
     },
   },
 {

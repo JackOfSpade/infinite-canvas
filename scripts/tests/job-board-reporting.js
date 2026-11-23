@@ -129,4 +129,26 @@ export default [
       } finally { __resetJobsTelemetryForTests(); }
     },
   },
+  {
+    name: 'Board compensation keeps its location lookup and remaining counts when two hubs leave no single hub owner',
+    run() {
+      __resetJobsTelemetryForTests();
+      try {
+        recordBoard();
+        run(boardId, 'research-job-compensation', () => {
+          getJobsTelemetry().compensation = { ts: Date.now(), scoredInput: 73, eligible: 15, assessed: 14, researched: 4,
+            failedCohorts: 0, missingOffer: 9, recommendedNoOffer: 6, cohorts: 4, cacheHits: 2,
+            locationLookup: { postings: 4, jobs: 5, handoffs: 1, resolved: 3, foundUnresolved: 0, rejected: 1, notFound: 1, failed: 0, interrupted: 0 } };
+        });
+        const output = report(() => buildJobsPipelineSnapshot(ids, sender.id, null, [], false,
+          new Set(['synthetic-hub-a', 'synthetic-hub-b']), new Set([boardId])));
+        assert.match(output, /Compensation.*input 73 · eligible 15 · assessed 14/);
+        assert(output.includes('    - Missing/unusable advertised salary: 9 · market recommendations produced: 6'), output);
+        assert(output.includes('    - Market cohorts: not recorded job(s) → 4 cohort(s) · cache hit(s): 2'));
+        assert(output.includes('    - Fit gate: not recorded below the fit threshold not recorded · 15 fit-qualified'));
+        assert(output.includes('    - Employer-posting location lookup: 5 job(s) / 4 posting(s) sent in 1 handoff(s) → 3 now have a comparison location, 0 found a posting but still no market location, 1 rejected by host checks, 1 not found, 0 failed, 0 interrupted.'));
+        assert(!/undefined|NaN/.test(output));
+      } finally { __resetJobsTelemetryForTests(); }
+    },
+  },
 ];
