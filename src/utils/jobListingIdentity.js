@@ -54,3 +54,34 @@ export function jobAndVariantKeys(item) {
   const variants = Array.isArray(item?.postingVariants) ? item.postingVariants : [];
   return [...new Set([item, ...variants].flatMap(dedupKeysFor))];
 }
+
+// A card the user deletes from a Job Board stays deleted on that Board: the
+// Board saves the card's listing keys (`dismissedJobKeys`) and later Combines
+// leave matching rows out. A listing that still has a card on the Board is
+// never treated as deleted, so a card that came back another way (Undo, a
+// restored save) cannot be dropped by a stale key.
+export function boardDeletedJobKeys(savedKeys, liveCards) {
+  const live = new Set((Array.isArray(liveCards) ? liveCards : [])
+    .flatMap(card => jobAndVariantKeys(card?.data)));
+  return [...new Set((Array.isArray(savedKeys) ? savedKeys : [])
+    .filter(key => typeof key === 'string' && key && !live.has(key)))];
+}
+
+export function addBoardDeletedJobKeys(savedKeys, deletedCards) {
+  return [...new Set([
+    ...(Array.isArray(savedKeys) ? savedKeys : []).filter(key => typeof key === 'string' && key),
+    ...(Array.isArray(deletedCards) ? deletedCards : []).flatMap(card => jobAndVariantKeys(card?.data)),
+  ])];
+}
+
+export function splitBoardDeletedJobs(jobs, deletedKeys) {
+  const rows = Array.isArray(jobs) ? jobs : [];
+  const deleted = new Set(Array.isArray(deletedKeys) ? deletedKeys : []);
+  if (deleted.size === 0) return { kept: rows, removed: [] };
+  const kept = [];
+  const removed = [];
+  for (const job of rows) {
+    (jobAndVariantKeys(job).some(key => deleted.has(key)) ? removed : kept).push(job);
+  }
+  return { kept, removed };
+}

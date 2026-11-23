@@ -22,7 +22,7 @@ import {
   jobSearchOutcomeReceiptMatches,
 } from '../../src/utils/jobBoardSourceAdmission.js';
 import { terminalJobSearchOutcome } from '../../src/utils/jobBoardPausedSourceContinuation.js';
-import { jobAndVariantKeys } from '../../src/utils/jobListingIdentity.js';
+import { boardDeletedJobKeys, jobAndVariantKeys, splitBoardDeletedJobs } from '../../src/utils/jobListingIdentity.js';
 import { planJobCardDeletionCleanup } from '../../src/utils/jobCardDeletionCleanup.js';
 import { discardDeletedJobAnalysisSnapshots } from '../../src/utils/canvasInteractions.js';
 
@@ -118,7 +118,7 @@ async function startCombineCommitFixture({ unmatchedProtected = false } = {}) {
   const env = {
     id: 'board', canvasFilePath: '/tmp/synthetic-board.json', union, completedAtCombine: [{ ...module }],
     protectedBoardCards: [protectedCard], sigAtCombine: inputSignature([module]), expectedSourceRuns: null,
-    exactSourceRunsAtCombine, sourceRunsAtCombine: exactSourceRunsAtCombine, dismissedJobKeysAtCombine: [],
+    exactSourceRunsAtCombine, sourceRunsAtCombine: exactSourceRunsAtCombine, dismissedJobKeysAtCombine: [], deletedOriginIdsAtCombine: [],
     manualAiRunId: 'board-manual-run', combineToken: Symbol('combine'), combineStartedAt: 1,
     bucketTree: { roles: [{ name: 'Synthetic role', jobIndices: [0, 1] }] }, mergeStats: {}, perModule: [], locationStats: {},
     getNode: nodeId => nodes.find(node => node.id === nodeId), getNodes: () => nodes, getEdges: () => edges,
@@ -261,7 +261,7 @@ export default [
     },
   },
   {
-    name: 'Board recombine display replacement never records its old cards as dismissed',
+    name: 'Board recombine display replacement never records its old cards as deleted; a user deletion is recorded',
     run: async () => {
       const board = { id: 'board', type: 'jobboard', data: { dismissedJobKeys: ['u:https://example.test/previously-dismissed'] } };
       const card = { id: 'replace-card', type: 'jobcard', data: { hubId: 'board', ...scoredJob('Retained posting', 77) } };
@@ -279,9 +279,10 @@ export default [
       assert(!isJobCardDisplayRemoval(card.id), 'successful deletion must release its exact intent');
       const keys = replacementUpdates[0].stats.dismissedJobKeys;
       assert(jobAndVariantKeys(card.data).every(key => !keys.includes(key)), 'replacing a scored card must not poison later combines');
-      assert(keys.length === 0, 'view deletion must not create a persistent suppression list');
+      assert.deepEqual(keys, ['u:https://example.test/previously-dismissed', ...jobAndVariantKeys(ordinary.data)],
+        'only the card the user deleted joins the listings already saved as deleted');
       const realDismissal = planJobCardDeletionCleanup([card], [board], () => board).boardUpdates[0].stats.dismissedJobKeys;
-      assert(realDismissal.length === 0, 'a later real user deletion also leaves the source listing available');
+      assert(jobAndVariantKeys(card.data).every(key => realDismissal.includes(key)), 'a later real user deletion is remembered');
       const hook = fs.readFileSync(new URL('../../src/hooks/useCanvasOSDeletion.js', import.meta.url), 'utf8');
       assert(hook.includes('requestedDeletedNodes.filter(node => !isJobCardDisplayRemoval(node?.id))'), 'the actual deletion lifecycle must classify programmatic replacements before cancellation and dismissal bookkeeping');
       assert(readNodeSource().includes('displayReplacement: true,'), 'Board cleanup must explicitly identify a display replacement; ordinary hub deletion stays destructive');
@@ -328,7 +329,7 @@ export default [
     },
   },
   {
-    name: 'view deletion preserves all posting variants for a saved-results recombine',
+    name: 'a card the user deleted stays off the Board at the next Combine, with every posting it stood for',
     run: () => {
       const second = { title: 'Second', company: 'Example', url: 'https://example.test/second',
         postingVariants: [{ url: 'https://example.test/second' }, { url: 'https://example.test/second-sf' }] };
@@ -336,10 +337,24 @@ export default [
       const card = { id: 'card', type: 'jobcard', data: { hubId: 'board', ...second } };
       const { boardUpdates } = planJobCardDeletionCleanup([card], [board], () => board);
       const keys = boardUpdates[0].stats.dismissedJobKeys;
-      assert(keys.length === 0, 'deleting the card does not suppress either represented posting');
+      assert.deepEqual(keys, ['u:https://example.test/second', 'u:https://example.test/second-sf'],
+        'deleting a consolidated card remembers every posting it stood for');
+      const first = { title: 'First', company: 'Example', url: 'https://example.test/first' };
+      const variantRow = { title: 'Second', company: 'Example', url: 'https://example.test/second-sf' };
+      // A later Combine leaves the deleted listing out, whichever posting the Search saved.
+      const split = splitBoardDeletedJobs([first, variantRow], boardDeletedJobKeys(keys, []));
+      assert.deepEqual(split.kept, [first]);
+      assert.deepEqual(split.removed, [variantRow]);
+      // A listing that still has a card on the Board is never treated as deleted.
+      const liveAgain = boardDeletedJobKeys(keys, [{ type: 'jobcard', data: variantRow }]);
+      assert.deepEqual(liveAgain, ['u:https://example.test/second']);
+      assert.deepEqual(splitBoardDeletedJobs([first, variantRow], liveAgain).removed, []);
+      assert.deepEqual(splitBoardDeletedJobs([first], []).kept, [first]);
       const boardSource = readNodeSource();
-      assert(boardSource.includes('const dismissedJobKeysAtCombine = [];'),
-        'Combine also ignores legacy persisted dismissal lists and does not infer suppression from missing cards');
+      assert(boardSource.includes('boardDeletedJobKeys(getNode(id)?.data?.dismissedJobKeys, existingBoardCards)'),
+        'Combine reads the listings the user deleted from this Board');
+      assert(!boardSource.includes('dismissedJobKeys: dismissedJobKeysAtCombine'),
+        'a Combine commit leaves the saved list alone, so a card deleted while it ran is still remembered');
     },
   },
   {

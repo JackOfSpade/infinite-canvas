@@ -286,6 +286,7 @@ export function useIssueReporter({
             overrideRemoved: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'overrideRemoved')),
             locationPostingsCollapsed: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'locationVariantPostingsCollapsed')),
             researchRemoved: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'researchRemoved')),
+            deletedRemoved: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'deletedRemoved')),
             carriedJobs: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'carriedJobs')),
             connectedSourceHubIds: [...new Set(connectedSourceHubIds)].slice(0, 25),
             clearProvenance,

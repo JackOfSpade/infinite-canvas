@@ -41,6 +41,7 @@ import {
   waitForRendererCommitFrame,
 } from './jobsearch/manualAiRunReceipts';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
+import { boardDeletedJobKeys, splitBoardDeletedJobs } from '../utils/jobListingIdentity.js';
 import { ACTIVE_JOB_SEARCH_STATES, attachCompensationRemoteResidences, unionScoredJobs, moduleCombineFingerprint, moduleFingerprint, combineSignature, normalizeJobMatchScore, staleReason, isLegacyCombineSignature, emptyReplacementIneligibilityReason, shouldKeepCompletedBoardSnapshotVisible } from './jobboard/mergeJobs';
 import { runBoardResearchStage, removedLookupEntry, MAX_BOARD_REMOVED_LOOKUPS } from './jobboard/jobBoardResearchStage.js';
 import { attachProtectedCards, consolidateJobLocations, isProtectedJobCard } from '../utils/jobLocationConsolidation';
@@ -3435,9 +3436,19 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       );
       const protectedBoardCards = existingBoardCards.filter(isProtectedJobCard);
       const candidateCountBeforeDismissal = union.length;
-      // Card/tree deletion changes the view only. Every Combine rebuilds the
-      // complete saved scored source union, including legacy dismissed rows.
-      const dismissedJobKeysAtCombine = [];
+      // A card the user deleted from this Board stays deleted: its listing
+      // keys are saved on the Board and matching rows are left out here. A
+      // listing that still has a card on the Board is never left out.
+      const dismissedJobKeysAtCombine = boardDeletedJobKeys(getNode(id)?.data?.dismissedJobKeys, existingBoardCards);
+      const deletedSplit = splitBoardDeletedJobs(union, dismissedJobKeysAtCombine);
+      union = deletedSplit.kept;
+      mergeStats.deletedRemoved = deletedSplit.removed.length;
+      // These rows were shown on this Board before the user deleted them, so
+      // their Searches still count as shown here.
+      const deletedOriginIdsAtCombine = [...new Set(deletedSplit.removed.map(job => job?.originHubId).filter(Boolean))];
+      if (deletedSplit.removed.length > 0) {
+        EventLogger.log(`[JobBoard] combine left out ${deletedSplit.removed.length} job(s) the user deleted from this Board id=${id} savedKeys=${dismissedJobKeysAtCombine.length}`);
+      }
       let locationStats = {
         candidateGroups: 0, postingsCollapsed: 0, protectedRetained: 0,
         representedPostings: 0, alreadyConsolidated: 0,
@@ -3516,8 +3527,8 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       );
       if (union.length === 0) {
         if (candidateCountBeforeDismissal > 0 || preferenceOverrideAtCombine) {
-          // Every saved candidate was already X'd, or the Board's own preferences
-          // removed them. Commit an empty, current Board instead of treating
+          // The user deleted every saved candidate from this Board, or the
+          // Board's own preferences removed them. Commit an empty, current Board instead of treating
           // either as missing data.
           if (getNode(id)?.data?.locked) {
             autoResumedManualAiRunRef.current = null;
@@ -3535,7 +3546,6 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             combineSignature: sigAtCombine,
             combineSourceRuns: sourceRunsAtCombine,
             researchRemovedLookups,
-            dismissedJobKeys: dismissedJobKeysAtCombine,
             stale: false, staleReason: null,
             boardScanResume: null, manualAiResume: null,
           });
@@ -3884,7 +3894,6 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           researchRemovedLookups,
           salaryCareerSnapshotId: salaryCareerAtCombine.careerSnapshotId,
           salaryMethodVersion: JOB_COMPENSATION_METHOD_VERSION,
-          dismissedJobKeys: dismissedJobKeysAtCombine,
           stale: false, staleReason: null,
           clearProvenance: null,
           boardScanResume: null,
@@ -3936,7 +3945,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       // rows shown through a Board preference override count too.
       if (newNodes.length > 0) {
         const shownAt = Date.now();
-        const displayedOriginIds = new Set(union.map(job => job?.originHubId).filter(Boolean));
+        const displayedOriginIds = new Set([...union.map(job => job?.originHubId).filter(Boolean), ...deletedOriginIdsAtCombine]);
         for (const module of completedAtCombine) {
           if (!module.runId || !displayedOriginIds.has(module.id)) continue;
           updateGlobal(module.id, node => jobSearchShownRunPatch(node?.data, {

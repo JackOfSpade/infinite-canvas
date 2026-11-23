@@ -2685,7 +2685,9 @@ function multiSourceBoardCompletionAssessment(canvasFilePath, hubIds, jobBoardSt
   // Missing means unknown, so the Board stays unproved, but the report says why.
   const researchRemovedRecorded = boardNonnegativeCount(boardDiagnosticValue(board, 'researchRemoved')) != null;
   const researchRemoved = researchRemovedRecorded ? boardNonnegativeCount(boardDiagnosticValue(board, 'researchRemoved')) : 0;
-  const reconcileGap = merged != null && collapsed != null && results != null ? merged - collapsed - researchRemoved - results : null;
+  // Rows left out because the user deleted their cards from this Board.
+  const deletedRemoved = boardNonnegativeCount(boardDiagnosticValue(board, 'deletedRemoved') ?? 0) ?? 0;
+  const reconcileGap = merged != null && collapsed != null && results != null ? merged - collapsed - researchRemoved - deletedRemoved - results : null;
   if (merged != null && collapsed != null && (collapsed > merged || (reconcileGap != null && reconcileGap !== 0))) {
     problems.push(`Board result count does not reconcile with merged unique minus collapsed location postings and research removals${!researchRemovedRecorded && reconcileGap > 0
       ? ` (this Combine predates the research-removal counter, so ${reconcileGap} card(s) are unattributed until the next Combine)` : ''}`);
@@ -3460,6 +3462,8 @@ ${scoreReadyDiffLine}- Reanalysis scoring: ${completion ? `input ${completionInp
       overrideRemoved: boardNonnegativeCount(boardDiagnosticValue(board, 'overrideRemoved')),
       locationPostingsCollapsed: boardNonnegativeCount(boardDiagnosticValue(board, 'locationPostingsCollapsed') ?? 0),
       researchRemoved: boardNonnegativeCount(boardDiagnosticValue(board, 'researchRemoved') ?? 0) ?? 0,
+      // Rows a Combine left out because the user deleted their cards from this Board.
+      deletedRemoved: boardNonnegativeCount(boardDiagnosticValue(board, 'deletedRemoved') ?? 0) ?? 0,
       // Earlier rows a Board re-scan kept: in the Board's union, not in the run.
       carriedJobs: boardNonnegativeCount(boardDiagnosticValue(board, 'carriedJobs') ?? 0) ?? 0,
       renderedCardCount: boardNonnegativeCount(boardDiagnosticValue(board, 'renderedCardCount')),
@@ -3783,9 +3787,9 @@ ${scoreReadyDiffLine}- Reanalysis scoring: ${completion ? `input ${completionInp
     !board.stale && board.resultCount === taxonomyInput
     && (board.combinedSourceHubIds.length > 1
       || (board.combinedSourceHubIds.length === 1
-        && (board.locationPostingsCollapsed > 0 || board.researchRemoved > 0 || board.carriedJobs > 0
+        && (board.locationPostingsCollapsed > 0 || board.researchRemoved > 0 || board.carriedJobs > 0 || board.deletedRemoved > 0
           || boardCombineDuplicates(board).removed > 0)
-        && board.mergeUnique - board.locationPostingsCollapsed - board.researchRemoved === board.resultCount))
+        && board.mergeUnique - board.locationPostingsCollapsed - board.researchRemoved - board.deletedRemoved === board.resultCount))
   )) || null;
 
   const gaps = [];
@@ -3945,8 +3949,8 @@ ${scoreReadyDiffLine}- Reanalysis scoring: ${completion ? `input ${completionInp
     }
     if (board.mergeUnique == null) {
       gaps.push(`Job Board \`${boardLabel(board)}\` did not retain merge-count provenance`);
-    } else if (board.resultCount !== board.mergeUnique - (collapsed ?? 0) - board.researchRemoved) {
-      gaps.push(`Job Board \`${boardLabel(board)}\` results ${board.resultCount} ≠ merged unique ${board.mergeUnique}${collapsed ? ` − ${collapsed} location postings collapsed` : ''}${board.researchRemoved ? ` − ${board.researchRemoved} removed by research` : ''}`);
+    } else if (board.resultCount !== board.mergeUnique - (collapsed ?? 0) - board.researchRemoved - board.deletedRemoved) {
+      gaps.push(`Job Board \`${boardLabel(board)}\` results ${board.resultCount} ≠ merged unique ${board.mergeUnique}${collapsed ? ` − ${collapsed} location postings collapsed` : ''}${board.researchRemoved ? ` − ${board.researchRemoved} removed by research` : ''}${board.deletedRemoved ? ` − ${board.deletedRemoved} deleted by the user` : ''}`);
     }
     // A one-source board's Combine can still remove same-listing duplicates
     // within that one run (unionScoredJobs dedups by listing key). Those are
@@ -3960,8 +3964,8 @@ ${scoreReadyDiffLine}- Reanalysis scoring: ${completion ? `input ${completionInp
         gaps.push(`Job Board \`${boardLabel(board)}\` merge counts do not add up: ${board.mergeIncoming} combined − ${board.mergeDuplicatesRemoved} duplicates removed ≠ merged unique ${board.mergeUnique}`);
       }
       const duplicatesRemoved = combineDuplicates.removed;
-      if (board.resultCount + (collapsed ?? 0) + board.researchRemoved + duplicatesRemoved !== boardExpectedCount + board.carriedJobs) {
-        gaps.push(`Job Board \`${boardLabel(board)}\` results ${board.resultCount}${collapsed ? ` + ${collapsed} location postings collapsed` : ''}${board.researchRemoved ? ` + ${board.researchRemoved} removed after research` : ''}${duplicatesRemoved ? ` + ${duplicatesRemoved} duplicates removed by Combine` : ''} ≠ current run ${boardExpectedCount}${board.carriedJobs ? ` + ${board.carriedJobs} kept from earlier` : ''}${board.overrideRemoved > 0 ? ` (the Board's own preferences removed ${board.overrideRemoved} job(s) before Combine)` : ''}`);
+      if (board.resultCount + (collapsed ?? 0) + board.researchRemoved + board.deletedRemoved + duplicatesRemoved !== boardExpectedCount + board.carriedJobs) {
+        gaps.push(`Job Board \`${boardLabel(board)}\` results ${board.resultCount}${collapsed ? ` + ${collapsed} location postings collapsed` : ''}${board.researchRemoved ? ` + ${board.researchRemoved} removed after research` : ''}${board.deletedRemoved ? ` + ${board.deletedRemoved} deleted by the user` : ''}${duplicatesRemoved ? ` + ${duplicatesRemoved} duplicates removed by Combine` : ''} ≠ current run ${boardExpectedCount}${board.carriedJobs ? ` + ${board.carriedJobs} kept from earlier` : ''}${board.overrideRemoved > 0 ? ` (the Board's own preferences removed ${board.overrideRemoved} job(s) before Combine)` : ''}`);
       }
     }
   }

@@ -294,8 +294,8 @@ export default [
     assert.ok(board.includes('inputsAtCombine.settled.length === liveConnectedCount')
       && board.includes('liveInputs.settled.length === liveInputs.all.length'),
     'Combine-time empty replacement uses the same settled count');
-    assert.ok(board.includes('const displayedOriginIds = new Set(union.map(job => job?.originHubId).filter(Boolean));')
+    assert.ok(board.includes('const displayedOriginIds = new Set([...union.map(job => job?.originHubId).filter(Boolean), ...deletedOriginIdsAtCombine]);')
       && board.includes('if (!module.runId || !displayedOriginIds.has(module.id)) continue;'),
-    'a Search is recorded as shown only when one of its rows is in the displayed set');
+    'a Search is recorded as shown only when one of its rows is in the displayed set, or was shown here and then deleted by the user');
   } },
 ];

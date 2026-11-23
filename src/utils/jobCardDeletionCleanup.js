@@ -1,6 +1,7 @@
 import { computeJobTreeView } from '../nodes/jobsearch/buildJobTree.js';
 import { deriveBoardCardStats } from '../nodes/jobboard/mergeJobs.js';
 import { hubCardFilter } from './jobCardFilters.js';
+import { addBoardDeletedJobKeys } from './jobListingIdentity.js';
 
 // Before this existed, only the card's own X button (JobCardNode's
 // dismissCard) reflowed the job tree and recomputed the board's PERSISTED
@@ -60,7 +61,15 @@ export function planJobCardDeletionCleanup(deletedNodes, nodesAfterRemoval, getH
     treeNodes = computeJobTreeView(treeNodes, hubId, hubCardFilter(hubData));
     const stats = deriveBoardCardStats(treeNodes, hubId, hubData);
     if (hubNode.type === 'jobboard') {
-      stats.dismissedJobKeys = [];
+      // The Board remembers the listings the user deleted, so a later Combine
+      // (for example after this Board searches again) does not rebuild them.
+      // Cards the Board itself replaces never reach here: the caller removes
+      // them from `deletedNodes` first (isJobCardDisplayRemoval).
+      stats.dismissedJobKeys = addBoardDeletedJobKeys(
+        hubData.dismissedJobKeys,
+        (Array.isArray(deletedNodes) ? deletedNodes : [])
+          .filter(node => node?.type === 'jobcard' && node?.data?.hubId === hubId),
+      );
     }
     boardUpdates.push({ hubId, cardIds, stats });
   }

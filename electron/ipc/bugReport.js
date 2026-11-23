@@ -1192,7 +1192,7 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
           // Why the unique count differs from the cards on the Board: later steps remove more.
           // A counter the saved stats do not carry prints "?", never an observed 0.
           ` · then ${ms.locationVariantPostingsCollapsed ?? '?'} location-variant collapsed, ` +
-          `${ms.researchRemoved ?? '?'} research-removed, ${ms.overrideRemoved ?? '?'} preference-override removed ` +
+          `${ms.researchRemoved ?? '?'} research-removed, ${ms.deletedRemoved ?? 0} deleted-by-user left out, ${ms.overrideRemoved ?? '?'} preference-override removed ` +
           `(${ms.preferenceFilteredSkipped ?? '?'} preference-filtered skipped before merge) → ` +
           `${typeof d.resultCount === 'number' ? d.resultCount : '?'} cards`
         );
@@ -1563,6 +1563,7 @@ function liveJobBoardState(node, renderedCardCounts, clearProvenance) {
     overrideRemoved: node.data?.mergeStats?.overrideRemoved,
     locationPostingsCollapsed: node.data?.mergeStats?.locationVariantPostingsCollapsed,
     researchRemoved: node.data?.mergeStats?.researchRemoved,
+    deletedRemoved: node.data?.mergeStats?.deletedRemoved,
     carriedJobs: node.data?.mergeStats?.carriedJobs,
     clearProvenance,
   };
