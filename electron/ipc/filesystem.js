@@ -8,7 +8,15 @@ import { logger } from '../logger.js';
 import { recordWorkspaceWriteOutcome } from './workspaceIoDiagnostics.js';
 import { recordMainPerf } from './perfDiagnostics.js';
 import { createCanvasDeltaStore } from './workspaceSaveDelta.js';
-import { WORKSPACE_FORMAT_UNSUPPORTED, formatPooledWorkspace, parseWorkspaceText, poolWorkspaceContent } from './workspaceContentPool.js';
+import {
+  WORKSPACE_FORMAT_UNSUPPORTED,
+  formatPlainWorkspace,
+  formatPooledWorkspace,
+  parseWorkspaceText,
+  parseWorkspaceTextKeepingShared,
+  poolWorkspaceContent,
+  stringifyWorkspaceSharingValues,
+} from './workspaceContentPool.js';
 import path from 'path';
 import fs from 'fs';
 import { spawn } from 'node:child_process';
@@ -1846,14 +1854,14 @@ export function workspaceSaveTooLargeError(byteLength = null) {
   return error;
 }
 
-function pooledFormOf(data, plain) {
+function pooledFormOf(plain) {
   try {
-    const pooled = poolWorkspaceContent(data);
+    const pooled = poolWorkspaceContent(JSON.parse(plain));
     if (!pooled) return null;
     const serialized = formatPooledWorkspace(pooled);
     // Prove the exact text about to reach disk restores this canvas. Anything
     // short of that falls back to the plain form, which needs no restoring.
-    if (JSON.stringify(parseWorkspaceText(serialized)) === plain) return serialized;
+    if (JSON.stringify(parseWorkspaceTextKeepingShared(serialized)) === plain) return serialized;
     logger.warn('[FileSystem] Canvas content pool did not restore identically; saving without it.');
   } catch (error) {
     logger.warn(`[FileSystem] Canvas content pool failed; saving without it: ${error?.message || error}`);
@@ -1861,22 +1869,24 @@ function pooledFormOf(data, plain) {
   return null;
 }
 
+// The canvas as JSON, with an object that sits in several places written once
+// (see workspaceContentPool.js). `shared` says the text needs the v2 header.
 function plainWorkspaceText(data) {
-  let plain;
+  let result;
   try {
-    plain = JSON.stringify(data);
+    result = stringifyWorkspaceSharingValues(data);
   } catch (error) {
     if (error instanceof RangeError && /string length/i.test(error.message)) throw workspaceSaveTooLargeError();
     throw error;
   }
-  const byteLength = Buffer.byteLength(plain, 'utf8');
+  const byteLength = Buffer.byteLength(result.text, 'utf8');
   if (byteLength > WORKSPACE_MAX_BYTES) throw workspaceSaveTooLargeError(byteLength);
-  return plain;
+  return { plain: result.text, shared: result.shared };
 }
 
 export function serializeWorkspaceForSave(data) {
-  const plain = plainWorkspaceText(data);
-  return pooledFormOf(data, plain) ?? plain;
+  const { plain, shared } = plainWorkspaceText(data);
+  return pooledFormOf(plain) ?? formatPlainWorkspace(plain, { shared });
 }
 
 // A bundle such as dist-electron/main.cjs keeps the worker entry beside it
@@ -1973,7 +1983,7 @@ export function pooledFormInChildProcess(plain, {
 export async function serializeWorkspaceForSaveOffThread(data, workerOptions = {}) {
   const megabytes = text => text.length / 1024 / 1024;
   let started = performance.now();
-  const plain = plainWorkspaceText(data);
+  const { plain, shared } = plainWorkspaceText(data);
   recordMainPerf('save-serialize', performance.now() - started, megabytes(plain));
   let pooled = null;
   started = performance.now();
@@ -1988,7 +1998,7 @@ export async function serializeWorkspaceForSaveOffThread(data, workerOptions = {
     recordMainPerf('save-compress-failed', performance.now() - started, megabytes(plain), reason);
     logger.warn(`[FileSystem] Canvas save worker failed; saving the canvas without pooling: ${error?.message || error}`);
   }
-  return pooled ?? plain;
+  return pooled ?? formatPlainWorkspace(plain, { shared });
 }
 
 /** Read through a bound handle and verify its public entry before exposing bytes. */
@@ -3745,7 +3755,9 @@ export function registerFilesystemHandlers() {
       delete data.transientProgress;
       
       try {
-        const cleanData = JSON.parse(JSON.stringify(data));
+        // structuredClone keeps an object held in several places as one
+        // object; a JSON round trip would expand it past the save limit.
+        const cleanData = structuredClone(data);
         // Strip nodes in cleanData so the disk copy is fully clean
         extractSidecarData(cleanData.nodes || []);
         delete cleanData.transientProgress;

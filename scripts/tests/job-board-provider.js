@@ -1,3 +1,4 @@
+import { withRescoreFollowUpRollbacks } from '../../src/utils/jobBoardRescoreFollowUp.js';
 import { assert } from './testHelpers.js';
 import { readAllJobsSources, readJobsSource, readJobsSources } from './jobsSourceFixture.mjs';
 import path from 'node:path';
@@ -493,6 +494,7 @@ export default [
         normalizeJobBoardAdmissionOrder, allocateJobBoardAdmissionOrder, moduleFingerprint, moduleCombineFingerprint,
         classifyJobBoardSourceAdmission, partitionJobBoardSourceAdmissions, isMergeableTerminalJobSearchOutcome, terminalJobSearchOutcome,
         exactPausedSourceContinuation, resolveExactPausedJobBoardTerminal, promoteJobBoardPausedSourceResolution,
+        withRescoreFollowUpRollbacks,
         findJobSearchBoardRecoveryOwner, findJobSearchBoardActiveRecoveryOwner,
         moduleLabel: d => d === canada.data ? 'Canada' : 'US',
         moduleSearchReadiness: () => ({ ready: true }), canInspectInterruptedRecovery: () => false,
@@ -615,6 +617,7 @@ export default [
         initial, id: 'board', boardRunId: 'board-run', initialPausedDescriptor: null,
         sourceId: 'canada', activeSourceRollback: initial.activeSourceRollback,
         promoteJobBoardPausedSourceResolution,
+        withRescoreFollowUpRollbacks,
         getNode: () => ({ data: { boardScanResume: live } }),
         updateGlobal: (_id, patch) => { live = patch.boardScanResume; },
       };

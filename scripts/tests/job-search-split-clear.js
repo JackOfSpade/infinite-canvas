@@ -1,3 +1,4 @@
+import { withRescoreFollowUpRollbacks } from '../../src/utils/jobBoardRescoreFollowUp.js';
 import { jobBoardSavedPauseOutcome } from '../../src/utils/jobBoardSavedPause.js';
 import { carriedJobsForTerminal, mergeCarriedJobs, withCarriedJobsTerminalPatch } from '../../src/utils/jobSearchCarriedResults.js';
 import { waitForJobRendererCommit } from '../../src/utils/jobRendererCommit.js';
@@ -979,7 +980,7 @@ export default [
       const mintAt = chain.indexOf('const patch = buildJobHubRescanCapabilityPatch(rescored?.data, { nodeId: id });');
       const rollbackAt = chain.indexOf('control.previousData = rescoredData;');
       const scanAt = chain.indexOf('const scrape = await runFreshBoardImport(capability, manualAiRunId);');
-      const planAt = chain.indexOf('rescoreFollowUps: { ...(plan.rescoreFollowUps || {}), [id]: { capability, rollback: followUpRollback } },');
+      const planAt = chain.indexOf('const rescoreFollowUps = { ...(plan.rescoreFollowUps || {}), [id]: { capability, rollback: followUpRollback } };');
       const newRunIdAt = chain.indexOf('manualAiRunId = createManualAiRunId(id);');
       assert(mintAt < planAt && planAt < rollbackAt && newRunIdAt > planAt && newRunIdAt < scanAt,
         'the scan capability and the re-scored rollback reach the Board plan before the search, which runs under a new manual-AI run id');
@@ -1028,6 +1029,37 @@ export default [
         && combine.includes('          && !shownElsewhere,'), 'Combine must skip a run another Board already shows');
       for (const kind of ['career-cleared-awaiting-files', 'rescore-saved-jobs', 'career-import-compiling', 'career-import-failed', 'career-import-requires-approval']) {
         assert(board.includes(`  '${kind}',\n`), `${kind} must be a replacement-pending admission`);
+      }
+    },
+  },
+  {
+    name: 'A re-score that goes on to search replaces the older rollback instead of keeping both',
+    run() {
+      const before = { version: 1, sourceId: 'hub', previousData: { scoredJobs: ['before'] } };
+      const rescored = { version: 1, sourceId: 'hub', previousData: { scoredJobs: ['rescored'] } };
+      const other = { version: 1, sourceId: 'other', previousData: {} };
+      const rescoreFollowUps = { hub: { capability: 'cap', rollback: rescored } };
+      const changed = withRescoreFollowUpRollbacks({
+        activeSourceRollback: before,
+        activeSourceRollbacks: { hub: before, other },
+        rescoreFollowUps,
+      });
+      assert.strictEqual(changed.activeSourceRollback, rescored);
+      assert.strictEqual(changed.activeSourceRollbacks.hub, rescored, 'one object in every slot, so a save writes it once');
+      assert.strictEqual(changed.activeSourceRollbacks.other, other);
+      assert.deepStrictEqual(withRescoreFollowUpRollbacks({
+        activeSourceRollback: other, activeSourceRollbacks: { other }, rescoreFollowUps,
+      }), {}, 'a slot without that Search is never added or changed');
+      assert.deepStrictEqual(withRescoreFollowUpRollbacks({
+        activeSourceRollback: rescored, activeSourceRollbacks: { hub: rescored }, rescoreFollowUps,
+      }), {}, 'already in place: nothing to write');
+      assert.deepStrictEqual(withRescoreFollowUpRollbacks({
+        activeSourceRollback: before,
+        activeSourceRollbacks: { hub: before },
+        rescoreFollowUps: { hub: { capability: 'cap', rollback: { ...rescored, sourceId: 'elsewhere' } } },
+      }), {}, 'a follow-up rollback for a different Search is ignored');
+      for (const file of ['src/nodes/JobBoardNode.jsx', 'src/nodes/JobSearchNode.jsx']) {
+        assert(fs.readFileSync(file, 'utf8').includes('withRescoreFollowUpRollbacks('), `${file} must route the follow-up rollback through the helper`);
       }
     },
   },

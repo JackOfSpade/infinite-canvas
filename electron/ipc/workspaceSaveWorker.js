@@ -14,7 +14,7 @@
 //   M  the pooled text did not restore exactly; save the plain text
 // Built as its own entry so the process never loads main.cjs.
 
-import { formatPooledWorkspace, parseWorkspaceText, poolWorkspaceContent } from './workspaceContentPool.js';
+import { formatPooledWorkspace, parseWorkspaceTextKeepingShared, poolWorkspaceContent } from './workspaceContentPool.js';
 
 /**
  * Returns `{ serialized, mismatch }` for a canvas already serialized as `plain`:
@@ -31,7 +31,9 @@ export function pooledTextForPlain(plain) {
     serialized = formatPooledWorkspace(pooled);
   }
   // Prove the exact text about to reach disk restores this canvas.
-  if (JSON.stringify(parseWorkspaceText(serialized)) === plain) return { serialized, mismatch: false };
+  // Shared values stay as references on both sides: `plain` holds them that
+  // way too, and loading reconnects them after this step.
+  if (JSON.stringify(parseWorkspaceTextKeepingShared(serialized)) === plain) return { serialized, mismatch: false };
   return { serialized: null, mismatch: true };
 }
 

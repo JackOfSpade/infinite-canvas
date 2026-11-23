@@ -74,6 +74,7 @@ import {
 import { replaceBoardDisplayChildren } from './jobboard/replaceBoardDisplayChildren';
 import { isJobBoardUserCancellation, isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../utils/jobBoardAiProvider';
 import { boundedCombinedSourceRuns, normalizeBoardResultCount } from '../utils/jobBoardProvenance';
+import { withRescoreFollowUpRollbacks } from '../utils/jobBoardRescoreFollowUp';
 import { allocateJobBoardAdmissionOrder, findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardRecoveryOwner, getConnectedJobSearchIds, getSelectedConnectedJobSearchIds, isJobBoardUpToDate, moveJobSearchExecutionOrder, normalizeJobBoardAdmissionOrder, normalizeJobBoardRecoveryTimestamp, orderJobSearchIds, toggleSelectedJobSearchId, canFinishPausedBoardSearch } from '../utils/jobBoardSearchSelection';
 import { hubHasAcceptedInitialDrop } from '../utils/hubDropEligibility';
 import { jobSearchScrapeSetupProblem } from '../utils/jobSearchScrapeSetup';
@@ -4730,9 +4731,23 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         ...(durableScanResume.rescoreFollowUps || {}),
         ...(nextPatch.rescoreFollowUps || {}),
       };
+      // Once a re-score goes on to search, its re-scored rollback replaces the
+      // one taken before the re-score: a cancel keeps the re-score, so the
+      // older receipt is never used again. Keeping both put two full copies
+      // of a large Search card in the plan, past what a save can write.
+      const followedRollbacks = withRescoreFollowUpRollbacks({
+        activeSourceRollback: Object.hasOwn(nextPatch, 'activeSourceRollback')
+          ? nextPatch.activeSourceRollback
+          : durableScanResume.activeSourceRollback,
+        activeSourceRollbacks: Object.hasOwn(nextPatch, 'activeSourceRollbacks')
+          ? nextPatch.activeSourceRollbacks
+          : durableScanResume.activeSourceRollbacks,
+        rescoreFollowUps: mergedRescoreFollowUps,
+      });
       durableScanResume = {
         ...durableScanResume,
         ...nextPatch,
+        ...followedRollbacks,
         rescoreFollowUps: mergedRescoreFollowUps,
         activeSourceManualAiRunIds: mergedManualAiRunIds,
         cancellationCleanupsBySource: mergedCancellationCleanups,

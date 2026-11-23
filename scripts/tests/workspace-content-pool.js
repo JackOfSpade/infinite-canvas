@@ -5,13 +5,18 @@ import {
   restoreWorkspaceContent,
   WORKSPACE_POOL_KEY,
   WORKSPACE_REF_KEY,
+  WORKSPACE_POOLED_HEADER,
+  WORKSPACE_SHARED_HEADER,
+  WORKSPACE_SHARED_KEY,
+  formatPlainWorkspace,
+  stringifyWorkspaceSharingValues,
 } from '../../electron/ipc/workspaceContentPool.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { serializeWorkspaceForSave, serializeWorkspaceForSaveOffThread } from '../../electron/ipc/filesystem.js';
 import { performanceDiagnosticsMarkdown } from '../../electron/ipc/perfDiagnostics.js';
-import { fingerprint } from '../../src/utils/serializationUtils.js';
+import { fingerprint, persistenceContentFingerprint } from '../../src/utils/serializationUtils.js';
 import { undoHistoryLimit } from '../../src/utils/undoMemoryBudget.js';
 
 const longText = label => `${label} `.repeat(200);
@@ -113,7 +118,10 @@ export default [
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'canvas-save-worker-'));
     try {
       const repeated = repeatedCanvas();
-      const plainText = JSON.stringify(repeated);
+      // The fixture shares one `matches` array between two rows, so the plain
+      // form writes it once under the v2 header.
+      const { text: sharedText, shared } = stringifyWorkspaceSharingValues(repeated);
+      const plainText = formatPlainWorkspace(sharedText, { shared });
       const failedBefore = perfKind(FAILED);
       const aborts = path.join(dir, 'aborts.mjs');
       fs.writeFileSync(aborts, "process.stdin.resume(); process.stdin.on('end', () => process.abort());\n");
@@ -136,6 +144,87 @@ export default [
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  } },
+  { name: 'An object in several places is written once and loads back as one object', run() {
+    // The 2026-11-23 failure: a Board plan held the same 160MB rollback under
+    // three keys, so plain JSON wrote it three times and outgrew the string limit.
+    const rollback = { version: 1, sourceId: 'hub', previousData: { scoredJobs: [{ title: 'A', snippet: longText('row') }] } };
+    const data = {
+      nodes: [{ id: 'board', type: 'jobboard', data: { boardScanResume: {
+        activeSourceRollback: rollback,
+        activeSourceRollbacks: { hub: rollback },
+        rescoreFollowUps: { hub: { capability: 'c', rollback } },
+      } } }],
+      edges: [],
+    };
+    const plain = JSON.stringify(data);
+    const { text, shared } = stringifyWorkspaceSharingValues(data);
+    assert.equal(shared, true);
+    assert.equal(text.split(longText('row')).length - 1, 1, 'the shared rollback is written once');
+    assert(text.length < plain.length / 2);
+    const saved = serializeWorkspaceForSave(data);
+    assert(saved.startsWith(WORKSPACE_SHARED_HEADER), 'shared values need the v2 header');
+    assert.throws(() => JSON.parse(saved), 'a reader without this format refuses the file instead of loading references as data');
+    const loaded = parseWorkspaceText(saved);
+    assert.equal(JSON.stringify(loaded), plain, 'the loaded canvas is the same canvas');
+    const plan = loaded.nodes[0].data.boardScanResume;
+    assert.equal(plan.activeSourceRollback, plan.activeSourceRollbacks.hub, 'one object again, as memory held it');
+    assert.equal(plan.activeSourceRollback, plan.rescoreFollowUps.hub.rollback);
+    assert(!Object.hasOwn(loaded, WORKSPACE_SHARED_KEY));
+  } },
+  { name: 'Shared values nest, empty and repeated-free canvases stay plain JSON', run() {
+    const inner = { text: longText('inner') };
+    const outer = { inner, again: inner, label: 'outer' };
+    const data = { nodes: [{ a: outer }, { b: outer }, { c: inner }], empty: [], emptyAgain: [] };
+    data.emptyAgain = data.empty;
+    const { text, shared } = stringifyWorkspaceSharingValues(data);
+    assert.equal(shared, true);
+    const loaded = parseWorkspaceText(WORKSPACE_SHARED_HEADER + text);
+    assert.equal(JSON.stringify(loaded), JSON.stringify(data));
+    assert.equal(loaded.nodes[0].a, loaded.nodes[1].b);
+    assert.equal(loaded.nodes[0].a.inner, loaded.nodes[2].c);
+    assert.equal(loaded.nodes[0].a.inner, loaded.nodes[0].a.again);
+    const unshared = { nodes: [{ id: 'x', data: { when: new Date(0), list: [1, 2] } }] };
+    assert.deepEqual(stringifyWorkspaceSharingValues(unshared), { text: JSON.stringify(unshared), shared: false });
+    assert.equal(serializeWorkspaceForSave(unshared), JSON.stringify(unshared), 'nothing shared, nothing repeated: the file is plain JSON as before');
+    const reserved = { nodes: [outer, outer], [WORKSPACE_SHARED_KEY]: 'user data' };
+    assert.deepEqual(stringifyWorkspaceSharingValues(reserved), { text: JSON.stringify(reserved), shared: false }, 'a reserved key keeps the plain form');
+    assert.throws(() => parseWorkspaceText(`${WORKSPACE_SHARED_HEADER}{"a":{"$canvasShared":3},"${WORKSPACE_SHARED_KEY}":[]}`), /broken shared-value reference/);
+  } },
+  { name: 'Shared values survive content pooling in the save process and a plain fallback', async run() {
+    const rollback = { version: 1, previousData: { pool: [{ snippet: longText('pool') }], other: longText('other') } };
+    const data = { nodes: [{ id: 'board', data: { plan: { one: rollback, two: { hub: rollback } } } }, { id: 'hub', data: { pool: [{ snippet: longText('pool') }] } }] };
+    const plain = JSON.stringify(data);
+    const pooled = await serializeWorkspaceForSaveOffThread(data);
+    assert(pooled.startsWith(WORKSPACE_SHARED_HEADER), 'pooled text with shared values carries the v2 header');
+    const loaded = parseWorkspaceText(pooled);
+    assert.equal(JSON.stringify(loaded), plain);
+    assert.equal(loaded.nodes[0].data.plan.one, loaded.nodes[0].data.plan.two.hub);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'canvas-shared-'));
+    try {
+      const fails = path.join(dir, 'fails.mjs');
+      fs.writeFileSync(fails, "process.stdin.resume(); process.stdin.on('end', () => process.exit(3));\n");
+      const fallback = await serializeWorkspaceForSaveOffThread(data, { workerPath: fails });
+      assert(fallback.startsWith(WORKSPACE_SHARED_HEADER) && !fallback.startsWith(WORKSPACE_POOLED_HEADER));
+      const back = parseWorkspaceText(fallback);
+      assert.equal(JSON.stringify(back), plain);
+      assert.equal(back.nodes[0].data.plan.one, back.nodes[0].data.plan.two.hub);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  } },
+  { name: 'The load-time fingerprint writes a shared object once, like the save', run() {
+    const rollback = { version: 1, sourceId: 'hub', previousData: { snippet: longText('fp') } };
+    const board = { id: 'board', type: 'jobboard', position: { x: 0, y: 0 }, data: { boardScanResume: {
+      activeSourceRollback: rollback, activeSourceRollbacks: { hub: rollback }, rescoreFollowUps: { hub: { rollback } },
+    } } };
+    const text = persistenceContentFingerprint({ nodes: [board], edges: [], drawings: [] });
+    assert.equal(text.split(longText('fp')).length - 1, 1, 'not expanded, so a canvas the save can write the window can also compare');
+    const loaded = parseWorkspaceText(serializeWorkspaceForSave({ nodes: [board], edges: [], drawings: [] }));
+    assert.equal(persistenceContentFingerprint(loaded), text, 'the reopened canvas fingerprints the same as the one saved');
+    const edited = structuredClone(board);
+    edited.data.boardScanResume.activeSourceRollback.previousData.snippet += '!';
+    assert.notEqual(persistenceContentFingerprint({ nodes: [edited], edges: [], drawings: [] }), text);
   } },
   { name: 'Undo fingerprint and size are remembered per node and still see every edit', run() {
     const card = { id: 'a', type: 'jobcard', position: { x: 0, y: 0 }, data: { description: longText('listing') } };

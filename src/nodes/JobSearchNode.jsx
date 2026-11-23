@@ -71,6 +71,7 @@ import { buildPinnedTitleQueryBundle, flattenJobSearchQueries } from '../utils/j
 import { JobSearchLocationFields } from '../components/JobSearchLocationFields';
 import { CareerCanvasFileImportDialog } from '../components/CareerCanvasFileImportDialog';
 import { TRANSIENT_PROCESSING_HUB_STATES } from '../utils/persistenceTransientState';
+import { withRescoreFollowUpRollbacks } from '../utils/jobBoardRescoreFollowUp';
 import { findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardPausedContinuationOwner, findJobSearchBoardRecoveryOwner, isJobSearchBoardPausedContinuationBlocked, getConnectedJobSearchIds, isJobSearchConnectedToBoard } from '../utils/jobBoardSearchSelection';
 import { safeClone } from '../utils/navigationUtils';
 import {
@@ -10860,10 +10861,18 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       updateGlobal(orchestratorNodeId, (boardNode) => {
         const plan = boardNode?.data?.boardScanResume;
         if (!plan || plan.boardRunId !== boardRunId || plan.phase !== 'searches') return null;
+        const rescoreFollowUps = { ...(plan.rescoreFollowUps || {}), [id]: { capability, rollback: followUpRollback } };
         return {
           boardScanResume: {
             ...plan,
-            rescoreFollowUps: { ...(plan.rescoreFollowUps || {}), [id]: { capability, rollback: followUpRollback } },
+            // The rollback from before the re-score is replaced, not kept
+            // beside this one (two full card copies outgrew a save).
+            ...withRescoreFollowUpRollbacks({
+              activeSourceRollback: plan.activeSourceRollback ?? null,
+              activeSourceRollbacks: plan.activeSourceRollbacks,
+              rescoreFollowUps,
+            }),
+            rescoreFollowUps,
             updatedAt: Date.now(),
           },
         };

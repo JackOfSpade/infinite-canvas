@@ -1,3 +1,4 @@
+import { stringifyWorkspaceSharingValues } from './sharedValueJson.js';
 import { getNodeDims } from './constants.js';
 import { createdAtMsFromCardId } from './priceDropReminder.js';
 import {
@@ -1036,9 +1037,12 @@ export function persistenceContentFingerprint(snapshot) {
     };
   };
 
-  return JSON.stringify({
+  // An object held in several places (a Job Board plan's rollback) is written
+  // once, as the save writes it. Plain JSON would expand it and could pass the
+  // runtime's string limit for a canvas that saved fine (2026-11-23).
+  return stringifyWorkspaceSharingValues({
     nodes: cleanNodes.map(projectNode),
     edges: cleanEdges.map(projectEdge),
     drawings: Array.isArray(snapshot?.drawings) ? snapshot.drawings : [],
-  });
+  }).text;
 }
