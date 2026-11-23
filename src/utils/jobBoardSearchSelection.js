@@ -953,6 +953,9 @@ export function jobBoardSelectionPresentation(selectedModules) {
   const reusableCount = selected.filter(module => module?.boardAction === 'reuse').length;
   // Saved jobs owed a re-score under replacement career data: AI scoring only.
   const rescoreCount = selected.filter(module => module?.boardAction === 'rescore').length;
+  // A career-swap re-score whose platforms are past their cooldown also
+  // searches them in the same click.
+  const rescoreScanCount = selected.filter(module => module?.boardAction === 'rescore' && module?.scrapesAfterRescore === true).length;
   const hasContinuation = selected.some(module => (
     module?.boardAction === 'continue'
     || /^(Finish saved search|Resume saved scoring|Resume pending search|Resume saved recovery)$/.test(module?.statusLabel || '')
@@ -960,7 +963,9 @@ export function jobBoardSelectionPresentation(selectedModules) {
   const hasTokenlessPaused = selected.some(module => module?.boardAction === 'continue-blocked');
   const runLabel = freshCount > 0
     ? ((reusableCount > 0 || hasContinuation || rescoreCount > 0) ? 'Continue & combine' : 'Search & combine')
-    : rescoreCount > 0
+    : rescoreScanCount > 0
+      ? 'Re-score, search & combine'
+      : rescoreCount > 0
       ? 'Re-score & combine'
       : hasContinuation
       ? 'Resume & combine'
@@ -969,7 +974,9 @@ export function jobBoardSelectionPresentation(selectedModules) {
         : 'Search selected & combine';
   const title = freshCount > 0
     ? 'Selected sources will search for new jobs and selected paused sources will continue. A completed source whose jobs this Board has not shown yet is reused without another scan; the Board then combines every connected completed result.'
-    : rescoreCount > 0
+    : rescoreScanCount > 0
+      ? 'Re-score the selected saved jobs against their new career data, then search the platforms past their 24-hour cooldown for new jobs, then combine every connected completed result.'
+      : rescoreCount > 0
       ? 'Re-score the selected saved jobs against their approved career data without scraping, then combine every connected completed result.'
       : hasContinuation
       ? 'Continue the selected Job Search state. Completed results are reused without another scan; the Board then combines every connected completed result.'
@@ -979,7 +986,7 @@ export function jobBoardSelectionPresentation(selectedModules) {
   const unreadyMessage = hasTokenlessPaused
     ? 'A selected paused Job Search has no recoverable run token. Resolve it from Job Search, or clear career data, re-import, then start fresh.'
     : 'Finish setting up the selected sources before running this board. A completed search whose jobs were already shown is searched again for new jobs once a platform is past its 24-hour cooldown.';
-  return { freshCount, reusableCount, rescoreCount, hasContinuation, hasTokenlessPaused, runLabel, title, unreadyMessage };
+  return { freshCount, reusableCount, rescoreCount, rescoreScanCount, hasContinuation, hasTokenlessPaused, runLabel, title, unreadyMessage };
 }
 
 /**

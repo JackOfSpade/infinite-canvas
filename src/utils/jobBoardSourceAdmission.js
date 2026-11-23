@@ -20,6 +20,8 @@ import {
 } from './jobSearchSplitClear.js';
 import { jobSearchRescrapeAvailability } from './jobSearchSourceCoverage.js';
 import { normalizedJobCareerSnapshotId } from './jobCareerSnapshotBinding.js';
+// Circular with jobSearchCarriedResults.js (it imports jobSearchShownRun); both only call at run time.
+import { jobSearchCarriedResultsMarker } from './jobSearchCarriedResults.js';
 
 /**
  * Which Board first displayed a Search run's jobs. Written on the Search card
@@ -338,6 +340,30 @@ export function describeReceiptMismatch(actual, expected) {
   if (isAbsent(actual.runId) !== isAbsent(expected.runId)) return 'run-id-presence-changed';
   if (actual.resultDisposition !== expected.resultDisposition) return 'disposition-changed';
   return 'receipt-shape-invalid';
+}
+
+/**
+ * What the same Board click does after a saved-job re-score (admission
+ * `rescore-saved-jobs`): the card is classified as it will read once the
+ * re-score commits (marker retired, its manual-AI run closed). `scrape` is
+ * true when that card would be `rescrape-terminal`, i.e. a platform is past its
+ * cooldown and the run may be searched again; `addsToShown` says whether the
+ * new jobs join the ones this Board shows (same rule as
+ * jobSearchCarriedResultsMarker) or replace them. A scoring repair never
+ * searches. This is a prediction for the Board's label; the Search decides
+ * again from the live re-scored card before it scrapes.
+ */
+export function savedJobsRescoreFollowUp(source, { now = Date.now(), boardId = null } = {}) {
+  const data = source?.data || {};
+  const shown = !!jobSearchShownRun(data);
+  const none = { scrape: false, addsToShown: false, dueSourceIds: [], afterKind: null, shown };
+  const rescore = pendingSavedJobsRescore(data);
+  if (!rescore || rescore.scoringOnly === true) return none;
+  const after = { ...source, data: { ...data, savedJobsRescore: null, manualAiResume: null } };
+  const admission = classifyJobBoardSourceAdmission(after, { now, boardId });
+  if (admission.kind !== 'rescrape-terminal') return { ...none, afterKind: admission.kind };
+  const addsToShown = jobSearchCarriedResultsMarker(after.data, { orchestratorNodeId: boardId }) !== null;
+  return { scrape: true, addsToShown, dueSourceIds: admission.dueSourceIds || [], afterKind: admission.kind, shown };
 }
 
 /**

@@ -82,7 +82,8 @@ import {
 import { isJobBoardUserCancellation } from '../utils/jobBoardAiProvider';
 import { isMergeableTerminalJobSearchOutcome, terminalJobSearchOutcome } from '../utils/jobBoardPausedSourceContinuation';
 import { exactInterruptedRecoveryBackendFailure, hasCheckpointedPostCollectionAnalysis } from '../utils/jobBoardRecoveryAdmission';
-import { classifyJobBoardSourceAdmission } from '../utils/jobBoardSourceAdmission';
+import { classifyJobBoardSourceAdmission, savedJobsRescoreFollowUp } from '../utils/jobBoardSourceAdmission';
+import { jobSearchScrapeSetupProblem } from '../utils/jobSearchScrapeSetup';
 import { getSavedAnalysisAvailability, publishSavedAnalysisAvailability, savedAnalysisResumeAdmission } from '../utils/jobSavedAnalysisAvailability';
 import { hasStoredPreferenceVerdicts, mergeScoredJobs, splitKeptScores } from '../utils/jobSearchPreferenceReevaluation';
 import { CopyBriefButton } from './jobsearch/CopyBriefButton';
@@ -94,7 +95,7 @@ import {
   upsertManualAiCleanupReceipt,
   waitForRendererCommitFrame,
 } from './jobsearch/manualAiRunReceipts';
-import { buildJobHubCareerOnlyClearPatch, buildSavedJobsRescoreMarker, hubRetainsSavedJobs, isCareerClearedWithSavedJobs, pendingSavedJobsRescore, savedJobCount as countSavedJobs, savedJobsReevaluationKeepsScores, savedJobsRescoreCompletionPatch } from '../utils/jobSearchSplitClear';
+import { buildJobHubCareerOnlyClearPatch, buildJobHubRescanCapabilityPatch, buildSavedJobsRescoreMarker, hubRetainsSavedJobs, isCareerClearedWithSavedJobs, pendingSavedJobsRescore, savedJobCount as countSavedJobs, savedJobsReevaluationKeepsScores, savedJobsRescoreCompletionPatch } from '../utils/jobSearchSplitClear';
 import { createJobCareerImportCapability, freshJobCareerImportCapability, jobCareerImportBoardAdmission, jobCareerImportConsumptionPatch, retryableUnstartedJobCareerImportCapability, retryableCancelledJobCareerImportCapability } from '../utils/jobCareerImportCapability';
 import { isCareerCompilerTask } from '../utils/careerCompilerTasks';
 import { pausedCareerImportCompilation, restartCareerImportCompilationPatch, approveCareerImportCompilation, beginCareerImportCompilation, careerCompileResumeExplanation, careerImportCompilationAdmission, careerResumeBannerStatus, careerImportCompilationMatches, careerResumeInputPaths, currentApprovedCareerImportSnapshot, failCareerImportCompilation, resumableCareerImportCompilation } from '../utils/jobCareerCompilationReceipt';
@@ -8410,7 +8411,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       EventLogger.log(`[JobSearch][${id}] New career snapshot ready; saved-job re-score waits for the connected Job Board`);
       addToast({
         title: 'Career data ready',
-        description: `Use Search selected & combine on the connected Job Board to re-score ${jobsText}.`,
+        description: `Run the connected Job Board to re-score ${jobsText}; the same click also searches for new jobs when a platform is due.`,
         type: 'info',
         dedupeKey: `job-search-run-from-board:${id}`,
       });
@@ -10751,7 +10752,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         : boardPlanAtAdmission.activeSourceRollbacks[id])
       : null;
 
-    const manualAiRunId = effectiveManualAiResume?.runId || createManualAiRunId(id);
+    // `let`: a re-score followed by a search hands the search its own run id
+    // (the re-score retires this one), and every cleanup below must follow it.
+    let manualAiRunId = effectiveManualAiResume?.runId || createManualAiRunId(id);
     const localEpochCancelled = epoch.start();
     const control = {
       orchestratorNodeId,
@@ -10775,9 +10778,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       || control.cancelled
       || boardRunControlRef.current !== control
       || (typeof isCancelled === 'function' && isCancelled());
-    const runFreshBoardImport = () => {
+    const runFreshBoardImport = (capability = freshImportCapability, runManualAiRunId = manualAiRunId) => {
       const freshAdmission = jobCareerImportBoardAdmission(getNode(id)?.data, {
-        capability: freshImportCapability,
+        capability,
         boardRunId,
         nodeId: id,
       });
@@ -10789,15 +10792,121 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       return handleRerun({
         frameSourceCards: false,
         runOrigin: 'job-board-scan',
-        manualAiRunId,
+        manualAiRunId: runManualAiRunId,
         queueManagedByBoard: true,
         parentCancelled: cancelled,
         orchestratorNodeId,
         boardRunId,
-        freshImportCapability,
+        freshImportCapability: capability,
         providerPhaseOnly: providerPhaseOnlyRecovery,
         boardRecoveryClaim,
       });
+    };
+    // New career data re-scores the saved jobs first. The same Board click then
+    // searches the platforms past their 24-hour cooldown, exactly as the next
+    // click would: the card is classified again after the re-score commits, so
+    // the cooldown, the career-change lift and the add-or-replace rule
+    // (jobSearchCarriedResultsMarker) all read the re-scored card. The scan
+    // capability is minted only now, because minting it earlier would replace
+    // the generation the re-score marker is bound to. Anything that stops the
+    // search before it starts keeps the re-scored jobs as this child's result.
+    const searchDuePlatformsAfterRescore = async (rescoreOutcome) => {
+      const committed = await waitForCommittedSearchOutcome({
+        getNode,
+        nodeId: id,
+        outcome: rescoreOutcome,
+        cancelled,
+      });
+      if (committed?.status !== 'completed' || cancelled()) return committed;
+      // The re-score closes its manual-AI run; a scan cannot be minted while it is open.
+      for (let attempt = 0; attempt < 4 && getNode(id)?.data?.manualAiResume?.runId; attempt += 1) {
+        await waitForRendererCommitFrame();
+      }
+      const rescored = getNode(id);
+      const follow = classifyJobBoardSourceAdmission(rescored, { boardId: orchestratorNodeId });
+      if (follow.kind !== 'rescrape-terminal') {
+        EventLogger.log(`[JobSearch][${id}] Saved jobs re-scored; no new search in this Board run (${follow.kind})`);
+        return committed;
+      }
+      const setupProblem = platformsVerifyingRef.current
+        ? { readinessReason: 'Its selected platform connections are still being checked.' }
+        : jobSearchScrapeSetupProblem(rescored);
+      if (setupProblem) {
+        EventLogger.log(`[JobSearch][${id}] Saved jobs re-scored; new search skipped: ${setupProblem.readinessReason}`);
+        addToast({
+          title: 'Saved jobs re-scored',
+          description: `No new search ran: ${setupProblem.readinessReason}`,
+          type: 'info',
+        });
+        return committed;
+      }
+      const patch = buildJobHubRescanCapabilityPatch(rescored?.data, { nodeId: id });
+      if (!patch) return committed;
+      const capability = patch.careerImportFreshCapability;
+      updateGlobal(id, patch);
+      let minted = false;
+      for (let attempt = 0; attempt < 4 && !minted; attempt += 1) {
+        await waitForRendererCommitFrame();
+        minted = getNode(id)?.data?.careerImportFreshCapability === capability;
+      }
+      if (!minted || cancelled()) return committed;
+      // A cancel during the search restores the re-scored card, not the one
+      // from before the re-score. The Board's saved plan gets the same rollback
+      // and the scan capability, so a restart mid-search resumes this search
+      // (and a cancel after it) exactly like an ordinary Board re-scan.
+      const rescoredData = getNode(id)?.data || control.previousData;
+      const rescoredGraph = captureJobSourceGraph(id, getNodes(), getEdges());
+      const followUpRollback = safeClone({ version: 1, sourceId: id, previousData: rescoredData, sourceGraph: rescoredGraph });
+      updateGlobal(orchestratorNodeId, (boardNode) => {
+        const plan = boardNode?.data?.boardScanResume;
+        if (!plan || plan.boardRunId !== boardRunId || plan.phase !== 'searches') return null;
+        return {
+          boardScanResume: {
+            ...plan,
+            rescoreFollowUps: { ...(plan.rescoreFollowUps || {}), [id]: { capability, rollback: followUpRollback } },
+            updatedAt: Date.now(),
+          },
+        };
+      });
+      let planned = false;
+      for (let attempt = 0; attempt < 4 && !planned; attempt += 1) {
+        await waitForRendererCommitFrame();
+        planned = getNode(orchestratorNodeId)?.data?.boardScanResume?.rescoreFollowUps?.[id]?.capability === capability;
+      }
+      if (!planned || cancelled()) {
+        EventLogger.log(`[JobSearch][${id}] Saved jobs re-scored; new search not started (the Board plan did not record it)`);
+        return committed;
+      }
+      control.previousData = rescoredData;
+      control.previousSourceGraph = rescoredGraph;
+      // The re-score retired its manual-AI run id; the search gets a new one.
+      manualAiRunId = createManualAiRunId(id);
+      control.manualAiRunId = manualAiRunId;
+      EventLogger.log(`[JobSearch][${id}] Saved jobs re-scored; searching platforms past their cooldown in the same Board run (${(follow.dueSourceIds || []).join(', ') || 'none named'})`);
+      const scrape = await runFreshBoardImport(capability, manualAiRunId);
+      if (cancelled() || scrape?.status === 'completed' || scrape?.status === 'cancelled' || scrape?.status === 'paused') {
+        return scrape;
+      }
+      // Still holding the unspent capability means the search never started
+      // (a signed-out platform, a busy lane, a refused admission). Put the
+      // re-scored card back so the Board shows it, and say why.
+      const live = getNode(id)?.data;
+      if (freshJobCareerImportCapability(live, { nodeId: id }) !== capability) return scrape;
+      const prior = rescoredData || {};
+      updateGlobal(id, {
+        ...boardRunRollbackPatch(rescoredData, id),
+        errorMessage: prior.errorMessage ?? null,
+        retryOperation: prior.retryOperation ?? null,
+        retryOperationFor: prior.retryOperationFor ?? null,
+        rerunOutcome: prior.rerunOutcome ?? null,
+        rerunNotice: prior.rerunNotice ?? null,
+        carriedResults: prior.carriedResults ?? null,
+      });
+      const restored = await waitForCommittedSearchOutcome({ getNode, nodeId: id, outcome: committed, cancelled });
+      const reason = scrape?.error?.message || scrape?.error || scrape?.reason || scrape?.status || 'not started';
+      EventLogger.log(`[JobSearch][${id}] Re-score kept; the new search did not start: ${reason}`);
+      addToast({ title: 'Saved jobs re-scored', description: `No new search ran: ${reason}`, type: 'info' });
+      return restored;
     };
     const retireOwnedManualMarker = async () => {
       const liveResume = getNode(id)?.data?.manualAiResume || null;
@@ -10939,10 +11048,16 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           && pendingSavedJobsRescore(liveNode?.data))
       ) {
         // A career swap kept these saved jobs: re-score them against the new
-        // snapshot without any provider search. The completed scrape run is
+        // snapshot, then (searchDuePlatformsAfterRescore) search the platforms
+        // past their cooldown in the same Board run. The completed scrape run is
         // deliberately not claimed (`ownsExistingRecoveryRun` stays false), so
         // a cancel rolls the hub back without discarding that run's files.
         const resumingRescore = isSavedJobReanalysisManualAiResume(effectiveManualAiResume);
+        const rescoreAdmittedAsScoringOnly = liveImportAdmission.scoringOnly === true;
+        // Search afterwards only when the Board announced it ("re-score, then
+        // search"), so a re-score that leaves nothing to show cannot start a
+        // search the button did not promise.
+        const rescoreAnnouncedSearch = savedJobsRescoreFollowUp(liveNode, { boardId: orchestratorNodeId }).scrape;
         outcome = providerPhaseOnlyRecovery && !allowFreshProviderBootstrap
           ? searchRunOutcome('paused', {
             reason: 'awaiting-explicit-ai-continue',
@@ -10953,6 +11068,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             ...(resumingRescore ? { recoveryMode: effectiveManualAiResume.recoveryMode } : {}),
             boardRun: { orchestratorNodeId, boardRunId, parentCancelled: cancelled },
           });
+        // A scoring repair keeps the job selection and never searches.
+        if (outcome?.status === 'completed' && !rescoreAdmittedAsScoringOnly && rescoreAnnouncedSearch && !cancelled()) {
+          outcome = await searchDuePlatformsAfterRescore(outcome);
+        }
       } else if (exactInterruptedRecovery) {
         // `expectedRunId` makes a vanished or replaced preflight manifest an
         // inspection failure. It must never fall through into handleRerun.
@@ -11147,7 +11266,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     } finally {
       if (boardRunControlRef.current === control) boardRunControlRef.current = null;
     }
-  }, [cancelBoardRun, completeManualAiRun, data, epoch, getEdges, getNode, getNodes, handleRerun, id, retryTerminalFinalization, updateGlobal]);
+  }, [addToast, cancelBoardRun, completeManualAiRun, data, epoch, getEdges, getNode, getNodes, handleRerun, id, retryTerminalFinalization, updateGlobal]);
 
   useEffect(() => {
     cancelBoardRunRef.current = cancelBoardRun;
@@ -11238,7 +11357,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     if (!boardManaged && deferDirectSearchToBoard(
       'Saved-job re-evaluation',
       pendingSavedJobsRescore(getNode(id)?.data)
-        ? 'Use Search selected & combine on the connected Job Board to re-score these saved jobs with the new career data.'
+        ? 'Run the connected Job Board to re-score these saved jobs with the new career data; the same click also searches for new jobs when a platform is due.'
         : null,
     )) {
       return searchRunOutcome('not-ready', { error: 'The connected Job Board owns this re-evaluation.' });
@@ -14231,7 +14350,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       : isProcessing || data.queuedModuleRun
         ? `New career data is ready · re-scoring ${savedJobsText}…`
         : managedByJobBoard
-          ? `New career data is ready · use Search & combine on the Job Board to re-score ${savedJobsText}.`
+          ? `New career data is ready · run the Job Board to re-score ${savedJobsText}; it also searches for new jobs when a platform is due.`
           : `New career data is ready · connect a Job Board to re-score ${savedJobsText}.`;
 
   return (

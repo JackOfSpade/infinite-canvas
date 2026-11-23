@@ -1243,7 +1243,7 @@ export default [
       const search = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
       const selection = readFileSync(new URL('../../src/nodes/jobboard/JobBoardSearchSelection.jsx', import.meta.url), 'utf8');
       const sourceReadyAt = board.indexOf("if (sourceAdmission.kind === 'continue-existing') {");
-      const freshPlatformAt = board.indexOf('const runnableSources = getRunnableJobSourceIds(');
+      const freshPlatformAt = board.indexOf('const setupProblem = jobSearchScrapeSetupProblem(node, { verifyingPlatforms });\n  if (setupProblem) return setupProblem;');
       const terminalBoundaryAt = search.indexOf('const ordinaryDoneAdmission = classifyJobBoardSourceAdmission(liveNode);');
       const genericRerunAt = search.indexOf("} else if (recoverInterruptedJobRun || window.electronAPI?.peekJobRun) {");
 
@@ -4925,7 +4925,7 @@ export default [
         && pipeline.includes("if (!orchestratorNodeId) throw new Error('A board-managed search requires an orchestrator node id.')")
         && childRunnerStart >= 0 && childRunnerEnd > childRunnerStart
         && childRunner.includes('queueManagedByBoard: true')
-        && childRunner.includes('const runFreshBoardImport = () => {')
+        && childRunner.includes('const runFreshBoardImport = (capability = freshImportCapability, runManualAiRunId = manualAiRunId) => {')
         && childRunner.includes("runOrigin: 'job-board-scan'")
         && childRunner.includes('parentCancelled: cancelled')
         && childRunner.includes('jobSearchCoordinator.registerSearchModule(id, runForJobBoard, cancelBoardRun,'),
@@ -4940,7 +4940,7 @@ export default [
       const freshRunAt = childRunner.indexOf(': await runFreshBoardImport();', missingLedgerFallbackAt);
       const terminalGateAt = childRunner.indexOf("if (!outcome || outcome.status !== 'completed')", freshRunAt);
       const committedWaitAt = childRunner.indexOf('const committed = await waitForCommittedSearchOutcome({', terminalGateAt);
-      assert(childRunner.includes('const manualAiRunId = effectiveManualAiResume?.runId || createManualAiRunId(id);')
+      assert(childRunner.includes('let manualAiRunId = effectiveManualAiResume?.runId || createManualAiRunId(id);')
         && outcomeDeclarationAt >= 0 && savedRecoveryAt > outcomeDeclarationAt
         && savedRecoveryInvokeAt > savedRecoveryAt && interruptedRecoveryAt > savedRecoveryInvokeAt
         && interruptedRecoveryInvokeAt > interruptedRecoveryAt

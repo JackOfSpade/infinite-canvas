@@ -23,7 +23,10 @@ import {
 import {
   classifyJobBoardSourceAdmission,
   partitionJobBoardSourceAdmissions,
+  savedJobsRescoreFollowUp,
 } from '../../src/utils/jobBoardSourceAdmission.js';
+import { jobSearchScrapeSetupProblem } from '../../src/utils/jobSearchScrapeSetup.js';
+import { jobSearchCarriedResultsMarker } from '../../src/utils/jobSearchCarriedResults.js';
 import { getSavedAnalysisAvailability, savedAnalysisResumeAdmission } from '../../src/utils/jobSavedAnalysisAvailability.js';
 import {
   JOBHUB_CAREER_IDENTITY_FIELDS,
@@ -350,7 +353,7 @@ export default [
             bindings.claimAnalysisOperation = instantiate(callback('claimAnalysisOperation'));
             bindings.finishScoringAndSpawn = instantiate(callback('finishScoringAndSpawn'));
             Object.assign(bindings, {
-              classifyJobBoardSourceAdmission, jobBoardSavedPauseOutcome,
+              classifyJobBoardSourceAdmission, savedJobsRescoreFollowUp, jobBoardSavedPauseOutcome,
               getSavedAnalysisAvailability, savedAnalysisResumeAdmission,
               findJobSearchBoardActiveRecoveryOwner: () => null,
               isExactPausedBoardScoringContinuation: () => false,
@@ -869,6 +872,86 @@ export default [
       assert.strictEqual(jobBoardSelectionPresentation([{ boardAction: 'rescore' }, { boardAction: 'scan' }]).runLabel, 'Continue & combine');
       assert.strictEqual(jobBoardSelectionPresentation([{ boardAction: 'scan' }]).runLabel, 'Search & combine');
       assert.strictEqual(jobBoardSelectionPresentation([{ boardAction: 'reuse' }]).runLabel, 'Combine saved results');
+      const rescoreThenSearch = jobBoardSelectionPresentation([{ boardAction: 'rescore', scrapesAfterRescore: true }]);
+      assert.strictEqual(rescoreThenSearch.runLabel, 'Re-score, search & combine');
+      assert.strictEqual(rescoreThenSearch.rescoreScanCount, 1);
+      assert.match(rescoreThenSearch.title, /then search the platforms past their 24-hour cooldown/u);
+      assert.strictEqual(jobBoardSelectionPresentation([{ boardAction: 'rescore', scrapesAfterRescore: false }]).runLabel, 'Re-score & combine');
+    },
+  },
+  {
+    name: 'career swap: the same Board click re-scores, then searches platforms past their cooldown and keeps the re-scored jobs',
+    run: async () => {
+      const nodeId = 'chain-hub';
+      const boardId = 'board-1';
+      const generation = capabilityFor(nodeId);
+      const compiled = terminalHub(nodeId, {
+        careerSnapshotId: SNAPSHOT,
+        resumeFingerprint: FINGERPRINT,
+        resumeProfile: { name: 'New' },
+        careerFilePaths: ['/career/new.md'],
+        careerImportGeneration: generation,
+        careerImportFreshCapability: generation,
+        careerImportConsumption: null,
+        careerImportCompilation: approvedReceipt(generation, SNAPSHOT),
+        savedJobsRescore: buildSavedJobsRescoreMarker({ careerSnapshotId: SNAPSHOT, generation }),
+        boardShownRun: { runId: 'terminal-run', boardId, shownAt: 1 },
+      });
+      assert.strictEqual(classifyJobBoardSourceAdmission(compiled, { boardId }).kind, 'rescore-saved-jobs');
+
+      // The Board's label predicts the follow-up search from the card as it will read after the re-score.
+      const sameBoard = savedJobsRescoreFollowUp(compiled, { boardId });
+      assert.strictEqual(sameBoard.scrape, true);
+      assert.strictEqual(sameBoard.addsToShown, true);
+      assert(sameBoard.dueSourceIds.length > 0, 'a platform with no coverage is past its cooldown');
+      const otherBoard = savedJobsRescoreFollowUp(compiled, { boardId: 'board-2' });
+      assert.strictEqual(otherBoard.scrape, true, 'shown elsewhere and due: searched again, as the next click would');
+      assert.strictEqual(otherBoard.addsToShown, false, 'another Board replaces the jobs it did not show');
+      const repair = { ...compiled, data: { ...compiled.data, savedJobsRescore: { ...compiled.data.savedJobsRescore, scoringOnly: true } } };
+      assert.strictEqual(savedJobsRescoreFollowUp(repair, { boardId }).scrape, false);
+      assert.strictEqual(savedJobsRescoreFollowUp(terminalHub(nodeId), { boardId }).scrape, false);
+      // Never shown on a Board: the re-scored jobs are combined first, and the Board says so instead of blaming the cooldown.
+      const unshown = { ...compiled, data: { ...compiled.data, boardShownRun: null } };
+      const unshownFollow = savedJobsRescoreFollowUp(unshown, { boardId });
+      assert.deepStrictEqual([unshownFollow.scrape, unshownFollow.afterKind, unshownFollow.shown], [false, 'reuse-terminal', false]);
+
+      // After the re-score commits (marker retired, import spent), the card is re-scrape due on the same Board.
+      const rescored = { ...compiled, data: applyPatch(compiled.data, savedJobsRescoreCompletionPatch(compiled.data, SNAPSHOT, { nodeId })) };
+      const follow = classifyJobBoardSourceAdmission(rescored, { boardId });
+      assert.strictEqual(follow.kind, 'rescrape-terminal');
+      // The scan capability is minted only now; minting it before the re-score would orphan the re-score marker.
+      const premature = { ...compiled, data: applyPatch(compiled.data, buildJobHubRescanCapabilityPatch(compiled.data, { nodeId })) };
+      assert.notStrictEqual(classifyJobBoardSourceAdmission(premature, { boardId }).kind, 'rescore-saved-jobs');
+      const minted = { ...rescored, data: applyPatch(rescored.data, buildJobHubRescanCapabilityPatch(rescored.data, { nodeId })) };
+      assert.strictEqual(jobCareerImportBoardAdmission(minted.data, {
+        capability: minted.data.careerImportFreshCapability, boardRunId: 'run-1', nodeId,
+      }).kind, 'fresh');
+      // The scrape keeps the re-scored rows on the Board that showed them.
+      assert.deepStrictEqual(jobSearchCarriedResultsMarker(minted.data, { orchestratorNodeId: boardId }),
+        { runId: 'terminal-run', boardId, careerSnapshotId: SNAPSHOT });
+      assert.strictEqual(jobSearchCarriedResultsMarker(minted.data, { orchestratorNodeId: 'board-2' }), null);
+
+      // A recently searched card only re-scores.
+      const now = Date.now();
+      const fresh = { ...compiled, data: { ...compiled.data, sourceCoverage: Object.fromEntries(
+        sameBoard.dueSourceIds.map(sourceId => [sourceId, { coverageStartedAt: now - 120_000, completedAt: now - 60_000, careerSnapshotId: SNAPSHOT }]),
+      ) } };
+      const freshFollow = savedJobsRescoreFollowUp(fresh, { boardId, now });
+      assert.deepStrictEqual([freshFollow.scrape, freshFollow.afterKind, freshFollow.shown], [false, 'reuse-terminal', true]);
+    },
+  },
+  {
+    name: 'scrape setup check names the missing platform, career files or location, and passes a set-up card',
+    run: async () => {
+      const ready = { id: 'setup-hub', type: 'jobhub', data: {
+        hubState: 'done', inputLocked: true, careerFilePaths: ['/career/a.md'],
+        enabledSourceIds: ['linkedin'],
+        searchLocation: 'Toronto, ON, Canada',
+      } };
+      const verdict = jobSearchScrapeSetupProblem(ready);
+      if (verdict) assert.fail(`expected a set-up card to pass, got ${verdict.statusLabel}: ${verdict.readinessReason}`);
+      assert.strictEqual(jobSearchScrapeSetupProblem({ ...ready, data: { ...ready.data, enabledSourceIds: [] } })?.statusLabel, 'Needs platform');
+      assert.strictEqual(jobSearchScrapeSetupProblem({ ...ready, data: { ...ready.data, inputLocked: false, careerFilePaths: [] } })?.statusLabel, 'Needs files');
     },
   },
   {
@@ -878,13 +961,35 @@ export default [
       const runner = sliceBetween(search, 'const runForJobBoard = useCallback(async ({', 'const handleReanalyze = useCallback');
       const rescoreAt = runner.indexOf("liveImportAdmission.kind === 'rescore-saved-jobs'\n");
       const probeAt = runner.indexOf('} else if (recoverInterruptedJobRun || window.electronAPI?.peekJobRun) {');
-      const freshAt = runner.indexOf('const runFreshBoardImport = () => {');
+      const freshAt = runner.indexOf('const runFreshBoardImport = (capability = freshImportCapability) => {');
       assert(rescoreAt > freshAt && probeAt > rescoreAt, 'the re-score branch must be dispatched before the interrupted-run probe can fall through to runFreshBoardImport');
       const branch = runner.slice(rescoreAt, runner.indexOf('} else if (exactInterruptedRecovery) {', rescoreAt));
       assert(branch.includes('handleReanalyzeRef.current?.({') && branch.includes('boardRun: { orchestratorNodeId, boardRunId, parentCancelled: cancelled }'),
         'a Board re-score must run handleReanalyze inside the Board transaction');
       assert(!branch.includes('ownsExistingRecoveryRun = true'), 'claiming the existing run would let a cancel discard the completed scrape run files');
-      assert(!branch.includes('runFreshBoardImport') && !branch.includes('handleRerun'), 'a re-score must never reach a provider scan');
+      // The re-score itself never scans. Only after it completes may the same
+      // child search the platforms past their cooldown, through the one
+      // follow-up that re-classifies the re-scored card.
+      assert(!branch.includes('runFreshBoardImport') && !branch.includes('handleRerun'), 'the re-score branch must not start a provider scan directly');
+      assert(branch.includes("if (outcome?.status === 'completed' && !rescoreAdmittedAsScoringOnly && rescoreAnnouncedSearch && !cancelled()) {\n          outcome = await searchDuePlatformsAfterRescore(outcome);")
+        && branch.includes('const rescoreAnnouncedSearch = savedJobsRescoreFollowUp(liveNode, { boardId: orchestratorNodeId }).scrape;'),
+        'only a completed career-swap re-score (never a scoring repair) whose Board announced a search may search afterwards');
+      const chain = sliceBetween(runner, 'const searchDuePlatformsAfterRescore = async (rescoreOutcome) => {', 'const retireOwnedManualMarker = async () => {');
+      const classifyAt = chain.indexOf("const follow = classifyJobBoardSourceAdmission(rescored, { boardId: orchestratorNodeId });");
+      const mintAt = chain.indexOf('const patch = buildJobHubRescanCapabilityPatch(rescored?.data, { nodeId: id });');
+      const rollbackAt = chain.indexOf('control.previousData = rescoredData;');
+      const scanAt = chain.indexOf('const scrape = await runFreshBoardImport(capability, manualAiRunId);');
+      const planAt = chain.indexOf('rescoreFollowUps: { ...(plan.rescoreFollowUps || {}), [id]: { capability, rollback: followUpRollback } },');
+      const newRunIdAt = chain.indexOf('manualAiRunId = createManualAiRunId(id);');
+      assert(mintAt < planAt && planAt < rollbackAt && newRunIdAt > planAt && newRunIdAt < scanAt,
+        'the scan capability and the re-scored rollback reach the Board plan before the search, which runs under a new manual-AI run id');
+      assert(chain.includes('if (freshJobCareerImportCapability(live, { nodeId: id }) !== capability) return scrape;')
+        && chain.includes('...boardRunRollbackPatch(rescoredData, id),'),
+        'a search that never started (capability unspent) restores the re-scored card so the Board still combines it');
+      assert(chain.indexOf('await waitForCommittedSearchOutcome({') < classifyAt && classifyAt < mintAt && mintAt < rollbackAt && rollbackAt < scanAt,
+        'the follow-up waits for the committed re-score, re-classifies it, mints a scan capability, moves the rollback to the re-scored card, then scans');
+      assert(chain.includes("if (follow.kind !== 'rescrape-terminal') {") && chain.includes('jobSearchScrapeSetupProblem(rescored)'),
+        'the follow-up searches only a re-scrape-due card whose platforms and location are set up');
       assert(runner.includes("savedJobsRescore: liveImportAdmission.kind === 'rescore-saved-jobs',"), 'readiness must not demand platforms/location for a score-only child');
     },
   },

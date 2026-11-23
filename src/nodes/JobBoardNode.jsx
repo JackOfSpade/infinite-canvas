@@ -76,25 +76,22 @@ import { isJobBoardUserCancellation, isLegacyUnbucketedJobBoard, validateJobBoar
 import { boundedCombinedSourceRuns, normalizeBoardResultCount } from '../utils/jobBoardProvenance';
 import { allocateJobBoardAdmissionOrder, findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardRecoveryOwner, getConnectedJobSearchIds, getSelectedConnectedJobSearchIds, isJobBoardUpToDate, moveJobSearchExecutionOrder, normalizeJobBoardAdmissionOrder, normalizeJobBoardRecoveryTimestamp, orderJobSearchIds, toggleSelectedJobSearchId, canFinishPausedBoardSearch } from '../utils/jobBoardSearchSelection';
 import { hubHasAcceptedInitialDrop } from '../utils/hubDropEligibility';
-import { getSearchLocation, hasRequiredLocations, locationValidationMessage } from '../utils/jobSearchLocations';
+import { jobSearchScrapeSetupProblem } from '../utils/jobSearchScrapeSetup';
+import { getSearchLocation } from '../utils/jobSearchLocations';
 import { exactInterruptedRecoveryAdmission } from '../utils/jobBoardRecoveryAdmission';
 import { cancelJobBoardChildrenSequentially, promoteJobBoardPausedSourceResolution, runJobBoardChildFanout } from '../utils/jobBoardChildFanout';
-import { boardHistoryAuthorityAvailable, classifyJobBoardSourceAdmission, combineSourceRunEntry, completedJobSearchOutcomeMatches, describeReceiptMismatch, isJobSearchRunShownOnOtherBoard, jobSearchOutcomeReceiptMatches, jobSearchShownRunPatch, partitionJobBoardSourceAdmissions } from '../utils/jobBoardSourceAdmission';
+import { boardHistoryAuthorityAvailable, classifyJobBoardSourceAdmission, savedJobsRescoreFollowUp, combineSourceRunEntry, completedJobSearchOutcomeMatches, describeReceiptMismatch, isJobSearchRunShownOnOtherBoard, jobSearchOutcomeReceiptMatches, jobSearchShownRunPatch, partitionJobBoardSourceAdmissions } from '../utils/jobBoardSourceAdmission';
 import { jobSearchRescrapeAvailability } from '../utils/jobSearchSourceCoverage';
 import { buildJobHubRescanCapabilityPatch } from '../utils/jobSearchSplitClear';
 import { jobSearchCarriedResultsMarker } from '../utils/jobSearchCarriedResults';
-import { getRunnableJobSourceIds, normalizeEnabledJobSourceIds } from '../utils/jobPlatformSelection';
 import {
   getSavedAnalysisAvailability,
   getSavedAnalysisAvailabilityVersion,
   savedAnalysisResumeAdmission,
   subscribeSavedAnalysisAvailability,
 } from '../utils/jobSavedAnalysisAvailability';
-import { normalizeJobCollectionLimits } from '../utils/jobCollectionLimits';
-import { getJobAuthPreflightSourceIds } from '../utils/jobAuthPreflight';
 import { exactPausedSourceContinuation, resolveExactPausedJobBoardTerminal, isMergeableTerminalJobSearchOutcome, terminalJobSearchOutcome, awaitedSourceTerminalStatus, canRetryBoardRecoveryAfterError } from '../utils/jobBoardPausedSourceContinuation';
 import { prepareBackgroundBoardChildRequest, validateBackgroundBoardChildRequest } from '../utils/jobBoardBackgroundRecovery';
-import { ACTIVE_JOB_SOURCES } from '../utils/constants';
 import { safeClone } from '../utils/navigationUtils';
 import {
   getJobWorkflowDeletionLifecycleRevision,
@@ -325,13 +322,44 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
   const sourceAdmission = classifyJobBoardSourceAdmission(node, { now, boardId: orchestratorNodeId });
   if (sourceAdmission.kind === 'rescore-saved-jobs') {
     const count = Number.isFinite(sourceAdmission.savedJobCount) ? sourceAdmission.savedJobCount : 0;
+    const jobsText = `${count} saved job${count === 1 ? '' : 's'}`;
+    if (sourceAdmission.scoringOnly) {
+      return {
+        ready: true,
+        boardAction: 'rescore',
+        readinessReason: 'Scoring repair: re-score these saved jobs using the complete career evidence. The job selection and preferences are kept.',
+        statusLabel: `${jobsText} · re-score`,
+      };
+    }
+    // The same click re-scores and then searches the platforms past their
+    // cooldown (JobSearchNode decides again from the re-scored card). The
+    // search needs the same setup as any other scrape, so a missing platform
+    // or location keeps the click to the re-score and says why.
+    const followUp = savedJobsRescoreFollowUp(node, { now, boardId: orchestratorNodeId });
+    const setupProblem = followUp.scrape ? jobSearchScrapeSetupProblem(node, { verifyingPlatforms }) : null;
+    if (followUp.scrape && !setupProblem) {
+      return {
+        ready: true,
+        boardAction: 'rescore',
+        scrapesAfterRescore: true,
+        readinessReason: followUp.addsToShown
+          ? 'New career data: its saved jobs will be re-scored, then the platforms past their 24-hour cooldown are searched for new jobs, which are added to the ones this Board already shows.'
+          : 'New career data: its saved jobs will be re-scored, then the platforms past their 24-hour cooldown are searched for new jobs, which replace the saved ones, then combined.',
+        statusLabel: `${jobsText} · re-score, then search`,
+      };
+    }
+    const noSearchReason = setupProblem
+      ? setupProblem.readinessReason
+      : followUp.afterKind === 'reuse-terminal' && !followUp.shown
+        ? 'Its saved jobs have not been shown on a Job Board yet, so they are combined first; a later run searches for new jobs.'
+        : followUp.afterKind === 'reuse-terminal' || followUp.afterKind === 'rescrape-cooldown'
+          ? 'Every selected platform was searched in the last 24 hours.'
+          : 'This Job Search cannot be searched again yet.';
     return {
       ready: true,
       boardAction: 'rescore',
-      readinessReason: sourceAdmission.scoringOnly
-        ? 'Scoring repair: re-score these saved jobs using the complete career evidence. The job selection and preferences are kept.'
-        : 'New career data: its saved jobs will be re-scored without scraping, then combined.',
-      statusLabel: `${count} saved job${count === 1 ? '' : 's'} · re-score`,
+      readinessReason: `New career data: its saved jobs will be re-scored, then combined. No new search runs: ${noSearchReason}`,
+      statusLabel: `${jobsText} · re-score`,
     };
   }
   if (sourceAdmission.kind === 'career-cleared-awaiting-files') {
@@ -437,35 +465,8 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
       statusLabel: 'Paused run needs attention',
     };
   }
-  const runnableSources = getRunnableJobSourceIds(
-    normalizeEnabledJobSourceIds(sourceData.enabledSourceIds),
-    ACTIVE_JOB_SOURCES,
-    normalizeJobCollectionLimits(sourceData.collectionLimits),
-  );
-  const browserLoginSources = getJobAuthPreflightSourceIds(
-    sourceIds => sourceIds.filter(sourceId => runnableSources.includes(sourceId)),
-  );
-  if (verifyingPlatforms instanceof Set && browserLoginSources.some(sourceId => verifyingPlatforms.has(sourceId))) {
-    return {
-      ready: false,
-      readinessReason: 'Its selected platform connections are still being checked.',
-      statusLabel: 'Checking connections',
-    };
-  }
-  if (runnableSources.length === 0) {
-    return { ready: false, readinessReason: 'Select at least one job platform.', statusLabel: 'Needs platform' };
-  }
-  if (!hubHasAcceptedInitialDrop(node)) {
-    return { ready: false, readinessReason: 'Drop career files on this module first.', statusLabel: 'Needs files' };
-  }
-  const searchLocation = getSearchLocation(sourceData);
-  if (!hasRequiredLocations(searchLocation)) {
-    return {
-      ready: false,
-      readinessReason: locationValidationMessage(searchLocation),
-      statusLabel: 'Needs location',
-    };
-  }
+  const setupProblem = jobSearchScrapeSetupProblem(node, { verifyingPlatforms });
+  if (setupProblem) return setupProblem;
   if (sourceAdmission.kind === 'rescrape-terminal') {
     const count = Array.isArray(sourceData.scoredJobs) ? sourceData.scoredJobs.length : 0;
     // Same rule as jobSearchCarriedResultsMarker: the Board that still shows
@@ -4722,9 +4723,17 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         ? nextPatch.cancellationCleanup
         : Object.values(mergedCancellationCleanups)[0]
           || (liveCancellationCleanups ? null : durableScanResume.cancellationCleanup || null);
+      // A child that re-scored and then started a search records that search
+      // in the live plan; a later whole-plan write from this closure keeps it.
+      const mergedRescoreFollowUps = {
+        ...(livePlan?.boardRunId === boardRunId ? livePlan.rescoreFollowUps || {} : {}),
+        ...(durableScanResume.rescoreFollowUps || {}),
+        ...(nextPatch.rescoreFollowUps || {}),
+      };
       durableScanResume = {
         ...durableScanResume,
         ...nextPatch,
+        rescoreFollowUps: mergedRescoreFollowUps,
         activeSourceManualAiRunIds: mergedManualAiRunIds,
         cancellationCleanupsBySource: mergedCancellationCleanups,
         cancellationCleanup: legacyCancellationCleanup,
@@ -5535,7 +5544,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
 
         activeSearchModuleIdRef.current = sourceId;
         activeSearchModuleIdsRef.current.add(sourceId);
-        const retainedRollback = durableScanResume.activeSourceRollbacks?.[sourceId]
+        // A re-score that went on to search moved its rollback to the
+        // re-scored card, so a cancel after a restart keeps the re-score.
+        const retainedRollback = durableScanResume.rescoreFollowUps?.[sourceId]?.rollback
+          || durableScanResume.activeSourceRollbacks?.[sourceId]
           || (durableScanResume.activeSourceId === sourceId
           && durableScanResume.activeSourceRollback?.sourceId === sourceId
           ? durableScanResume.activeSourceRollback
@@ -5622,7 +5634,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             // It lets the Search finish clean paused rows or reopen the same
             // staged run; it never authorizes a fresh search.
             pausedSourceContinuation: pausedContinuation,
-            freshImportCapability: durableScanResume.freshImportCapabilities?.[sourceId] || null,
+            // A re-score child that went on to search saved its own scan
+            // capability in the plan (rescoreFollowUps); a resumed turn uses it.
+            freshImportCapability: durableScanResume.freshImportCapabilities?.[sourceId]
+              || durableScanResume.rescoreFollowUps?.[sourceId]?.capability
+              || null,
             // A Board reload during query/scrape has no manual-AI marker yet.
             // Preserve that distinct recovery intent so the Search probes its
             // exact staged run before considering a fresh retry.
