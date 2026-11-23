@@ -81,7 +81,7 @@ import { hubHasAcceptedInitialDrop } from '../utils/hubDropEligibility';
 import { jobSearchScrapeSetupProblem } from '../utils/jobSearchScrapeSetup';
 import { getSearchLocation } from '../utils/jobSearchLocations';
 import { exactInterruptedRecoveryAdmission } from '../utils/jobBoardRecoveryAdmission';
-import { boardMayProbeInterruptedRun, isInterruptedBoardChild, ownedUnfinishedRunOnDisk, unfinishedRunLookupFailed } from '../utils/jobBoardRecoveryAdmission';
+import { boardMayProbeInterruptedRun, finishedCardMayHideUnfinishedRun, isInterruptedBoardChild, ownedUnfinishedRunOnDisk, unfinishedRunLookupFailed } from '../utils/jobBoardRecoveryAdmission';
 import { cancelJobBoardChildrenSequentially, promoteJobBoardPausedSourceResolution, runJobBoardChildFanout } from '../utils/jobBoardChildFanout';
 import { boardHistoryAuthorityAvailable, classifyJobBoardSourceAdmission, savedJobsRescoreFollowUp, combineSourceRunEntry, completedJobSearchOutcomeMatches, describeReceiptMismatch, isJobSearchRunShownOnOtherBoard, jobSearchOutcomeReceiptMatches, jobSearchShownRunPatch, partitionJobBoardSourceAdmissions } from '../utils/jobBoardSourceAdmission';
 import { jobSearchRescrapeAvailability } from '../utils/jobSearchSourceCoverage';
@@ -504,6 +504,10 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
 async function inspectExactResumableJobRun(canvasFilePath, nodeId, sourceData, {
   platformsVerifying = false,
   allowAged = false,
+  // A finished card is probed for a DIFFERENT, unfinished run. The finished
+  // run its saved jobs came from (it has a result on the card) is never one
+  // to continue.
+  excludeSavedRun = false,
 } = {}) {
   if (!canvasFilePath || !nodeId || !window.electronAPI?.peekJobRun) return null;
   try {
@@ -515,7 +519,14 @@ async function inspectExactResumableJobRun(canvasFilePath, nodeId, sourceData, {
       platformsVerifying,
       allowAged,
     });
-    return admission.ok ? admission.runId : null;
+    if (!admission.ok) return null;
+    if (
+      excludeSavedRun
+      && sourceData?.hubState === 'done'
+      && !!sourceData?.resultDisposition
+      && admission.runId === sourceData?.jobRunId
+    ) return null;
+    return admission.runId;
   } catch {
     return null;
   }
@@ -1282,13 +1293,18 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           orchestratorNodeId: id,
           recoveryOwner,
         });
-        return canInspectInterruptedRecovery(readiness, node.data);
+        return canInspectInterruptedRecovery(readiness, node.data, { boardId: id });
       });
 
     Promise.all(candidateNodes.map(async (node) => ({
       nodeId: node.id,
       signature: interruptedRecoveryProbeSignature(node.data),
-      runId: await inspectExactResumableJobRun(canvasFilePath, node.id, node.data),
+      // A finished card with no run id can only hide this Board's own paused
+      // search; its age is not a reason to leave it unreachable.
+      runId: await inspectExactResumableJobRun(canvasFilePath, node.id, node.data, {
+        excludeSavedRun: true,
+        allowAged: node.data?.hubState === 'done' && !node.data?.jobRunId,
+      }),
     }))).then((results) => {
       if (cancelled || interruptedRecoveryProbeGenerationRef.current !== generation) return;
       const next = {};
@@ -1341,7 +1357,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         const probe = interruptedRecoveryProbes[n.id];
         const recoveryProbeEligible = !!canvasFilePath
           && !hasActivePlatformVerification(verifyingPlatforms)
-          && canInspectInterruptedRecovery(readiness, n.data)
+          && canInspectInterruptedRecovery(readiness, n.data, { boardId: id })
           && probe?.signature === interruptedRecoveryProbeSignature(n.data)
           && typeof probe?.runId === 'string'
           && !!probe.runId;
@@ -1367,7 +1383,14 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           ...(recoveryProbeEligible ? {
             ready: true,
             statusLabel: 'Resume saved recovery',
-            readinessReason: 'Resume this Search’s exact unfinished run.',
+            // A finished card hiding an unfinished search: say what the click
+            // does, and count it as work so the Board is not "up to date".
+            ...(finishedCardMayHideUnfinishedRun(readiness, n.data, { boardId: id }) ? {
+              boardAction: 'continue',
+              readinessReason: 'An unfinished search is saved for this Job Search. It continues from where it stopped; the jobs already on the card are kept.',
+            } : {
+              readinessReason: 'Resume this Search’s exact unfinished run.',
+            }),
           } : {}),
           ...(isQueueableSearchContention(readiness) ? { ready: true } : {}),
         };
@@ -1430,7 +1453,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
 
   useEffect(() => {
     EventLogger.registerNodeState(id, {
-      jobBoardSelector: selectorRuntimeSnapshot,
+      // How many connected Searches this Board found an unfinished run on
+      // disk for (a count, no ids). Beside "up to date" it names a dead end.
+      jobBoardSelector: selectorRuntimeSnapshot
+        ? { ...selectorRuntimeSnapshot, unfinishedRunsFound: Object.keys(interruptedRecoveryProbes).length }
+        : selectorRuntimeSnapshot,
       jobBoardCombine: {
         ...combineTrace,
         combining,
@@ -1441,7 +1468,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         finalizingCommittedCombine,
       },
     });
-  }, [id, selectorRuntimeSnapshot, combineTrace, combining, scanning, compensationProgress, finalizingCommittedCombine]);
+  }, [id, selectorRuntimeSnapshot, interruptedRecoveryProbes, combineTrace, combining, scanning, compensationProgress, finalizingCommittedCombine]);
 
   useEffect(() => () => EventLogger.unregisterNodeState(id), [id]);
 
@@ -4334,9 +4361,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           recoveryOwner,
           now: admissionNow,
         });
-        const interruptedRecoveryRunId = canInspectInterruptedRecovery(readiness, source?.data)
+        const interruptedRecoveryRunId = canInspectInterruptedRecovery(readiness, source?.data, { boardId: id })
           ? await inspectExactResumableJobRun(canvasFilePath, sourceId, source?.data, {
             platformsVerifying: hasActivePlatformVerification(verifyingPlatformsRef.current),
+            excludeSavedRun: true,
+            allowAged: source?.data?.hubState === 'done' && !source?.data?.jobRunId,
           })
           : null;
         return {
@@ -4403,9 +4432,26 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const selectedSourceNodes = transactionSelectedIds
       .map(sourceId => sourceNodesById.get(sourceId))
       .filter(Boolean);
-    const admissionPartition = resumePlan
+    // A finished card with an unfinished search on disk continues that search.
+    // It is not adopted as a finished result, skipped as recently searched, or
+    // given a new search that would start over the saved one.
+    const unfinishedRunSourceIds = new Set(
+      admissionReadiness
+        .filter(entry => !!entry.interruptedRecoveryRunId)
+        .map(entry => entry.sourceId),
+    );
+    const classifiedPartition = resumePlan
       ? null
       : partitionJobBoardSourceAdmissions(selectedSourceNodes, { now: admissionNow, boardId: id });
+    const withoutUnfinishedRuns = entries => entries.filter(entry => !unfinishedRunSourceIds.has(entry.sourceId));
+    const admissionPartition = classifiedPartition && unfinishedRunSourceIds.size > 0
+      ? {
+        ...classifiedPartition,
+        reusable: withoutUnfinishedRuns(classifiedPartition.reusable),
+        cooldown: withoutUnfinishedRuns(classifiedPartition.cooldown),
+        rescrape: withoutUnfinishedRuns(classifiedPartition.rescrape),
+      }
+      : classifiedPartition;
     const completedOutcomes = new Map(Object.entries(resumePlan?.completedSourceRuns || {}));
     const incompleteSearches = Array.isArray(resumePlan?.incompleteSearches)
       ? resumePlan.incompleteSearches.filter(entry => {
@@ -5404,10 +5450,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         // unfinished run on disk is then the state to continue, even when the
         // card (still carrying that run's AI-handoff marker) reads as blocked.
         const interruptedBoardChild = isInterruptedBoardChild(iterationPlan, sourceId);
-        let interruptedRecoveryRunId = canInspectInterruptedRecovery(turnReadiness, sourceNode.data, { interruptedBoardChild })
+        let interruptedRecoveryRunId = canInspectInterruptedRecovery(turnReadiness, sourceNode.data, { interruptedBoardChild, boardId: id })
           ? await inspectExactResumableJobRun(canvasFilePath, sourceId, sourceNode.data, {
             platformsVerifying: hasActivePlatformVerification(verifyingPlatformsRef.current),
-            allowAged: interruptedBoardChild,
+            allowAged: interruptedBoardChild || (sourceNode.data?.hubState === 'done' && !sourceNode.data?.jobRunId),
+            excludeSavedRun: true,
           })
           : null;
         // Inspection crosses an async IPC boundary. Re-read both the Search and
@@ -5458,10 +5505,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         // Re-inspect against the current Search data before passing any token to
         // the child; a replaced manifest still fails closed in the child too.
         if (initialRecoveryProbeSignature !== interruptedRecoveryProbeSignature(turnSourceNode.data)) {
-          interruptedRecoveryRunId = canInspectInterruptedRecovery(turnReadiness, turnSourceNode.data, { interruptedBoardChild })
+          interruptedRecoveryRunId = canInspectInterruptedRecovery(turnReadiness, turnSourceNode.data, { interruptedBoardChild, boardId: id })
             ? await inspectExactResumableJobRun(canvasFilePath, sourceId, turnSourceNode.data, {
               platformsVerifying: hasActivePlatformVerification(verifyingPlatformsRef.current),
-              allowAged: interruptedBoardChild,
+              allowAged: interruptedBoardChild || (turnSourceNode.data?.hubState === 'done' && !turnSourceNode.data?.jobRunId),
+              excludeSavedRun: true,
             })
             : null;
           if (hasActivePlatformVerification(verifyingPlatformsRef.current)) {
@@ -5532,6 +5580,63 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           && !turnSourceNode.data?.locked
           && !ACTIVE_SEARCH_STATES.has(turnSourceNode.data?.hubState)
           && turnReadiness.statusLabel !== 'Deletion pending';
+        // An unfinished search for this card is still on disk but cannot be
+        // continued as the card stands. Going on would drop the plan (or
+        // combine the card's earlier jobs) and leave that run with no owner:
+        // nothing could resume it, and it would block every later search on
+        // the card. Keep the plan so Cancel can put the card back and remove
+        // exactly that run, or a retry can continue it. Returns true when the
+        // plan was kept and this scan must stop.
+        const keepPlanForUnfinishedRun = async () => {
+          if (!canvasFilePath || !window.electronAPI?.peekJobRun) return false;
+          let unfinishedRunId = null;
+          // A lookup that failed says nothing about the disk; treat it like a
+          // run that is there, so a passing disk or IPC error cannot drop the
+          // plan.
+          let lookupFailed = false;
+          try {
+            const info = await window.electronAPI.peekJobRun({ canvasFilePath, nodeId: sourceId });
+            lookupFailed = unfinishedRunLookupFailed(info);
+            unfinishedRunId = lookupFailed ? null : ownedUnfinishedRunOnDisk(
+              info,
+              { nodeId: sourceId, savedRunId: turnSourceNode.data?.jobRunId || null },
+            );
+          } catch {
+            lookupFailed = true;
+          }
+          if (cancelled()) return true;
+          if (!unfinishedRunId && !lookupFailed) return false;
+          persistScanResume({ activeSourceId: sourceId });
+          const message = lookupFailed
+            ? `${label}: the search this Board run had started could not be checked on disk. Retry, or cancel this Board run to put the card back as it was.`
+            : `${label} has an interrupted search saved from this Board run, but it could not be continued as the card stands now.`
+              + ' Retry, or cancel this Board run to put the card back as it was.';
+          setRecoveryError(message);
+          setScanProgress({
+            completed: processed,
+            total: totalSelected,
+            currentLabel: label,
+            label: `${label} has an interrupted search this Board could not continue. Retry or cancel this Board run.`,
+          });
+          EventLogger.log(
+            `[JobBoard] scan kept its plan: interrupted search ${lookupFailed ? 'could not be checked' : 'still saved'} for a source that is ${turnReadiness.ready ? 'read as finished' : 'not ready'} id=${id}`
+            + ` run=${boardRunId} source=${sourceId} status=${/^[A-Za-z -]+$/.test(turnReadiness.statusLabel || '') ? turnReadiness.statusLabel : 'other'}`,
+          );
+          return true;
+        };
+        // A card that reads as finished and reusable is otherwise handed on as
+        // a finished result without its Search ever looking on disk. When this
+        // Board's plan had started it and no exact run could be continued,
+        // make sure no unfinished run is hidden behind it first. (A card that
+        // is about to be searched looks for its own unfinished run.)
+        if (
+          interruptedBoardChild
+          && !interruptedRecoveryRunId
+          && turnReadiness.boardAction !== 'scan'
+          && finishedCardMayHideUnfinishedRun(turnReadiness, turnSourceNode.data, { interruptedBoardChild })
+          && await keepPlanForUnfinishedRun()
+        ) return;
+        if (cancelled()) return;
         if (!turnReadiness.ready && !savedRecoveryCanProceed && !pausedContinuationCanProceed && !interruptedRecoveryCanProceed) {
           if (turnReadiness.statusLabel === 'Deletion pending') {
             // onBeforeDelete is reversible until its cancellation/OS work
@@ -5580,49 +5685,8 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             EventLogger.log(`[JobBoard] recovered scan waiting for platform verification id=${id} run=${boardRunId} source=${sourceId}`);
             return;
           }
-          // This Board had started this Search, and its unfinished run is
-          // still on disk but cannot be continued as the card stands. Skipping
-          // it would drop the plan and leave that run with no owner: nothing
-          // could resume it, and it would block every later search on the
-          // card. Keep the plan so Cancel can put the card back and remove
-          // exactly that run, or a retry can continue it.
-          if (interruptedBoardChild && canvasFilePath && window.electronAPI?.peekJobRun) {
-            let unfinishedRunId = null;
-            // A lookup that failed says nothing about the disk; treat it like
-            // a run that is there, so a passing disk or IPC error cannot drop
-            // the plan.
-            let lookupFailed = false;
-            try {
-              const info = await window.electronAPI.peekJobRun({ canvasFilePath, nodeId: sourceId });
-              lookupFailed = unfinishedRunLookupFailed(info);
-              unfinishedRunId = lookupFailed ? null : ownedUnfinishedRunOnDisk(
-                info,
-                { nodeId: sourceId, savedRunId: turnSourceNode.data?.jobRunId || null },
-              );
-            } catch {
-              lookupFailed = true;
-            }
-            if (cancelled()) return;
-            if (unfinishedRunId || lookupFailed) {
-              persistScanResume({ activeSourceId: sourceId });
-              const message = lookupFailed
-                ? `${label}: the search this Board run had started could not be checked on disk. Retry, or cancel this Board run to put the card back as it was.`
-                : `${label} has an interrupted search saved from this Board run, but it could not be continued as the card stands now.`
-                  + ' Retry, or cancel this Board run to put the card back as it was.';
-              setRecoveryError(message);
-              setScanProgress({
-                completed: processed,
-                total: totalSelected,
-                currentLabel: label,
-                label: `${label} has an interrupted search this Board could not continue. Retry or cancel this Board run.`,
-              });
-              EventLogger.log(
-                `[JobBoard] scan kept its plan: interrupted search ${lookupFailed ? 'could not be checked' : 'still saved'} for a source that is not ready id=${id}`
-                + ` run=${boardRunId} source=${sourceId} status=${/^[A-Za-z -]+$/.test(turnReadiness.statusLabel || '') ? turnReadiness.statusLabel : 'other'}`,
-              );
-              return;
-            }
-          }
+          if (interruptedBoardChild && await keepPlanForUnfinishedRun()) return;
+          if (cancelled()) return;
           processed += 1;
           incompleteSearches.push({
             sourceId,
@@ -6356,6 +6420,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       autoResumedBoardScanRef.current = null;
       searchRecoveryErrorRef.current = null;
       foreignRecoveryWaitSigRef.current = null;
+      // No plan, so no recovery notice of its own: the report must not keep
+      // printing the last plan's latch beside an idle Board.
+      boardRecoveryDiagnosticsRef.current = { recoveryErrorLatch: 'none', awaitedSource: 'none' };
       return;
     }
     if (recoveryError && recoveryError === pauseRefusalMessageRef.current) return;

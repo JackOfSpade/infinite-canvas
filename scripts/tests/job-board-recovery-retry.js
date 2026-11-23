@@ -247,6 +247,27 @@ export default [
     },
   },
   {
+    name: 'boardSelectorRuntimeSummary flags an unfinished search on disk beside an up-to-date Board',
+    run() {
+      const base = {
+        rowCount: 1, selectedCount: 1, actionEligible: false, actionVisible: false,
+        eligibilityReasons: ['board-up-to-date'], renderedAction: 'up-to-date',
+        recoveryErrorLatch: 'none', awaitedSource: 'none',
+      };
+      const deadEnd = boardSelectorRuntimeSummary(boardSelectorRuntimeDiagnostic({ ...base, unfinishedRunsFound: 1 }));
+      assert.ok(deadEnd.endsWith(' · unfinished-runs-found-on-disk=1 (⚠️ none can be continued from this Board as rendered)'), deadEnd);
+      const clean = boardSelectorRuntimeSummary(boardSelectorRuntimeDiagnostic({ ...base, unfinishedRunsFound: 0 }));
+      assert.ok(clean.endsWith(' · unfinished-runs-found-on-disk=0'), clean);
+      const offered = boardSelectorRuntimeSummary(boardSelectorRuntimeDiagnostic({
+        ...base, actionVisible: true, actionEligible: true, renderedAction: 'run', eligibilityReasons: [], unfinishedRunsFound: 1,
+      }));
+      assert.ok(offered.endsWith(' · unfinished-runs-found-on-disk=1'), offered);
+      // Free text or an older snapshot prints nothing.
+      const old = boardSelectorRuntimeSummary(boardSelectorRuntimeDiagnostic({ ...base, unfinishedRunsFound: 'run-id' }));
+      assert.ok(!old.includes('unfinished-runs-found'), old);
+    },
+  },
+  {
     name: 'boardSelectorRuntimeSummary names the recovery controls a paused Board shows instead of the hidden Search button',
     run() {
       const snapshot = boardSelectorRuntimeDiagnostic({

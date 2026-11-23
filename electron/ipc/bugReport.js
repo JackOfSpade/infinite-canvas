@@ -44,9 +44,10 @@ import { resolveNodePresence } from '../../src/utils/nodePresence.js';
 import { canAttemptJobSourceResolve, isJobSourceWarningGating } from '../../src/utils/jobSourceWarningPolicy.js';
 import { findJobSearchBoardActiveRecoveryOwner } from '../../src/utils/jobBoardSearchSelection.js';
 import { jobSearchRescrapeAvailability, resolveNextJobSearchRunWindow } from '../../src/utils/jobSearchSourceCoverage.js';
+import { jobSearchShownRun } from '../../src/utils/jobBoardSourceAdmission.js';
 import { pendingSavedJobsRescore } from '../../src/utils/jobSearchSplitClear.js';
 import { isGoogleJobsInternalUrl, normalizeJobListingExternalUrl } from '../../src/utils/jobListingUrl.js';
-import { buildApplicationOutputReportSnapshot, buildJobBoardDiagnostics, buildJobCompletionAssessment, buildJobLinkSnapshot, buildJobRecoveryOfferSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown, jobSourceHealthAlarmItems, sourceAdmissionKind } from './bugReport/jobsSnapshot.js';
+import { buildApplicationOutputReportSnapshot, buildJobBoardDiagnostics, buildJobCompletionAssessment, buildJobLinkSnapshot, buildJobRecoveryOfferSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown, jobSourceHealthAlarmItems, reportScoredJobsStandIn, sourceAdmissionKind } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
 import { buildMarketplaceModuleRollup } from './bugReport/marketplaceModuleRollup.js';
 import { buildSellHubPriceDropRollup } from './bugReport/sellHubPriceDropRollup.js';
@@ -1121,7 +1122,7 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
                   return `cooling down (next platform due ${Number.isFinite(availability.nextEligibleAt) ? new Date(availability.nextEligibleAt).toISOString() : 'unknown'})`;
                 }
                 if (kind === 'reuse-terminal') {
-                  const shown = !!d.jobRunId && d.boardShownRun?.runId === d.jobRunId;
+                  const shown = !!jobSearchShownRun({ ...d, scoredJobs: reportScoredJobsStandIn(d) });
                   return shown
                     ? 'cooling down (a Board reuses its shown jobs)'
                     : 'not yet (its jobs have not been shown on a Board)';

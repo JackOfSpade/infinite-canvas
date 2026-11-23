@@ -86,6 +86,33 @@ export function isInterruptedBoardChild(plan, sourceId) {
 }
 
 /**
+ * True when a card that reads as a finished, usable search may still have an
+ * unfinished search saved on disk.
+ *
+ * A Board search of a finished card clears the card's run id when it starts
+ * and keeps the earlier jobs on the card. If that search is paused or the app
+ * closes before it saves any jobs, the card reloads as "done" with the earlier
+ * jobs and no run id, which reads exactly like an old finished search. The
+ * unfinished run on disk is then the only trace of it. So the disk is checked
+ * for a finished card with no run id, and for any finished card this Board's
+ * own saved plan had already started.
+ *
+ * `boardId` names the Board asking. A search that was adding jobs to the ones
+ * another Board shows (`carriedResults.boardId`) is that Board's to continue:
+ * continuing it here would show those jobs on a second Board.
+ */
+export function finishedCardMayHideUnfinishedRun(readiness, sourceData, { interruptedBoardChild = false, boardId = null } = {}) {
+  if (readiness?.ready !== true || sourceData?.hubState !== 'done') return false;
+  if (!['reuse', 'scan', 'cooldown'].includes(readiness.boardAction)) return false;
+  if (interruptedBoardChild === true) return true;
+  const hasRunId = typeof sourceData.jobRunId === 'string' && !!sourceData.jobRunId.trim();
+  if (hasRunId) return false;
+  const carriedBoardId = sourceData.carriedResults?.boardId;
+  return !(typeof carriedBoardId === 'string' && carriedBoardId
+    && typeof boardId === 'string' && boardId && carriedBoardId !== boardId);
+}
+
+/**
  * Whether the Board may look on disk for this Search's unfinished run before
  * deciding the Search is not ready.
  *
@@ -97,12 +124,15 @@ export function isInterruptedBoardChild(plan, sourceId) {
  *     now reads as "needs new career data". An interrupted search leaves its
  *     AI-handoff marker on the card, and that marker alone makes a completed
  *     card read that way; the unfinished run on disk is the real state.
+ *   - the card reads as a finished search but may hide an unfinished one
+ *     (`finishedCardMayHideUnfinishedRun`).
  * Only an exact run can continue; a missing one stays not-ready.
  */
-export function boardMayProbeInterruptedRun(readiness, sourceData, { interruptedBoardChild = false } = {}) {
+export function boardMayProbeInterruptedRun(readiness, sourceData, { interruptedBoardChild = false, boardId = null } = {}) {
   const probeReason = readiness?.statusLabel === 'Needs platform'
     || readiness?.boardAction === 'fresh-import-blocked'
-    || (interruptedBoardChild === true && readiness?.boardAction === 'terminal-blocked');
+    || (interruptedBoardChild === true && readiness?.boardAction === 'terminal-blocked')
+    || finishedCardMayHideUnfinishedRun(readiness, sourceData, { interruptedBoardChild, boardId });
   return probeReason
     && sourceData?.hubState !== 'sources-ready'
     && !!sourceData?.resumeProfile

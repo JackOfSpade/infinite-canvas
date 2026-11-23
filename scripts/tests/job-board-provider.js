@@ -20,7 +20,7 @@ import { applyManualAiRetirementReceiptsToNodes, collectDeletedManualAiWorkflowN
 import { collectJobBoardsAffectedByDeletion, getActiveJobBoardSearchReferenceIds, getClearCanvasRetainedNodes, getJobWorkflowDeletionLifecycleRevision, isClearCanvasDeletionFenceIntact, isJobWorkflowDeletionPending, jobBoardHasCancellableRecovery, markJobWorkflowDeletionPending, settleJobWorkflowDeletion, subscribeJobWorkflowDeletionLifecycle } from '../../src/utils/nodeDeletionLifecycle.js';
 import { boundedCombinedSourceRuns } from '../../src/utils/jobBoardProvenance.js';
 import { exactInterruptedRecoveryAdmission, exactInterruptedRecoveryBackendFailure, hasCheckpointedPostCollectionAnalysis } from '../../src/utils/jobBoardRecoveryAdmission.js';
-import { boardMayProbeInterruptedRun, isInterruptedBoardChild, ownedUnfinishedRunOnDisk, unfinishedRunLookupFailed } from '../../src/utils/jobBoardRecoveryAdmission.js';
+import { boardMayProbeInterruptedRun, finishedCardMayHideUnfinishedRun, isInterruptedBoardChild, ownedUnfinishedRunOnDisk, unfinishedRunLookupFailed } from '../../src/utils/jobBoardRecoveryAdmission.js';
 import { classifyJobBoardSourceAdmission as classifyBoardSourceForInterruptedChild } from '../../src/utils/jobBoardSourceAdmission.js';
 import { cancelJobBoardChildrenSequentially, promoteJobBoardPausedSourceResolution, runJobBoardChildFanout } from '../../src/utils/jobBoardChildFanout.js';
 import { classifyJobBoardSourceAdmission, completedJobSearchOutcomeMatches, jobSearchOutcomeReceiptMatches, partitionJobBoardSourceAdmissions } from '../../src/utils/jobBoardSourceAdmission.js';
@@ -499,7 +499,7 @@ export default [
         withRescoreFollowUpRollbacks,
         findJobSearchBoardRecoveryOwner, findJobSearchBoardActiveRecoveryOwner,
         moduleLabel: d => d === canada.data ? 'Canada' : 'US',
-        moduleSearchReadiness: () => ({ ready: true }), canInspectInterruptedRecovery: () => false, isInterruptedBoardChild, ownedUnfinishedRunOnDisk, unfinishedRunLookupFailed,
+        moduleSearchReadiness: () => ({ ready: true }), canInspectInterruptedRecovery: () => false, finishedCardMayHideUnfinishedRun, isInterruptedBoardChild, ownedUnfinishedRunOnDisk, unfinishedRunLookupFailed,
         interruptedRecoveryProbeSignature: () => 'same', hasActivePlatformVerification: () => false,
         isSavedScrapeManualAiResume: marker => marker?.task === 'job-scoring',
         captureJobSearchRollback: sourceId => rollback(sourceId), validateBackgroundBoardChildRequest: () => null,
@@ -6999,6 +6999,38 @@ export default [
       eq(boardMayProbeInterruptedRun({ ready: false, statusLabel: 'Needs platform' }, card.data), true);
       eq(boardMayProbeInterruptedRun({ ready: false, boardAction: 'fresh-import-blocked' }, card.data), true);
 
+      // A Board search that was paused before it saved any jobs leaves a card
+      // that reads as finished: the earlier jobs, hubState done, no run id.
+      // (Bug report 2026-11-23: the Board reused it, combined, dropped its
+      // plan and showed "up to date" with the paused search still on disk.)
+      const pausedBeforeRows = { ...card.data, jobRunId: null, resultDisposition: null, manualAiResume: null };
+      const reuse = { ready: true, boardAction: 'reuse' };
+      eq(finishedCardMayHideUnfinishedRun(reuse, pausedBeforeRows), true);
+      eq(boardMayProbeInterruptedRun(reuse, pausedBeforeRows), true, 'a finished card with no run id is checked on disk');
+      eq(boardMayProbeInterruptedRun({ ready: true, boardAction: 'scan' }, pausedBeforeRows), true);
+      eq(boardMayProbeInterruptedRun({ ready: true, boardAction: 'cooldown' }, pausedBeforeRows), true);
+      eq(boardMayProbeInterruptedRun(reuse, card.data), false, 'an ordinary finished card with a run id is not probed');
+      eq(boardMayProbeInterruptedRun(reuse, card.data, { interruptedBoardChild: true }), true,
+        'unless this Board had already started it');
+      eq(boardMayProbeInterruptedRun({ ready: true, boardAction: 'rescore' }, pausedBeforeRows), false);
+      eq(boardMayProbeInterruptedRun({ ready: true, boardAction: 'scan' }, { ...pausedBeforeRows, hubState: 'empty' }), false,
+        'a fresh import is not a finished card');
+      eq(boardMayProbeInterruptedRun(reuse, { ...pausedBeforeRows, resumeProfile: null }), false);
+      // A search that was adding to the jobs another Board shows is that Board's to continue.
+      const addingForBoard = { ...pausedBeforeRows, carriedResults: { runId: 'earlier', boardId: 'board', careerSnapshotId: SNAPSHOT } };
+      eq(boardMayProbeInterruptedRun(reuse, addingForBoard, { boardId: 'board' }), true);
+      eq(boardMayProbeInterruptedRun(reuse, addingForBoard, { boardId: 'second-board' }), false);
+      eq(boardMayProbeInterruptedRun(reuse, pausedBeforeRows, { boardId: 'second-board' }), true, 'no Board is named, so any connected Board may continue it');
+      const boardSource = readFileSync(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
+      assert(boardSource.includes("...(finishedCardMayHideUnfinishedRun(readiness, n.data, { boardId: id }) ? {\n              boardAction: 'continue',"),
+        'a found unfinished run counts as work, so the Board is not up to date and shows Resume & combine');
+      assert(boardSource.includes('reusable: withoutUnfinishedRuns(classifiedPartition.reusable),')
+        && boardSource.includes('cooldown: withoutUnfinishedRuns(classifiedPartition.cooldown),')
+        && boardSource.includes('rescrape: withoutUnfinishedRuns(classifiedPartition.rescrape),'),
+      'a click continues the saved search: the card is not adopted as finished, skipped, or given a new search');
+      assert(boardSource.includes("&& !!sourceData?.resultDisposition\n      && admission.runId === sourceData?.jobRunId"),
+        'the finished run the saved jobs came from is never offered as the one to continue');
+
       // The probe result for the incident's run is admitted by the existing exact-run rule.
       const info = { found: true, resumable: true, nodeId: 'search', runId: 'interrupted-run',
         profileFingerprint: 'f'.repeat(64), queries: ['Product Engineer'], locationRecorded: true, canonicalLocation: 'United States' };
@@ -7016,7 +7048,7 @@ export default [
       const turn = board.slice(board.indexOf('const interruptedBoardChild = isInterruptedBoardChild(iterationPlan, sourceId);'));
       assert(turn.length > 100, 'the scan turn decides whether this Search is its own interrupted child');
       eq(turn.split('canInspectInterruptedRecovery(turnReadiness,').length - 1, 2);
-      eq(turn.split('{ interruptedBoardChild })').length - 1, 2, 'both lane-turn probes use the plan');
+      eq(turn.split('{ interruptedBoardChild, boardId: id })').length - 1, 2, 'both lane-turn probes use the plan');
       // The Board's own interrupted run has no age limit; other probes keep theirs.
       const aged = { ...info, resumable: false, incomplete: true };
       const agedCard = { ...card.data, preferredLocation: 'United States' };
@@ -7026,7 +7058,7 @@ export default [
         'not-resumable', 'a finished run is never resumed');
       eq(exactInterruptedRecoveryAdmission({ info: { ...aged, profileFingerprint: 'e'.repeat(64) }, nodeId: 'search', sourceData: agedCard, allowAged: true }).reason,
         'profile-fingerprint-mismatch', 'age aside, every identity check still applies');
-      eq(turn.split('allowAged: interruptedBoardChild,').length - 1, 2);
+      eq(turn.split('allowAged: interruptedBoardChild || (').length - 1, 2, 'both lane-turn probes ignore age for this Board\'s own child and for a finished card with no run id');
       eq(unfinishedRunLookupFailed(null), true);
       eq(unfinishedRunLookupFailed({ success: false, error: 'disk' }), true);
       eq(unfinishedRunLookupFailed({ found: false }), false);
@@ -7046,8 +7078,16 @@ export default [
       const keep = turn.indexOf('scan kept its plan: interrupted search ');
       const skip = turn.indexOf('scan module no longer ready; skipped');
       assert(keep > 0 && skip > keep, 'an unfinished run that cannot be continued keeps the plan instead of being skipped');
-      const keepBranch = turn.slice(turn.indexOf('if (interruptedBoardChild && canvasFilePath && window.electronAPI?.peekJobRun) {'), keep);
-      assert(keepBranch.includes('if (unfinishedRunId || lookupFailed) {'), 'a lookup that failed keeps the plan too');
+      const keepBranch = turn.slice(turn.indexOf('const keepPlanForUnfinishedRun = async () => {'), keep);
+      assert(keepBranch.includes('if (!unfinishedRunId && !lookupFailed) return false;'), 'a lookup that failed keeps the plan too');
+      const notReadyAt = turn.indexOf('if (!turnReadiness.ready && !savedRecoveryCanProceed');
+      const finishedCheck = turn.slice(keep, notReadyAt);
+      assert(finishedCheck.includes("&& turnReadiness.boardAction !== 'scan'")
+        && finishedCheck.includes('&& finishedCardMayHideUnfinishedRun(turnReadiness, turnSourceNode.data, { interruptedBoardChild })')
+        && finishedCheck.includes('&& await keepPlanForUnfinishedRun()'),
+      'a started Search that now reads as finished and reusable is checked on disk before it is handed on as finished');
+      assert(turn.slice(notReadyAt).includes('if (interruptedBoardChild && await keepPlanForUnfinishedRun()) return;'),
+        'the not-ready path keeps the plan the same way');
       assert(keepBranch.includes('persistScanResume({ activeSourceId: sourceId });') && keepBranch.includes('setRecoveryError(message);')
         && !keepBranch.includes('clearExactBoardScanResume') && !keepBranch.includes('activeSourceRollback: null'),
       'the kept plan still names the Search and its rollback, so Cancel can put the card back');

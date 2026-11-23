@@ -30,12 +30,30 @@ import { jobSearchCarriedResultsMarker } from './jobSearchCarriedResults.js';
  * Board leaves them out, and once they have been shown the next Board search
  * may replace them with a fresh scrape. Only the marker for the card's CURRENT
  * run counts; a later run makes it obsolete on its own.
+ *
+ * One exception: a Board search of jobs it already shows clears the card's run
+ * id when it starts and records which shown run it keeps (`carriedResults`).
+ * If that search stops before it saves any jobs, the card still holds the
+ * shown jobs but has no run id. They are still shown: reading them as unseen
+ * would stop the Board from ever searching this card again.
  */
 export function jobSearchShownRun(data) {
   const marker = data?.boardShownRun;
+  if (!marker || typeof marker !== 'object' || typeof marker.boardId !== 'string' || !marker.boardId) return null;
   const runId = typeof data?.jobRunId === 'string' && data.jobRunId ? data.jobRunId : null;
-  if (!runId || !marker || typeof marker !== 'object' || marker.runId !== runId) return null;
-  return typeof marker.boardId === 'string' && marker.boardId ? marker : null;
+  if (runId) return marker.runId === runId ? marker : null;
+  const carried = data?.carriedResults;
+  const holdsRows = Array.isArray(data?.scoredJobs) && data.scoredJobs.length > 0;
+  return holdsRows
+    && carried && typeof carried === 'object'
+    && typeof carried.runId === 'string' && !!carried.runId
+    && carried.runId === marker.runId
+    && carried.boardId === marker.boardId
+    // New career data since then: those rows are re-scored, not carried.
+    && !!carried.careerSnapshotId
+    && carried.careerSnapshotId === normalizedJobCareerSnapshotId(data?.careerSnapshotId)
+    ? marker
+    : null;
 }
 
 /** True when another Board (live or deleted) already displayed this run. */

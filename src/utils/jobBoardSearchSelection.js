@@ -649,6 +649,11 @@ export function remapCopiedJobModuleReferences(originalNodes, clonedNodes, oldId
       && rawClonesById.get(copiedShownBoardId)?.type === 'jobboard'
     ) {
       remappedData = { ...remappedData, boardShownRun: { ...clone.data.boardShownRun, boardId: copiedShownBoardId } };
+      // A paused Board search keeps the same Board in `carriedResults`; the
+      // two must keep naming one Board or the copy's jobs read as unseen.
+      if (clone.data?.carriedResults && clone.data.carriedResults.boardId === shownBoardId) {
+        remappedData = { ...remappedData, carriedResults: { ...clone.data.carriedResults, boardId: copiedShownBoardId } };
+      }
     }
     return remappedData === clone.data ? clone : { ...clone, data: remappedData };
   });

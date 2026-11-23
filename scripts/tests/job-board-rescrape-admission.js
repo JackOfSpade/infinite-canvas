@@ -196,6 +196,46 @@ export default [
       capability: patch.careerImportFreshCapability, boardRunId: 'board-run-1', nodeId: 'hub-1',
     }).kind, 'fresh');
   } },
+  { name: 'A Board search that stopped before saving any jobs: the earlier jobs on the card still read as shown', run: () => {
+    // The search start clears the run id and records which shown run it keeps.
+    const paused = extra => hub('hub-1', {
+      jobRunId: null,
+      resultDisposition: null,
+      ...shownBy('board-1'),
+      carriedResults: { runId: 'run-1', boardId: 'board-1', careerSnapshotId: SNAPSHOT },
+      ...extra,
+    });
+    assert.deepStrictEqual(jobSearchShownRun(paused().data)?.boardId, 'board-1');
+    assert.strictEqual(classify(paused()).kind, 'rescrape-terminal',
+      'with a platform past its cooldown the Board may search the card again instead of reusing it for ever');
+    assert.strictEqual(classify(paused({ sourceCoverage: coverage([HOUR, HOUR]) })).kind, 'reuse-terminal');
+    assert.strictEqual(isJobSearchRunShownOnOtherBoard(paused(), 'board-2'), true,
+      'another Board still leaves these jobs out');
+    assert.strictEqual(jobSearchShownRunPatch(paused().data, { boardId: 'board-1', runId: 'run-1' }), null,
+      'nothing is stamped while the card has no run id');
+    // Anything less than the exact pair stays unshown.
+    assert.strictEqual(jobSearchShownRun(paused({ carriedResults: null }).data), null, 'a very old result with no run id');
+    assert.strictEqual(jobSearchShownRun(paused({ carriedResults: { runId: 'run-0', boardId: 'board-1', careerSnapshotId: SNAPSHOT } }).data), null);
+    assert.strictEqual(jobSearchShownRun(paused({ carriedResults: { runId: 'run-1', boardId: 'board-2', careerSnapshotId: SNAPSHOT } }).data), null);
+    assert.strictEqual(jobSearchShownRun(paused({ scoredJobs: [] }).data), null);
+    assert.strictEqual(jobSearchShownRun(paused({ careerSnapshotId: 'b'.repeat(64) }).data), null, 'new career data since the search started');
+    assert.strictEqual(classify(paused({ carriedResults: null })).kind, 'reuse-terminal');
+    // A card with a run id is judged by that run id alone, as before.
+    assert.strictEqual(jobSearchShownRun(hub('hub-1', { jobRunId: 'run-2', ...shownBy('board-1'), carriedResults: { runId: 'run-1', boardId: 'board-1', careerSnapshotId: SNAPSHOT } }).data), null);
+  } },
+  { name: 'Copy and paste: a paused Board search copied with its Board keeps reading as shown by the copied Board', run: () => {
+    const search = hub('hub-1', { jobRunId: null, resultDisposition: null, ...shownBy('board-1'),
+      carriedResults: { runId: 'run-1', boardId: 'board-1', careerSnapshotId: SNAPSHOT } });
+    const board = { id: 'board-1', type: 'jobboard', data: {} };
+    const clones = remapCopiedJobModuleReferences(
+      [search, board],
+      [{ ...search, id: 'hub-2' }, { ...board, id: 'board-2' }],
+      new Map([['hub-1', 'hub-2'], ['board-1', 'board-2']]),
+    );
+    const copied = clones.find(node => node.id === 'hub-2');
+    assert.strictEqual(copied.data.carriedResults.boardId, 'board-2');
+    assert.strictEqual(jobSearchShownRun(copied.data)?.boardId, 'board-2');
+  } },
   { name: 'Rescrape capability: no patch without a valid 64-hex snapshot id or a node id', run: () => {
     const data = hub().data;
     assert.equal(buildJobHubRescanCapabilityPatch({ ...data, careerSnapshotId: 'short' }, { nodeId: 'hub-1', now: NOW }), null);

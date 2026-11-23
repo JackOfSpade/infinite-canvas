@@ -30,7 +30,7 @@ import { classifyUnparseableSalary, hasMojibake, mojibakeExcerpt } from './jobQu
 import { parseSalaryToNumeric } from '../../../src/nodes/jobsearch/buildJobTree.js';
 import { JOB_COLLECTION_AUTO_LABEL, JOB_COLLECTION_AUTO_LIMITS, normalizeJobCollectionLimits } from '../../../src/utils/jobCollectionLimits.js';
 import { consolidateBoardCascadeNodes, summarizeConsolidation } from '../../../src/utils/jobLocationConsolidation.js';
-import { classifyJobBoardSourceAdmission } from '../../../src/utils/jobBoardSourceAdmission.js';
+import { classifyJobBoardSourceAdmission, jobSearchShownRun } from '../../../src/utils/jobBoardSourceAdmission.js';
 import { jobBoardPreferenceOverrideView } from '../../../src/utils/jobBoardPreferenceOverride.js';
 import { resolveNextJobSearchRunWindow } from '../../../src/utils/jobSearchSourceCoverage.js';
 import { describeSourceHealthFailures } from '../../../src/utils/jobCollectionScopeCaveats.js';
@@ -2267,13 +2267,21 @@ function boardSourceHubIds(board) {
 // fine. Only ever return an id when every Board's combined/connected fields
 // agree on exactly ONE hub across the whole set: 0 or 2+ distinct ids must
 // stay INDETERMINATE rather than guess "the first".
+//
+// What a Board COMBINED is stronger evidence than what it is merely wired to:
+// an empty Board left connected to a second Search made every report on that
+// canvas read "ambiguous" and "none correlate" for a run a Board had plainly
+// combined. So when any Board combined something, only combined ids count;
+// connected ids decide only when no Board has combined anything.
 function boardResolvedSourceHubId(jobBoardStates) {
-  const ids = new Set();
+  const combined = new Set();
+  const connected = new Set();
   for (const board of (Array.isArray(jobBoardStates) ? jobBoardStates : []).slice(0, 25)) {
     const { combinedSourceHubIds, connectedSourceHubIds } = boardSourceHubIds(board);
-    for (const id of combinedSourceHubIds) ids.add(id);
-    for (const id of connectedSourceHubIds) ids.add(id);
+    for (const id of combinedSourceHubIds) combined.add(id);
+    for (const id of connectedSourceHubIds) connected.add(id);
   }
+  const ids = combined.size > 0 ? combined : connected;
   return ids.size === 1 ? [...ids][0] : null;
 }
 
@@ -4038,7 +4046,7 @@ ${scoreReadyDiffLine}- Reanalysis scoring: ${completion ? `input ${completionInp
     : durableOutputOnly
       ? `✅ **DURABLE OUTPUT COMPLETE** — a cleanup-cleared terminal receipt and the same-run, same-canvas, current-hub saved score-ready snapshot agree.${snapshot?.metadataOnly ? ' The saved snapshot was verified from ownership/count metadata only; its job payload was not inspected.' : ''}${receiptScoring ? ' The receipt also retains matching final scoring counters.' : ''}${durableCollectionShortfallQualifier}${acceptedLimitationQualifier}${regionUnverifiedQualifier}${countrySkippedQualifier}${boardConsumptionQualifier}${boardClearQualifier} Live search/scoring telemetry ${foreignLiveRun ? 'for this run was replaced in-process when a later run started on another hub' : telemetryAmbiguity ? `is not attributable — ${telemetryAmbiguity}` : 'was not retained after restart'}; taxonomy and Job Board consumption are assessed separately below, and this does not verify gather coverage.`
     : noRunToReconcile && gaps.length === 1 && !pipelinePhase && searchKept == null && scored == null && !taxonomy
-      ? `ℹ️ **NO RUN TO RECONCILE** — no Job Search stage was recorded in this app process, and no current Job Search card holds a saved result set (cleared, replaced, or never kept). The ${receiptState.count || 2} retained terminal receipts describe earlier runs; each is listed in Job Recovery Diagnostics. A Board search that ended without scraping is recorded in Event History, not here.`
+      ? `ℹ️ **NO RUN TO RECONCILE** — no Job Search stage was recorded in this app process, and no saved score-ready snapshot file exists for any current Job Search card (cleared, replaced, or never kept; a card can still hold results of its own, see Node Diagnostics, and an unfinished run is listed under Job Recovery Diagnostics). The ${receiptState.count || 2} retained terminal receipts describe earlier runs; each is listed in Job Recovery Diagnostics. A Board search that ended without scraping is recorded in Event History, not here.`
     : `⚠️ **INDETERMINATE** — ${gaps.length ? redactReportOpaqueIds(gaps.join('; ')) : 'one or more completion facts were not retained'}.`;
 
   const searchLine = searchKept == null
@@ -4465,6 +4473,15 @@ export function recoveryClaimMap(rows) {
   return claimsByScope;
 }
 
+// The report's copy of a card has its job rows removed (only a count is
+// kept). Rules that only ask "does the card hold jobs" get a stand-in row.
+export function reportScoredJobsStandIn(data) {
+  const rows = boardDiagnosticValue(data, 'scoredJobs');
+  if (Array.isArray(rows)) return rows;
+  const count = boardDiagnosticValue(data, 'scoredJobsCount');
+  return Number.isSafeInteger(count) && count > 0 ? [{}] : [];
+}
+
 function connectedSourceDiagnosticSummary(source, selected, claimsByScope, scope, labelContext, boardId = null) {
   const sourceId = opaqueHubIdForCorrelation(boardDiagnosticValue(source, 'id'));
   if (!sourceId) return null;
@@ -4472,11 +4489,23 @@ function connectedSourceDiagnosticSummary(source, selected, claimsByScope, scope
   const admissionKind = sourceAdmissionKind(source, boardId);
   // Which Board first showed the current run (no ids: this Board, another
   // Board — possibly deleted — or none).
-  const shownMarker = boardDiagnosticValue(data, 'boardShownRun');
-  const shownRunId = boardDiagnosticValue(shownMarker, 'runId');
-  const shownState = !shownRunId || shownRunId !== boardDiagnosticValue(data, 'jobRunId')
-    ? 'no'
-    : boardDiagnosticValue(shownMarker, 'boardId') === boardId ? 'this-board' : 'other-board';
+  // Same rule the Board's admission uses, so the two cannot disagree.
+  let shownRun = null;
+  try {
+    shownRun = jobSearchShownRun({
+      jobRunId: boardDiagnosticValue(data, 'jobRunId'),
+      boardShownRun: boardDiagnosticValue(data, 'boardShownRun'),
+      carriedResults: boardDiagnosticValue(data, 'carriedResults'),
+      careerSnapshotId: boardDiagnosticValue(data, 'careerSnapshotId'),
+      scoredJobs: reportScoredJobsStandIn(data),
+    });
+  } catch { shownRun = null; }
+  const shownState = !shownRun ? 'no' : shownRun.boardId === boardId ? 'this-board' : 'other-board';
+  // A finished card with saved jobs and no run id is either a very old result
+  // or a Board search that stopped before saving any jobs; the Board cannot
+  // tell them apart without looking on disk. Print the fact, not a cause.
+  const cardRunId = boardDiagnosticValue(data, 'jobRunId');
+  const cardRunIdState = typeof cardRunId === 'string' && cardRunId.trim() ? 'present' : 'absent';
   const claims = claimsByScope.get(scope)?.get(sourceId) || [];
   const selector = sourceSelectorAdmissionDiagnostic(source, admissionKind, {
     heldByPausedBoardRun: claims.some(claim => claim.paused === true),
@@ -4522,7 +4551,7 @@ function connectedSourceDiagnosticSummary(source, selected, claimsByScope, scope
   };
   const { window: nextWindow, anchor: nextAnchor, initialLookbackDays } = resolveNextJobSearchRunWindow(safeNextWindowData, sourceId);
   const nextWindowSummary = `${localCalendarDateLabel(nextWindow.startTimestamp)}→now/${nextAnchor.source}${nextAnchor.timestamp == null ? `/initial-${initialLookbackDays}d` : ''}${nextWindow.capped ? `/${nextWindow.capReason || 'cap'}` : ''}`;
-  return `${boardDiagnosticIdList([sourceId], labelContext)} · selected=${selected.has(sourceId) ? 'yes' : 'no'} · hub-state=${receiptIdentifier(hubState, 'not retained')} · admission=${admissionKind} · shown=${shownState} · selector-ready=${selector.ready === true ? 'yes' : selector.ready === false ? 'no' : 'not reproducible'} · selector-status=${selector.status} · selector-reason=${selector.reason} · re-scan=${rescanReadiness} · next-window=${nextWindowSummary} · fresh-capability=${consumption.freshCapability ? 'present' : 'absent'} · consumption-origin=${consumption.consumptionOrigin} · admission-version=${consumption.admissionVersion} · recovery-claim=${claimSummary || 'none'}`;
+  return `${boardDiagnosticIdList([sourceId], labelContext)} · selected=${selected.has(sourceId) ? 'yes' : 'no'} · hub-state=${receiptIdentifier(hubState, 'not retained')} · admission=${admissionKind} · card-run-id=${cardRunIdState} · shown=${shownState} · selector-ready=${selector.ready === true ? 'yes' : selector.ready === false ? 'no' : 'not reproducible'} · selector-status=${selector.status} · selector-reason=${selector.reason} · re-scan=${rescanReadiness} · next-window=${nextWindowSummary} · fresh-capability=${consumption.freshCapability ? 'present' : 'absent'} · consumption-origin=${consumption.consumptionOrigin} · admission-version=${consumption.admissionVersion} · recovery-claim=${claimSummary || 'none'}`;
 }
 
 function savedSourceScoringSummary(source) {
@@ -4769,6 +4798,7 @@ export function boardSelectorRuntimeDiagnostic(value) {
     awaitedSource: JOB_BOARD_AWAITED_SOURCE_STATUSES.has(boardDiagnosticValue(value, 'awaitedSource'))
       ? boardDiagnosticValue(value, 'awaitedSource')
       : 'not retained',
+    unfinishedRunsFound: boundedSelectorCount(boardDiagnosticValue(value, 'unfinishedRunsFound')),
     renderedAction: JOB_BOARD_SELECTOR_RENDERED_ACTIONS.has(boardDiagnosticValue(value, 'renderedAction'))
       ? boardDiagnosticValue(value, 'renderedAction')
       : null,
@@ -4822,6 +4852,10 @@ export function boardSelectorRuntimeSummary(snapshot) {
     : snapshot.actionVisible === false
       ? 'hidden (board up to date)'
       : `${snapshot.actionEligible === true ? 'enabled' : snapshot.actionEligible === false ? 'disabled' : 'not retained'}${snapshot.actionLabel ? ` (${snapshot.actionLabel})` : ''}`;
+  // Older snapshots carry no count; print nothing for them.
+  const unfinishedRuns = Number.isSafeInteger(snapshot.unfinishedRunsFound)
+    ? ` · unfinished-runs-found-on-disk=${snapshot.unfinishedRunsFound}${snapshot.unfinishedRunsFound > 0 && renderedAction === 'up-to-date' ? ' (⚠️ none can be continued from this Board as rendered)' : ''}`
+    : '';
   const availability = value => (value === true ? 'available' : value === false ? 'unavailable' : 'not retained');
   // Older snapshots carry no rendered-action fields; print nothing for them
   // rather than guessing which controls were on screen.
@@ -4830,7 +4864,7 @@ export function boardSelectorRuntimeSummary(snapshot) {
     : ` · rendered=${renderedAction}${renderedAction === 'recovery'
       ? ` · recovery-action=${JOB_BOARD_RECOVERY_ACTION_LABELS.has(snapshot.recoveryActionLabel) ? snapshot.recoveryActionLabel : 'not retained'} (${availability(snapshot.recoveryActionAvailable)}) · finish-saved=${availability(snapshot.finishSavedAvailable)}`
       : ''}`;
-  return `rows=${snapshot.rowCount ?? 'not retained'} · selected=${snapshot.selectedCount ?? 'not retained'} · action=${action}${rendered} · reasons=${reasons} · selector=${selectorBoundsSummary(snapshot.selectorBounds)} · source-list=${selectorBoundsSummary(snapshot.sourceListBounds)} · recovery-error-latch=${recoveryErrorLatch} · awaited-source=${awaitedSource}`;
+  return `rows=${snapshot.rowCount ?? 'not retained'} · selected=${snapshot.selectedCount ?? 'not retained'} · action=${action}${rendered} · reasons=${reasons} · selector=${selectorBoundsSummary(snapshot.selectorBounds)} · source-list=${selectorBoundsSummary(snapshot.sourceListBounds)} · recovery-error-latch=${recoveryErrorLatch} · awaited-source=${awaitedSource}${unfinishedRuns}`;
 }
 
 const JOB_BOARD_COMBINE_PHASES = new Set([
