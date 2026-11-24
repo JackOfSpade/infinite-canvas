@@ -87,10 +87,11 @@ export default [
       const src = board();
       const panelAt = src.indexOf('<JobBoardCareerOverridePanel');
       const doneAt = src.indexOf("{hubState === 'done' && (");
-      const selectionAt = src.indexOf('<JobBoardSearchSelection');
+      const statusAt = src.indexOf('<JobBoardStreamStatus');
       assert(panelAt > 0, 'JobBoardNode must render JobBoardCareerOverridePanel');
       assert(doneAt > 0, 'done-state anchor must still exist');
-      assert(selectionAt > 0 && selectionAt < panelAt, 'panel must follow the search selection');
+      assert(statusAt > 0 && statusAt < panelAt, 'panel must follow the status of the connected Job Searches');
+      assert(!src.includes('<JobBoardSearchSelection'), 'a Job Board has no control that starts a search');
       assert(panelAt < doneAt, 'panel must render before the hubState done block');
       assert(src.indexOf('<CareerCanvasFileImportDialog') > src.indexOf('</HubContainer>'),
         'canvas chooser must render outside the HubContainer');

@@ -99,22 +99,6 @@ export default [
     },
   },
   {
-    name: 'JobBoardNode computes and passes the up-to-date flag from combine and live signatures',
-    run: async () => {
-      const board = readSource('../../src/nodes/JobBoardNode.jsx');
-
-      assert(/import \{[^}]*\bisJobBoardUpToDate\b[^}]*\} from '\.\.\/utils\/jobBoardSearchSelection'/.test(board),
-        'JobBoardNode must import isJobBoardUpToDate from the selector utils');
-
-      assert(board.includes('upToDate={boardUpToDate}'), 'JobBoardNode must pass upToDate={boardUpToDate} to JobBoardSearchSelection');
-
-      const computeAt = board.indexOf('const boardUpToDate = isJobBoardUpToDate({');
-      assert(computeAt !== -1, 'JobBoardNode must compute boardUpToDate via isJobBoardUpToDate');
-      assert(board.includes('combineSignature: data.combineSignature'), 'boardUpToDate must be built from data.combineSignature');
-      assert(board.includes('liveSignature,', computeAt), 'boardUpToDate must be built from the live signature');
-    },
-  },
-  {
     name: 'canFinishPausedBoardSearch is true only for a paused, active, non-cancelling searches-phase plan',
     run: async () => {
       const pausedPlan = () => ({
@@ -162,46 +146,6 @@ export default [
       assert(canFinishPausedBoardSearch([]) === false, 'an array must be false');
       assert(canFinishPausedBoardSearch(pausedPlan()) === true && JSON.stringify(pausedPlan()) === snapshot,
         'the predicate must not mutate its input');
-    },
-  },
-  {
-    name: 'the Finish with saved listings action is wired from the Board selector through the child resume path',
-    run: async () => {
-      const selection = readSource('../../src/nodes/jobboard/JobBoardSearchSelection.jsx');
-      const board = readSource('../../src/nodes/JobBoardNode.jsx');
-      const search = readSource('../../src/nodes/JobSearchNode.jsx');
-
-      // Selector: opt-in prop, exact label and tooltip, hidden when disabled.
-      assert(selection.includes('onFinishSaved = null'), 'JobBoardSearchSelection must accept onFinishSaved with a null default');
-      assert(selection.includes('Finish with saved listings'), 'the recovery row must render the Finish with saved listings button');
-      assert(selection.includes('title="Stop collecting: score the listings this paused search already saved. Other selected searches still run."'),
-        'the finish button must carry the exact explanatory title');
-      assert(selection.includes("typeof onFinishSaved === 'function' && !disabled"),
-        'the finish button must require a handler and an enabled (unlocked) panel');
-
-      // Board: predicate gate, intent-carrying plan, durable carry-forward and
-      // the per-source child flag.
-      assert(/import \{[^}]*\bcanFinishPausedBoardSearch\b[^}]*\} from '\.\.\/utils\/jobBoardSearchSelection'/.test(board),
-        'JobBoardNode must import canFinishPausedBoardSearch from the selector utils');
-      assert(board.includes('const handleFinishPausedSearch = useCallback('), 'JobBoardNode must define handleFinishPausedSearch as a useCallback');
-      assert(board.includes('finishActiveSearchWithSavedListings: true'),
-        'handleFinishPausedSearch must persist finishActiveSearchWithSavedListings: true on the plan');
-      assert(board.includes('finishActiveSearchWithSavedListings: resumePlan?.finishActiveSearchWithSavedListings === true'),
-        'the durable plan rebuild must carry the finish intent forward');
-      assert(board.includes('onFinishSaved='), 'JobBoardNode must pass onFinishSaved to JobBoardSearchSelection');
-      assert(board.includes('void handleSearchSelected({ resumeBoardScan: true, plan: nextPlan, explicitRecoveryContinue: true });'),
-        'handleFinishPausedSearch must resume through handleSearchSelected with explicitRecoveryContinue');
-      assert(board.includes("finishWithSavedListings: durableScanResume.finishActiveSearchWithSavedListings === true"),
-        'runSearchModule must receive finishWithSavedListings derived from the durable plan');
-
-      // Search: the flag is accepted and forwarded to both Board resume calls.
-      assert(search.includes('finishWithSavedListings = false'),
-        'runForJobBoard must accept finishWithSavedListings with a false default');
-      const forwardedCalls = search.split('discoverForBoard: true,\n          finishWithSavedListings,').length - 1;
-      assert(forwardedCalls === 2,
-        `both Board interrupted-recovery resumeInterruptedRunRef calls must forward finishWithSavedListings (found ${forwardedCalls})`);
-      assert(/\? searchRunOutcome\('recovery-inspection-failed', \{\s*error: 'No saved listings were found to finish this search with\. It was kept unchanged\.',/.test(search),
-        'a not-found peek while finishing must return recovery-inspection-failed instead of a fresh import');
     },
   },
 ];

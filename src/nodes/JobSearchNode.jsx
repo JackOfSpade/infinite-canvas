@@ -143,6 +143,11 @@ import { CAREER_TEXT_ONLY_MESSAGE, isCareerTextFileName } from '../utils/careerT
 // ─── TESTING: optionally skip AI scoring after collection ────────────────────
 // Collection limits are always user-controlled; this switch affects scoring only.
 const SKIP_AI_FOR_TESTING = JOB_SEARCH_TEST_MODE.enabled && JOB_SEARCH_TEST_MODE.skipAI;
+// A Job Search only searches. Each page's listings go to its saved listing
+// stream as the page is read (electron/ipc/jobs/listingStreamEmitter.js), and
+// a Job Board judges and scores them from there. The run therefore ends once
+// its listings are sent: no preference check, no scoring, no cards of its own.
+const SEARCH_SENDS_LISTINGS_ONLY = true;
 // ─────────────────────────────────────────────────────────────────────────────
 
 const STATE_LABELS = {
@@ -1408,12 +1413,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // Subscribe for copy/action rendering, then re-read imperatively at every
   // direct launch boundary so an edge added in the same interaction cannot race
   // a stale render and let the child acquire its own queue turn.
-  const managedByJobBoard = useStore(
+  const connectedToJobBoard = useStore(
     useCallback(
       store => isJobSearchConnectedToBoard(id, store.nodeLookup, store.edges),
       [id],
     ),
   );
+  // A connected Job Board reads this card's listings; it does not run, pause or
+  // own any of this card's actions. Every search action is this card's own.
+  const managedByJobBoard = false;
   const lookupRunId = data.jobRunId;
   const lookupRows = useMemo(() => searchRowsWithIncompleteLookups(data.scoredJobs), [data.scoredJobs]);
   const officialLookupCounts = useStore(
@@ -1485,26 +1493,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // card still compiles career files on its own, but every provider-facing
   // action defers here — a connected card keeps pointing at its Board, and an
   // unconnected card is told to connect one instead of scanning by itself.
-  const deferDirectSearchToBoard = useCallback((trigger, description = null) => {
-    const connected = isJobSearchConnectedToBoard(id, getNodes(), getEdges());
-    EventLogger.log(connected
-      ? `[JobSearch][${id}] ${trigger} saved without scanning — connected Job Board owns search admission`
-      : `[JobSearch][${id}] ${trigger} saved without scanning — connect a Job Board to search`);
-    addToast(connected
-      ? {
-        title: 'Run from Job Board',
-        description: description || 'Use Search selected & combine on the connected Job Board to run this module.',
-        type: 'info',
-        dedupeKey: `job-search-run-from-board:${id}`,
-      }
-      : {
-        title: 'Connect a Job Board',
-        description: 'Searches run only from a Job Board. Connect this Job Search to a Job Board, then use Search selected & combine.',
-        type: 'info',
-        dedupeKey: `job-search-run-from-board:${id}`,
-      });
-    return true;
-  }, [addToast, getEdges, getNodes, id]);
+  // Searches start from this card. (Between 2026-11-20 and the listing stream,
+  // every provider-facing action was handed to a connected Job Board; a Board
+  // now only reads what this card sends.) Kept as a function so each launch
+  // boundary still names the decision it once deferred.
+  const deferDirectSearchToBoard = useCallback(() => false, []);
   const completeJobRun = useCallback(async (
     runId,
     terminalStatus,
@@ -2643,6 +2636,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   }) => {
     const fallbackJobs = Array.isArray(jobs) ? jobs : [];
     const pinnedCareerSnapshotId = normalizedJobCareerSnapshotId(careerSnapshotId);
+    // Preferences are judged where listings are scored: on the Job Board,
+    // per listing, by the preferences of the search that found it.
+    if (SEARCH_SENDS_LISTINGS_ONLY) return unevaluatedPreferenceResult(fallbackJobs);
     if (!activeJobPreferences) {
       return unevaluatedPreferenceResult(fallbackJobs);
     }
@@ -3350,6 +3346,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     preferenceEvaluation = null, preferenceCandidatePool = null,
     preservePreferenceCandidatePool = false,
     resultDisposition = 'scored',
+    // The run sent its listings to the stream and has no rows of its own: a
+    // clean end, not an incomplete one.
+    listingsOnly = false,
     careerSnapshotId = null,
     analysisOperation = null,
     canCommit = () => true,
@@ -3404,8 +3403,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const completion = completeRun && jobRunId
       ? await completeJobRun(
         jobRunId,
-        displayed.length > 0 ? 'completed' : 'failed',
-        displayed.length > 0 ? 'populated' : 'incomplete',
+        listingsOnly || displayed.length > 0 ? 'completed' : 'failed',
+        listingsOnly ? 'collection-only' : displayed.length > 0 ? 'populated' : 'incomplete',
         canvasFilePath,
         // The receipt counts what THIS run scored (it matches the saved run
         // snapshot); the fingerprint is of what the card holds, kept rows too.
@@ -3540,7 +3539,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // nation-scope disclosure could be silently dropped before it reaches
     // finishScoringAndSpawn below.
     updateGlobal(currentId, () => canCommit() ? {
-      hubState: 'scoring',
+      // A listings-only run has nothing to score: it goes straight to its end.
+      ...(SEARCH_SENDS_LISTINGS_ONLY ? {} : { hubState: 'scoring' }),
       jobCount: jobs.length,
       collectionScopeCaveats: normalizeCollectionScopeCaveats(collectionScopeCaveats),
     } : null);
@@ -3552,7 +3552,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       }),
       remoteResidences: normalizeRemoteResidences(data.remoteResidences),
     };
-    const scoreResult = await window.electronAPI.scoreJobs({
+    const scoreResult = SEARCH_SENDS_LISTINGS_ONLY ? {
+      success: true, scoredJobs: [], collectionOnly: true, aiSkipped: false, testMode: false,
+    } : await window.electronAPI.scoreJobs({
       jobs,
       operationAuthority: operationAuthorityFor(analysisOperation),
       profile,
@@ -3626,7 +3628,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const outcome = await finishScoringAndSpawn({
       scoredJobs: scoreResult.scoredJobs,
       gatheredCount,
-      scrapedCount,
+      scrapedCount: SEARCH_SENDS_LISTINGS_ONLY ? (scrapedCount ?? jobs.length) : scrapedCount,
+      ...(SEARCH_SENDS_LISTINGS_ONLY ? { listingsOnly: true, resultDisposition: 'collection-only' } : {}),
       scrapeWarnings,
       collectionScopeCaveats,
       aiSkipped: !!scoreResult.aiSkipped,
@@ -4004,14 +4007,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     if (isJobWorkflowDeletionPending(id)) {
       return searchRunOutcome('cancelled', { error: 'This Job Search is pending deletion.' });
     }
-    // Backstop: the Job Board is the only way to start a job search. Every
-    // provider-facing caller (auto-start, drop follow-up, recovery resume,
-    // manual-AI resume, …) funnels through here, so refusing before the first
-    // IPC/side effect is what guarantees an unconnected card never scans.
-    if (!queueManagedByBoard) {
-      EventLogger.log(`[JobSearch][${id}] Direct search refused — searches run only from a Job Board`);
-      return searchRunOutcome('not-ready', { error: 'Searches run only from a Job Board.' });
-    }
+    // This card starts its own searches. A Job Board never does: it only reads
+    // the listings this run sends (see SEARCH_SENDS_LISTINGS_ONLY).
     const liveData = getNode(id)?.data || data;
     // Verify the immutable compiler receipt before *any* location, queue,
     // Board, platform, auth, or source-card side effect.  A profile projection
@@ -14608,7 +14605,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                         : 'A Job Board recovery is settling. Direct search controls return when it finishes or is cancelled.')
                       : managedByJobBoard
                         ? 'Ready — search from the connected Job Board, or clear these files to use different ones'
-                        : 'Connect a Job Board to search, or clear these files to choose different ones'}</p>
+                        : 'Ready — run the search, or clear these files to choose different ones'}</p>
                   {(careerCompilationFailed || careerCompilationUnstarted) && !controlsLocked && !boardRecoveryOwnsActions && !resumeOffer?.incomplete && (
                     <button
                       type="button"
@@ -14620,9 +14617,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                     </button>
                   )}
                   {hasRunnableCareerInput && !controlsLocked && !boardRecoveryOwnsActions && !resumeOffer?.incomplete && (
-                    /* Searches start only from a Job Board — say so instead of
-                       offering a card control. */
-                    <p className="mt-1.5 text-white/25 text-[10px] text-center">Connect a Job Board to search.</p>
+                    /* Searches start from this card. A connected Job Board
+                       scores the listings as they arrive. */
+                    <button
+                      type="button"
+                      className="nodrag mt-3 px-3 py-1 rounded-full bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25 text-[10px] border border-emerald-500/25 transition-colors"
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => { e.stopPropagation(); handleRerun({ frameSourceCards: false }); }}
+                    >Run Search</button>
                   )}
                   {/* Not gated on hasReusableCareerProfile — a partially-wedged
                       identity (locked with no parsed profile) is exactly the
@@ -14859,6 +14861,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               resumeSummary={data.resumeSummary}
               locked={controlsLocked}
               managedByJobBoard={managedByJobBoard}
+              connectedToJobBoard={connectedToJobBoard}
+              onSearchAgain={controlsLocked ? null : () => handleRerun({ frameSourceCards: false })}
               boardRecoveryPending={!!activeBoardRecoveryOwnerKey}
               onClearCareerFiles={activeBoardRecoveryOwnerKey ? null : handleClearCareerData}
               savedJobCount={listedSavedJobCount}

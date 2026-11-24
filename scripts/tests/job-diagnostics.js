@@ -13330,14 +13330,14 @@ export default [
       const glassdoorListContext = { listUrl: 'https://www.glassdoor.ca/Job/canada-architect-jobs.htm' };
       const glassdoorPolicy = descriptionNavigationDecision(
         'glassdoor',
-        'https://fr.glassdoor.com/job-listing/platform-architect.htm?jl=101',
+        'https://boards.greenhouse.io/acme/jobs/101',
         glassdoorListContext,
       );
       assert(shouldNavigateForDescription('glassdoor', 'https://www.glassdoor.ca/job-listing/platform-architect.htm?jl=101', glassdoorListContext)
         && !shouldNavigateForDescription('glassdoor', 'https://www.glassdoor.ca/job-listing/platform-architect.htm?jl=101')
         && !shouldNavigateForDescription('glassdoor', 'https://example.com/apply', glassdoorListContext)
         && glassdoorPolicy.reason === 'glassdoor-detail-other-host',
-      'Glassdoor description navigation reaches goto() only for a same-country https /job-listing/ page; another country, an external URL or an unknown list host is refused');
+      'Glassdoor description navigation reaches goto() only for an https /job-listing/ page on a Glassdoor site; an external URL or an unknown list host is refused');
       assert(isZipRecruiterClosedDetailRedirect('https://www.ziprecruiter.com/jobseeker/home?closed_job_redirect=1')
         && !isZipRecruiterClosedDetailRedirect('https://www.ziprecruiter.com/jobseeker/home')
         && !isZipRecruiterClosedDetailRedirect('https://www.ziprecruiter.com/c/Acme/Job/Software-Engineer/-in-Toronto,ON?jid=abc')

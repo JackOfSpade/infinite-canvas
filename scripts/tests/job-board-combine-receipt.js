@@ -479,7 +479,6 @@ export default [
       const source = readNodeSource();
 
       assert(source.includes('completedAtCombine.map(combineSourceRunEntry)'), 'completedAtCombine must map through combineSourceRunEntry');
-      assert(source.includes('combineInputs.map(combineSourceRunEntry)'), 'combineInputs must map through combineSourceRunEntry');
       assert(!source.includes(`resultDisposition: module.resultDisposition || null,
         fingerprint: module.fingerprint,`), 'inline entry literal without legacyPositiveResult must be absent');
       assert(source.includes('receipts=${receiptDetail}'), 'node must log receipts=${receiptDetail}');

@@ -30,7 +30,8 @@ import { explicitSalaryCurrency, inferSalaryCurrency } from '../../src/utils/sal
 import { parseSalaryToNumeric } from '../../src/nodes/jobsearch/buildJobTree.js';
 import fs from 'node:fs';
 import { GLASSDOOR_EXTRACTOR } from '../../electron/extractors/jobs.js';
-import { glassdoorJobPageTarget, withoutGlassdoorJobPageUrl } from '../../electron/ipc/browser/manualScraper/glassdoorJobPage.js';
+import { glassdoorJobPageIneligibleCode, glassdoorJobPageIsOtherCountry, glassdoorJobPageTarget, withoutGlassdoorJobPageUrl } from '../../electron/ipc/browser/manualScraper/glassdoorJobPage.js';
+import { describeDescriptionRouteIneligible } from '../../electron/ipc/browser/manualScraper/scrapeTelemetry.js';
 import { glassdoorCountryDomain } from '../../electron/ipc/browser/manualScraper/walkRules.js';
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 
@@ -137,7 +138,7 @@ async function walk(fake, jobs, detailPacing) {
 
 export default [
   {
-    name: 'Glassdoor job-page routing allows only same-host https /job-listing/ URLs',
+    name: 'Glassdoor job-page routing allows only https /job-listing/ URLs on a Glassdoor site',
     run() {
       const context = { listUrl: LIST_URL };
       const allowed = descriptionNavigationDecision('glassdoor', 'https://www.glassdoor.ca/job-listing/a.htm?jl=1', context);
@@ -145,7 +146,6 @@ export default [
       assert.equal(allowed.reason, 'glassdoor-same-host-job-listing');
       const refused = {
         'http://www.glassdoor.ca/job-listing/a.htm?jl=1': 'glassdoor-detail-not-https',
-        'https://www.glassdoor.com/job-listing/a.htm?jl=1': 'glassdoor-detail-other-host',
         'https://www.glassdoor.ca/Job/canada-jobs.htm': 'glassdoor-detail-not-job-listing',
         'https://www.glassdoor.ca/partner/jobListing.htm?jl=1': 'glassdoor-detail-not-job-listing',
         'https://boards.greenhouse.io/acme/jobs/1': 'glassdoor-detail-other-host',
@@ -385,14 +385,14 @@ export default [
       assert.equal(result.boardClosedDetailKept, 1);
       assert.equal(result.descWarning.code, 'description-rate-limited', 'only the panel warning describes still-missing rows');
       assert.deepEqual(recorded[0], {
-        jobPageEligible: 4, jobPageOpened: 4, silentMisses: 0, detailTabFailed: false, fromJobPage: 1, jobPageClosed: 2,
+        jobPageEligible: 4, jobPageIneligible: { 'not-job-listing': 1 }, jobPageOtherCountry: 0, jobPageOpened: 4, silentMisses: 0, detailTabFailed: false, fromJobPage: 1, jobPageClosed: 2,
         panelFallback: 2, fromPanel: 1, stopReason: '429-first', routeOffAtStart: false, sourceStopReason: 'none',
         panelBlock: 'armed',
       });
       assert.equal(pacing.glassdoorJobPage.panelBlock.code, 'description-rate-limited',
         'the panel block is kept panel-only while job pages are on');
       assert.equal(glassdoorPanelBlockIsSourceWide(pacing), false);
-      assert.deepEqual(paced[0], { fromJobPage: 1, fromPanel: 1, stopReason: 'none' });
+      assert.deepEqual(paced[0], { fromJobPage: 1, fromPanel: 1, stopReason: 'none', ineligible: { 'not-job-listing': 1 } });
     },
   },
   {
@@ -646,17 +646,28 @@ export default [
     },
   },
   {
-    name: 'Glassdoor job pages may be on a same-country language host, never another country',
+    name: 'Glassdoor job pages may be on a language host or another Glassdoor country site, never another site',
     run() {
       const context = { listUrl: LIST_URL };
       for (const url of ['https://fr.glassdoor.ca/job-listing/a.htm?jl=1', 'https://www.glassdoor.ca/job-listing/a.htm?jl=1', 'https://glassdoor.ca/job-listing/a.htm?jl=1']) {
-        assert.equal(descriptionNavigationDecision('glassdoor', url, context).allowed, true, url);
+        const decision = descriptionNavigationDecision('glassdoor', url, context);
+        assert.equal(decision.allowed, true, url);
+        assert.equal(decision.reason, 'glassdoor-same-host-job-listing', url);
       }
+      // 2026-11-23: a United States search served on www.glassdoor.ca links its cards to www.glassdoor.com.
       for (const url of ['https://fr.glassdoor.com/job-listing/a.htm?jl=1', 'https://www.glassdoor.com/job-listing/a.htm?jl=1',
-        'https://www.glassdoor.co.uk/job-listing/a.htm?jl=1', 'https://api.cdn.glassdoor.ca/job-listing/a.htm?jl=1',
-        'https://fr.glassdoor.ca.evil.com/job-listing/a.htm?jl=1']) {
+        'https://www.glassdoor.co.uk/job-listing/a.htm?jl=1']) {
+        const decision = descriptionNavigationDecision('glassdoor', url, context);
+        assert.equal(decision.allowed, true, url);
+        assert.equal(decision.reason, 'glassdoor-other-country-job-listing', url);
+      }
+      for (const url of ['https://api.cdn.glassdoor.ca/job-listing/a.htm?jl=1', 'https://fr.glassdoor.ca.evil.com/job-listing/a.htm?jl=1',
+        'https://glassdoor.com.evil.com/job-listing/a.htm?jl=1', 'http://www.glassdoor.com/job-listing/a.htm?jl=1',
+        'https://www.glassdoor.com/Job/a.htm?jl=1']) {
         assert.equal(descriptionNavigationDecision('glassdoor', url, context).allowed, false, url);
       }
+      assert.equal(descriptionNavigationDecision('glassdoor', 'https://www.glassdoor.com/job-listing/a.htm?jl=1', { listUrl: 'https://example.com/list' }).allowed, false,
+        'never from a list page that is not Glassdoor');
       assert.equal(glassdoorCountryDomain('fr.glassdoor.ca'), 'glassdoor.ca');
       assert.equal(glassdoorCountryDomain('www.glassdoor.com.au'), 'glassdoor.com.au');
       assert.equal(glassdoorCountryDomain('evil.com'), null);
@@ -665,8 +676,11 @@ export default [
         'https://fr.glassdoor.ca/job-listing/a.htm?jl=1');
       assert.equal(glassdoorJobPageTarget({ url: 'https://www.glassdoor.com/job-listing/a.htm?jl=1' }, LIST_URL),
         'https://www.glassdoor.ca/job-listing/a.htm?jl=1');
-      assert.equal(glassdoorJobPageEligible({ url: 'https://www.glassdoor.ca/job-listing/a.htm?jl=1', glassdoorJobPageUrl: 'https://www.glassdoor.com/job-listing/a.htm?jl=1' }, LIST_URL), false,
-        'an as-linked address on another country is refused (and never pinned)');
+      const usLinked = { url: 'https://www.glassdoor.ca/job-listing/a.htm?jl=1', glassdoorJobPageUrl: 'https://www.glassdoor.com/job-listing/a.htm?jl=1' };
+      assert.equal(glassdoorJobPageEligible(usLinked, LIST_URL), true, 'an as-linked address on another Glassdoor country site may be opened');
+      assert.equal(glassdoorJobPageTarget(usLinked, LIST_URL), 'https://www.glassdoor.com/job-listing/a.htm?jl=1', 'and is opened as linked, never pinned');
+      assert.equal(glassdoorJobPageIsOtherCountry(usLinked, LIST_URL), true);
+      assert.equal(glassdoorJobPageIsOtherCountry({ url: 'https://www.glassdoor.ca/job-listing/a.htm?jl=1' }, LIST_URL), false);
     },
   },
   {
@@ -831,6 +845,69 @@ export default [
       const failed = composeDetailBlockReprobeResult({ jobs: [], expandedCount: 0, descWarning: { code: 'description-rate-limited' }, descriptionRoute: route }, null, [row(3)], 'description-rate-limited');
       assert.equal(failed.descriptionRoute, route);
       assert.equal(failed.jobs[0].descriptionDeferredBy, 'block-cooldown');
+    },
+  },
+  {
+    name: 'Glassdoor run with no job page it may open: a panel block waits instead of racing, and the report says why (2026-11-23)',
+    async run() {
+      // In that run no card had a job page the route was allowed to open (all
+      // linked to another Glassdoor country site, refused at the time), so the
+      // route was "on" and had read nothing; one HTTP 502 from the panel then
+      // deferred 343 listings without a request. Rows with no job-page link
+      // stand in for them now that the other country site is allowed.
+      const pacing = {};
+      const state = glassdoorJobPageState(pacing);
+      const usRow = n => row(n, { url: `https://www.glassdoor.ca/partner/jobListing.htm?jl=${n}` });
+      assert.equal(glassdoorJobPageIneligibleCode(usRow(1), LIST_URL), 'not-job-listing');
+      assert.equal(glassdoorJobPageIneligibleCode(row(1), LIST_URL), null, 'a same-country job page may be opened');
+      assert.equal(glassdoorJobPageIneligibleCode(row(1, { glassdoorJobPageUrl: 'https://www.glassdoor.com/job-listing/a.htm?jl=1' }), LIST_URL), null,
+        'a job page on another Glassdoor country site may be opened');
+      assert.equal(glassdoorJobPageIneligibleCode(row(2, { url: 'https://employer.example/apply/2' }), LIST_URL), 'not-job-listing');
+      const recorded = [];
+      const paced = [];
+      const deps = {
+        byNavigation: async () => { throw new Error('no job page may be opened'); },
+        byPanel: async (_p, jobs) => ({
+          jobs: jobs.map((j, k) => (k === 0 ? { ...j, snippet: LONG } : { ...j, descriptionDeferredReason: 'description-panel-http-error' })),
+          expandedCount: 1, attemptedCount: 2, panelHttpFailureCount: 1,
+          descWarning: { code: 'description-panel-http-error', severity: 'warn' },
+        }),
+        record: route => recorded.push(route),
+        notePace: summary => paced.push(summary),
+        now: () => 2000,
+      };
+      await expandGlassdoorDescriptions({ url: () => LIST_URL }, [usRow(1), usRow(2), usRow(3)], 'glassdoor', overlayBase, 3, null, { detailPacing: pacing }, null, cfg, deps);
+      assert.equal(state.off, false, 'nothing was opened, so nothing counts against the route');
+      assert.equal(glassdoorPanelBlockIsSourceWide(pacing), true,
+        'no job page has read a row this run, so the panel block stops every description and the walk waits');
+      assert.deepEqual(takeGlassdoorPanelBlockForSource(pacing), { code: 'description-panel-http-error', at: 2000 });
+      assert.deepEqual(recorded[0].jobPageIneligible, { 'not-job-listing': 3 });
+      assert.deepEqual(paced[0].ineligible, { 'not-job-listing': 3 });
+      assert.ok(describeCardWalkDescriptionRoute(recorded[0]).includes('job pages not allowed: 3 not a Glassdoor job page link'));
+      assert.equal(describeDescriptionRouteIneligible({ 'not-job-listing': 1076, made: 5, 'bad-url': 0 }),
+        '1076 not a Glassdoor job page link', 'only fixed codes with a count are printed');
+      // Once a job page has read a row, a batch with nothing to open keeps the block panel-only, as before.
+      const pacing2 = {};
+      const state2 = glassdoorJobPageState(pacing2);
+      const readNav = async (_p, jobs) => ({
+        rows: jobs.map(j => ({ ...j, snippet: LONG })), rowOutcomes: jobs.map(() => 'expanded'),
+        jobPageRoute: { stopReason: 'none', opened: jobs.length }, expandedCount: jobs.length,
+      });
+      await expandGlassdoorDescriptions({ url: () => LIST_URL }, [row(1)], 'glassdoor', overlayBase, 1, null, { detailPacing: pacing2 }, null, cfg, { ...deps, byNavigation: readNav });
+      state2.panelBlock = { code: 'description-rate-limited', at: 1900, reprobes: 0 };
+      await expandGlassdoorDescriptions({ url: () => LIST_URL }, [usRow(4)], 'glassdoor', overlayBase, 1, null, { detailPacing: pacing2 }, null, cfg, deps);
+      assert.equal(glassdoorPanelBlockIsSourceWide(pacing2), false);
+      // Job pages on the other country site are opened and counted for the report.
+      const recorded3 = [];
+      const opened = [];
+      await expandGlassdoorDescriptions({ url: () => LIST_URL },
+        [row(5, { glassdoorJobPageUrl: 'https://www.glassdoor.com/job-listing/a.htm?jl=5' }), row(6)], 'glassdoor', overlayBase, 2, null, { detailPacing: {} }, null, cfg, {
+          ...deps, record: route => recorded3.push(route),
+          byNavigation: async (_p, jobs) => { opened.push(...jobs.map(j => j.title)); return readNav(_p, jobs); },
+        });
+      assert.deepEqual(opened, ['Architect 5', 'Architect 6']);
+      assert.equal(recorded3[0].jobPageOtherCountry, 1);
+      assert.ok(describeCardWalkDescriptionRoute(recorded3[0]).includes("job pages on Glassdoor's other country site 1 of 2"));
     },
   },
 ];

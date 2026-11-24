@@ -14,6 +14,7 @@ import path from 'path';
 import electronPkg from 'electron';
 import { logger } from '../logger.js';
 import { partitionByPageTitleScreen } from '../ipc/jobs/pageTitleScreen.js';
+import { notePaceListCheckStop, notePaceListPage, notePaceTitleScreen, resetScrapePace } from '../ipc/browser/manualScraper/scrapeTelemetry.js';
 import { measurementPacingOff, measurementPacingScale } from '../ipc/browser/scrapeMeasurement.js';
 import { scrapeFingerprintPolicy } from '../ipc/browser/manualScraper/scrapeBrowser.js';
 import { findChromePath, findSystemChromePath, getUserDataDir, getSharedProfileReservationInfo, launchWithProfileLockRetry, reserveSharedProfile } from '../ipc/stealthBrowser.js';
@@ -1303,6 +1304,8 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           endpointEvidence: `The session itself is valid — ${accountVerifyUrl} loaded clean and authenticated — but the very first https://${host}/jobs request was challenged. That makes this an endpoint-scoped block rather than a sign-in problem.`,
         } : {}),
       };
+      // Report only: the results-page rate at the moment of the check.
+      notePaceListCheckStop('indeed', { srcName: 'Indeed' });
       logger.warn(`[Indeed/Browser] ${label} requires ${nativeHandoff ? 'native Chrome handoff' : 'a later retry'}; preserving the profile and stopping this controlled-browser run.`);
       if (endpointScopedBlock) logger.warn(`[Indeed/Browser] ${manualChallenge.endpointEvidence}`);
       return false;
@@ -1336,6 +1339,8 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       makeJobPageStop({ maxAgeDays: days, unlimited: unlimitedPages, sourceLabel: 'Indeed' })
     );
 
+    // Report only: this walk's own page counts (a resumed walk starts again).
+    resetScrapePace('indeed', { srcName: 'Indeed', queryTotal: queryList.length });
     let wi = 0;
     outer:
     while (wi < workList.length) {
@@ -1549,6 +1554,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         // their click was skipped or the verdict came in after it was read.
         if (titleScreen) {
           const screened = partitionByPageTitleScreen(pageJobs, titleScreen);
+          notePaceTitleScreen('indeed', { srcName: 'Indeed', checked: pageJobs.length, skipped: screened.skipped.length });
           if (screened.skipped.length > 0) {
             logger.info(`[Indeed/Browser] q="${q}" p=${p + 1}: title screen removed ${screened.skipped.length} of ${pageJobs.length} card(s)`);
           }
@@ -1581,6 +1587,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
 
         // Checkpoint every successful page, including duplicate/empty output.
         // A write failure is fatal to this source so it cannot be marked done.
+        notePaceListPage('indeed', { srcName: 'Indeed', queryIndex: qi + 1, queryTotal: queryList.length });
         if (onPageJobs) await onPageJobs({ sourceId: 'indeed', query: q, queryIndex: queryIndexes[qi], page: p + 1, jobs: pageAdded });
 
         // Data-driven stop (age-window / no-new-jobs) — an ADDITIONAL, possibly

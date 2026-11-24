@@ -5738,13 +5738,13 @@ export default [
       const emptyState = source.slice(emptyStateStart, processingStateStart);
       assert(emptyState.includes('Career files retained')
         && emptyState.includes('hasRunnableCareerInput && !controlsLocked')
-        && emptyState.includes('Connect a Job Board to search.')
+        && !emptyState.includes('Connect a Job Board to search.')
         && !/>\s*Re-scan for New Jobs\s*</.test(emptyState)
-        && !emptyState.includes('Run Search')
-        && !emptyState.includes('handleRerun();'),
-      'an idle, unlocked empty hub with retained input has no scan button of its own: it only points at the Job Board, which starts every search');
+        && emptyState.includes('>Run Search</button>')
+        && emptyState.includes('handleRerun({ frameSourceCards: false });'),
+      'an idle, unlocked empty hub with retained input offers Run Search: a Job Search starts its own searches (a Job Board only reads its listings)');
       assert(source.includes('platformsVerifyingRef.current') && source.includes('handleRerun'),
-        'handleRerun still exists (the Board calls it) and keeps its platformsVerifying guard');
+        'handleRerun keeps its platformsVerifying guard');
       assert(emptyState.includes('inputDropsBlocked && hasCareerIdentity')
         && emptyState.includes('Ready — search from the connected Job Board, or clear these files to use different ones')
         && emptyState.includes('Clear career files')

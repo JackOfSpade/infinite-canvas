@@ -206,45 +206,6 @@ export default [
     },
   },
   {
-    name: 'Board startup verification yield rearms only its exact process lease and preserves one-shot semantic recovery',
-    async run() {
-      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-board-startup-yield-'));
-      const canvas = path.join(dir, 'canvas.json');
-      fs.writeFileSync(canvas, '{}');
-      const owner = sender(301); const other = sender(302);
-      const args = { canvasFilePath: canvas, nodeId: 'board', boardRunId: 'run', operation: 'board-orchestration', autoResume: true };
-      const source = readFileSync(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
-      const helperStart = source.indexOf('async function releaseJobBoardProcessLease(');
-      const helperEnd = source.indexOf('function isSavedScrapeManualAiResume', helperStart);
-      const branchStart = source.indexOf('        if (\n          hasActivePlatformVerification(verifyingPlatformsRef.current)', source.indexOf('const sourceIdsToRunSerially') > 0 ? source.indexOf('const sourceIdsToRunSerially') : source.indexOf('let sourceIdsToRunSerially'));
-      const branchEnd = source.indexOf('        // Location/profile edits', branchStart);
-      try {
-        let releases = [];
-        const first = await claimJobBoardRunExecution(args, { sender: owner });
-        assert(first.ok, 'initial automatic startup is admitted');
-        assert(!releaseJobBoardRunExecution({ ...args, claimToken: first.claimToken, retryableDeferral: 'platforms-verifying' }, { sender: other }),
-          'another renderer cannot rearm or release this transaction');
-        const context = { processBoardClaim: first, canvasFilePath: canvas, id: 'board', boardRunId: 'run', sourceId: 'ca', processed: 0, totalSelected: 2, label: 'Canada',
-          hasActivePlatformVerification: value => value, verifyingPlatformsRef: { current: true }, turnReadiness: {},
-          persistScanResume() {}, autoResumedBoardScanRef: { current: 'attempt' }, setScanProgress() {}, EventLogger: { log() {} },
-          window: { electronAPI: { releaseJobBoardRun: async request => { releases.push(request); return { released: releaseJobBoardRunExecution(request, { sender: owner }) }; } } } };
-        await runInNewContext(`(async function(){ ${source.slice(helperStart, helperEnd)}
-          try { ${source.slice(branchStart, branchEnd)} }
-          finally { await releaseJobBoardProcessLease(canvasFilePath, id, boardRunId, processBoardClaim); }
-        })()`, context);
-        assert(releases[0]?.retryableDeferral === 'platforms-verifying', 'production verification yield must reach host release');
-        const retry = await claimJobBoardRunExecution(args, { sender: owner });
-        assert(retry.ok, 'verification settling must re-admit the same automatic Board, not return automatic-attempted');
-        releaseJobBoardRunExecution({ ...args, claimToken: retry.claimToken }, { sender: owner });
-        assert((await claimJobBoardRunExecution(args, { sender: owner })).attempted,
-          'a settled semantic/failed attempt remains one-shot and still needs explicit Continue');
-        const explicit = await claimJobBoardRunExecution({ ...args, autoResume: false }, { sender: owner });
-        assert(explicit.ok, 'explicit Continue can recover an already-attempted transaction');
-        releaseJobBoardRunExecution({ ...args, claimToken: explicit.claimToken }, { sender: owner });
-      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
-    },
-  },
-  {
     name: 'job continuation leases are canvas-scoped and terminal receipts survive the same-process autosave gap',
     run: async () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-job-continuation-lease-'));
@@ -1507,44 +1468,6 @@ export default [
         && hookSource.includes("providerPhaseAwaitingResume: true"),
       'a hidden job-provider recovery publishes queued/running/settled card state, so a card mounted mid-run cannot queue a duplicate resume behind it');
       return { positionIgnored: true, recoveryChangeObserved: true };
-    },
-  },
-  {
-    name: 'mounted Job Search and Job Board require an explicit Continue at every saved manual-AI boundary',
-    run: () => {
-      const searchSource = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
-      const boardSource = fs.readFileSync(path.resolve('src/nodes/JobBoardNode.jsx'), 'utf8');
-      const selectorSource = fs.readFileSync(path.resolve('src/nodes/jobboard/JobBoardSearchSelection.jsx'), 'utf8');
-      const mainSource = readJobsSources('jobs', 'searchHandlers');
-
-      assert(searchSource.includes('manualAiExplicitResumeRequest?.runId !== resume.runId')
-        && searchSource.includes('Continuing explicitly selected manual AI run')
-        && !searchSource.includes('Auto-resuming manual AI run'),
-      'a mounted Job Search exposes the exact saved handoff but does not invoke it without the Continue action');
-      const automaticProviderResumeStart = searchSource.indexOf('// Unexpected app/window interruption resumes without another click.');
-      const automaticProviderResumeEnd = searchSource.indexOf('const handleFinishWithSavedListings', automaticProviderResumeStart);
-      const automaticProviderResume = searchSource.slice(automaticProviderResumeStart, automaticProviderResumeEnd);
-      const resumeBannerStart = searchSource.indexOf('const resumeBanner = showUnfinishedRunBanner');
-      const resumeBannerEnd = searchSource.indexOf('const pausedManualAiRecovery', resumeBannerStart);
-      const resumeBanner = searchSource.slice(resumeBannerStart, resumeBannerEnd);
-      assert(automaticProviderResumeStart >= 0 && automaticProviderResumeEnd > automaticProviderResumeStart
-        && automaticProviderResume.includes('data.providerPhaseAwaitingResume === true')
-        && automaticProviderResume.includes('handleResumeRun({ offer, providerPhaseOnly: true })')
-        && resumeBanner.includes('onClick={handleResumeRun}'),
-      'after a hidden provider-only pass settles, mounted auto-resume must stop at the explicit semantic handoff while the person can still choose Resume');
-      assert(boardSource.includes('explicitRecoveryContinue: true')
-        && boardSource.includes('providerPhaseOnlyRecovery')
-        && boardSource.includes('Saved AI handoff ready. Choose Continue saved AI handoff')
-        && !boardSource.includes('[JobBoard] Auto-resuming manual AI run'),
-      'a mounted Board advances only provider recovery automatically and leaves semantic AI behind an explicit Continue');
-      assert(selectorSource.includes("recoveryActionLabel = 'Retry recovery'")
-        && selectorSource.includes('{recoveryActionLabel}')
-        && boardSource.includes("'Continue saved AI handoff'"),
-      'the recovery control names the saved AI continuation instead of presenting it as an automatic retry');
-      assert(mainSource.includes("['hidden-provider', 'board-orchestration']")
-        && mainSource.includes('operation: backgroundBoardProviderOperation'),
-      'fresh provider-only bootstrap accepts only an exact hidden or mounted Board process lease');
-      return { searchConsentBoundary: true, boardConsentBoundary: true, mountedProviderLeaseExact: true };
     },
   },
   {

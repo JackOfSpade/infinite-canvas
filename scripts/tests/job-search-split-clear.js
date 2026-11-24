@@ -1027,47 +1027,19 @@ export default [
     },
   },
   {
-    name: 'Job Board integration: hubs awaiting replacement career data are excluded from Combine input',
+    name: 'Job Board integration: Combine builds from the listings the Board took from its streams, never from a Job Search card\'s own result',
     run: async () => {
       const board = readSource('../../src/nodes/JobBoardNode.jsx');
       const combine = sliceBetween(board, 'function liveCombineInputs(boardId, nodes, edges) {', 'function boardInputSignature');
-      assert(combine.includes('&& !isSavedJobsCareerReplacementPending(node)'), 'Combine must skip rows scored under a replaced or cleared career snapshot');
-      assert(combine.includes('const shownElsewhere = isJobSearchRunShownOnOtherBoard(node, boardId);')
-        && combine.includes('          && !shownElsewhere,'), 'Combine must skip a run another Board already shows');
-      for (const kind of ['career-cleared-awaiting-files', 'rescore-saved-jobs', 'career-import-compiling', 'career-import-failed', 'career-import-requires-approval']) {
-        assert(board.includes(`  '${kind}',\n`), `${kind} must be a replacement-pending admission`);
-      }
-    },
-  },
-  {
-    name: 'A re-score that goes on to search replaces the older rollback instead of keeping both',
-    run() {
-      const before = { version: 1, sourceId: 'hub', previousData: { scoredJobs: ['before'] } };
-      const rescored = { version: 1, sourceId: 'hub', previousData: { scoredJobs: ['rescored'] } };
-      const other = { version: 1, sourceId: 'other', previousData: {} };
-      const rescoreFollowUps = { hub: { capability: 'cap', rollback: rescored } };
-      const changed = withRescoreFollowUpRollbacks({
-        activeSourceRollback: before,
-        activeSourceRollbacks: { hub: before, other },
-        rescoreFollowUps,
-      });
-      assert.strictEqual(changed.activeSourceRollback, rescored);
-      assert.strictEqual(changed.activeSourceRollbacks.hub, rescored, 'one object in every slot, so a save writes it once');
-      assert.strictEqual(changed.activeSourceRollbacks.other, other);
-      assert.deepStrictEqual(withRescoreFollowUpRollbacks({
-        activeSourceRollback: other, activeSourceRollbacks: { other }, rescoreFollowUps,
-      }), {}, 'a slot without that Search is never added or changed');
-      assert.deepStrictEqual(withRescoreFollowUpRollbacks({
-        activeSourceRollback: rescored, activeSourceRollbacks: { hub: rescored }, rescoreFollowUps,
-      }), {}, 'already in place: nothing to write');
-      assert.deepStrictEqual(withRescoreFollowUpRollbacks({
-        activeSourceRollback: before,
-        activeSourceRollbacks: { hub: before },
-        rescoreFollowUps: { hub: { capability: 'cap', rollback: { ...rescored, sourceId: 'elsewhere' } } },
-      }), {}, 'a follow-up rollback for a different Search is ignored');
-      for (const file of ['src/nodes/JobBoardNode.jsx', 'src/nodes/JobSearchNode.jsx']) {
-        assert(fs.readFileSync(file, 'utf8').includes('withRescoreFollowUpRollbacks('), `${file} must route the follow-up rollback through the helper`);
-      }
+      assert(combine.includes('const intake = jobBoardIntakeSnapshot(boardId);')
+        && combine.includes('const scoredJobs = intake.rowsByStream.get(node.id) || [];')
+        && combine.includes('const preferenceCandidatePool = intake.filteredByStream.get(node.id) || [];'),
+      'the Board\'s rows and its ruled-out pool come from its own intake');
+      assert(!combine.includes('data.scoredJobs') && !combine.includes('data.preferenceCandidatePool'),
+        'a Job Search card\'s saved result is not a Board input');
+      assert(combine.includes('runId: jobBoardStreamRunId(node.id),') && combine.includes('operationAuthority: null,'),
+        'a stream has no search run to name');
+      assert(board.includes('if (isJobBoardStreamRunId(module.runId)) continue;'), 'nothing is stamped on the Job Search card for a stream');
     },
   },
   {

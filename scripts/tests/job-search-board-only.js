@@ -3,117 +3,97 @@ import { readFileSync } from 'node:fs';
 
 const readSource = relative => readFileSync(new URL(relative, import.meta.url), 'utf8');
 
+// 2026-11-20 made the Job Board the only way to start a search. 2026-11-23
+// reversed that: a Job Search starts, pauses and continues its own runs and
+// sends listings to a saved stream; a Job Board only reads that stream. These
+// tests pin the new rule on the Search card.
 export default [
   {
-    name: 'deferDirectSearchToBoard always defers and asks an unconnected card to connect a Job Board',
+    name: 'a Job Search starts its own searches: nothing is handed to a Job Board',
     run() {
       const search = readSource('../../src/nodes/JobSearchNode.jsx');
       const start = search.indexOf('const deferDirectSearchToBoard = useCallback');
       const end = search.indexOf('const completeJobRun = useCallback', start);
       assert(start >= 0 && end > start, 'deferDirectSearchToBoard must exist between its helpers');
       const defer = search.slice(start, end);
-      assert(!defer.includes('return false'),
-        'deferDirectSearchToBoard never hands a direct provider search back to the card');
-      assert(defer.includes('`[JobSearch][${id}] ${trigger} saved without scanning — connect a Job Board to search`'),
-        'an unconnected card logs that the work was saved without scanning');
-      assert(defer.includes("title: 'Connect a Job Board',")
-        && defer.includes("description: 'Searches run only from a Job Board. Connect this Job Search to a Job Board, then use Search selected & combine.',"),
-        'an unconnected card gets the connect-a-Job-Board toast');
-      assert(defer.includes('saved without scanning — connected Job Board owns search admission')
-        && defer.includes("title: 'Run from Job Board',"),
-        'a connected card keeps the existing Board-owned log line and toast');
-      assert(defer.split('dedupeKey: `job-search-run-from-board:${id}`,').length === 3,
-        'both branches reuse the existing per-hub dedupe key');
-      assert(defer.includes('return true;'), 'every branch reports the search as deferred');
-      return { deferAlways: true };
+      assert(defer.includes('useCallback(() => false, [])'), 'no launch is deferred to a Board any more');
+      assert(!defer.includes('Run from Job Board') && !defer.includes('Connect a Job Board'), 'no "run it from the Board" toast survives');
+      assert(search.includes('const managedByJobBoard = false;'), 'a connected Board never owns this card\'s actions');
+      assert(search.includes('const connectedToJobBoard = useStore('), 'the connection is still known, for wording only');
+      return { searchOwnsStart: true };
     },
   },
   {
-    name: 'runPipeline refuses an unmanaged search before it contacts a provider',
+    name: 'runPipeline no longer refuses a search started from the card',
     run() {
       const search = readSource('../../src/nodes/JobSearchNode.jsx');
       const start = search.indexOf('const runPipeline = useCallback');
       const end = search.indexOf('const startProcessing = useCallback', start);
       assert(start >= 0 && end > start, 'runPipeline must exist before startProcessing');
       const pipeline = search.slice(start, end);
-      const refusalAt = pipeline.indexOf('Direct search refused — searches run only from a Job Board');
-      assert(refusalAt >= 0, 'runPipeline logs a direct-search refusal');
-      assert(refusalAt > pipeline.indexOf('if (isJobWorkflowDeletionPending(id)) {'),
-        'the refusal sits just after the deletion fence');
-      assert(refusalAt < pipeline.indexOf('window.electronAPI'),
-        'the refusal precedes every IPC call that runPipeline can make');
-      assert(pipeline.slice(refusalAt, pipeline.indexOf('window.electronAPI')).includes(
-        "return searchRunOutcome('not-ready', { error: 'Searches run only from a Job Board.' });",
-      ), 'the refusal returns a not-ready outcome instead of searching');
-      return { refusalBeforeProvider: true };
+      assert(!pipeline.includes('Direct search refused') && !pipeline.includes('Searches run only from a Job Board.'),
+        'the Board-only backstop is gone');
+      assert(pipeline.indexOf('if (isJobWorkflowDeletionPending(id)) {') >= 0, 'the deletion fence stays');
+      return { refusalRemoved: true };
     },
   },
   {
-    name: 'handleRerun refuses an unmanaged re-run and keeps a failed compile compile-only',
+    name: 'the card offers Run Search and Search for new jobs; a failed compile retry still only compiles',
     run() {
       const search = readSource('../../src/nodes/JobSearchNode.jsx');
-      const start = search.indexOf('const handleRerun = useCallback');
-      const end = search.indexOf('const cancelBoardRun = useCallback', start);
-      assert(start >= 0 && end > start, 'handleRerun must exist before cancelBoardRun');
-      const rerun = search.slice(start, end);
-      const compileRetryAt = rerun.indexOf("if (!queueManagedByBoard && runOrigin === 'career-compilation-retry') {");
-      const deferAt = rerun.indexOf("if (!queueManagedByBoard && deferDirectSearchToBoard('Direct re-run')) {");
-      const firstSearchAt = rerun.indexOf('startProcessingWithProfile(');
-      assert(compileRetryAt >= 0 && deferAt > compileRetryAt,
-        'the compile-retry branch is resolved before the direct re-run deferral');
-      assert(rerun.slice(compileRetryAt, deferAt).includes('compileRetainedCareerFiles();'),
-        'a failed compile retry recompiles the retained files and nothing else');
-      assert(rerun.slice(compileRetryAt, deferAt).includes("Searches run only from a Job Board."),
-        'the compile-retry branch still refuses to search');
-      assert(firstSearchAt > deferAt && rerun.slice(deferAt, firstSearchAt).includes(
-        "Searches run only from a Job Board.",
-      ), 'a direct re-run is refused before any search path is reached');
-      return { directRerunDefers: true, compileOnlyRetry: true };
-    },
-  },
-  {
-    name: 'the card offers no scan control and shows only a connect hint when a Job Board is missing',
-    run() {
-      const search = readSource('../../src/nodes/JobSearchNode.jsx');
-      assert(search.includes('>Connect a Job Board to search.</p>'),
-        'an unconnected card shows the connect hint in place of any search button');
-      assert(!search.includes('>Run Search<') && !search.includes('>Re-scan for New Jobs<'),
-        'no Re-scan / Run Search button survives on the card');
-      assert(!search.includes('{hasRunnableCareerInput && !controlsLocked && !boardRecoveryOwnsActions && !resumeOffer?.incomplete && (\n                    <button'),
-        'no ungated Re-scan button survives');
-      assert(search.includes("{careerCompilationFailed ? 'Retry Career Compilation' : 'Compile Career Files'}"),
-        'the compile controls stay available without a Job Board');
+      assert(search.includes('>Run Search</button>'), 'a compiled card offers Run Search');
+      assert(!search.includes('>Connect a Job Board to search.</p>'), 'the connect-a-Board hint is gone');
+      assert(search.includes("onSearchAgain={controlsLocked ? null : () => handleRerun({ frameSourceCards: false })}"),
+        'a finished card can search again');
       const done = readSource('../../src/nodes/jobsearch/JobSearchDoneState.jsx');
-      assert(!done.includes('onRerun') && !done.includes('onReanalyze') && !done.includes('Re-scan for New Jobs'),
-        'the done state takes no scan handlers and renders no scan button');
-      return { rerunRemoved: true, doneRerunRemoved: true };
+      assert(done.includes('Search for new jobs') && done.includes('onSearchAgain'), 'the finished state renders the button');
+      assert(done.includes("jobsLabel(count, 'listing sent', 'listings sent')"), 'a finished run says how many listings it sent');
+      assert(done.includes('The connected Job Board scores these listings and shows them as they arrive.'),
+        'the card says where its listings go');
+      const rerunStart = search.indexOf('const handleRerun = useCallback');
+      const rerun = search.slice(rerunStart, search.indexOf('const cancelBoardRun = useCallback', rerunStart));
+      const compileRetryAt = rerun.indexOf("if (!queueManagedByBoard && runOrigin === 'career-compilation-retry') {");
+      assert(compileRetryAt >= 0 && rerun.slice(compileRetryAt, compileRetryAt + 400).includes('compileRetainedCareerFiles();'),
+        'a failed compile retry recompiles the retained files and does not search');
+      assert(search.includes("{careerCompilationFailed ? 'Retry Career Compilation' : 'Compile Career Files'}"),
+        'the compile controls stay available');
+      return { cardOwnsSearch: true };
     },
   },
   {
-    name: 'no standalone auto-start, USAJobs refresh, or stale re-scan copy survives on the card',
+    name: 'a Job Search run ends once its listings are sent: no preference check and no scoring on the Search side',
     run() {
       const search = readSource('../../src/nodes/JobSearchNode.jsx');
-      const autoStartAt = search.indexOf('Legacy file auto-start suppressed — searches run only from a Job Board');
+      assert(search.includes('const SEARCH_SENDS_LISTINGS_ONLY = true;'), 'the Search sends listings only');
+      const evaluateStart = search.indexOf('const evaluatePreferencesForRun = useCallback');
+      const evaluate = search.slice(evaluateStart, search.indexOf('window.electronAPI.evaluateJobPreferences', evaluateStart));
+      assert(evaluate.includes('if (SEARCH_SENDS_LISTINGS_ONLY) return unevaluatedPreferenceResult(fallbackJobs);'),
+        'preferences are not judged on the Search side');
+      const scoreStart = search.indexOf('const runScoringAndSpawn = useCallback');
+      const score = search.slice(scoreStart, search.indexOf('const handlePostSearchResult = useCallback', scoreStart));
+      assert(/const scoreResult = SEARCH_SENDS_LISTINGS_ONLY \? \{\s+success: true, scoredJobs: \[\], collectionOnly: true/u.test(score),
+        'no scoring request is made');
+      assert(score.includes("...(SEARCH_SENDS_LISTINGS_ONLY ? { listingsOnly: true, resultDisposition: 'collection-only' } : {}),"),
+        'the run is committed as listings sent');
+      const finish = search.slice(search.indexOf('const finishScoringAndSpawn = useCallback'), scoreStart);
+      assert(finish.includes("listingsOnly || displayed.length > 0 ? 'completed' : 'failed',")
+        && finish.includes("listingsOnly ? 'collection-only' : displayed.length > 0 ? 'populated' : 'incomplete',"),
+        'a run with no rows of its own ends cleanly, not as incomplete');
+      return { listingsOnly: true };
+    },
+  },
+  {
+    name: 'no legacy auto-start or stale re-scan copy survives on the card',
+    run() {
+      const search = readSource('../../src/nodes/JobSearchNode.jsx');
+      const autoStartAt = search.indexOf('Legacy file auto-start suppressed');
       assert(autoStartAt >= 0, 'the suppressed legacy file auto-start still logs why the persisted path did not start');
       const autoStartEnd = search.indexOf('const continueSavedJobsRescore = useCallback', autoStartAt);
-      assert(autoStartEnd > autoStartAt, 'the legacy file auto-start effect must sit before continueSavedJobsRescore');
       const autoStartEffect = search.slice(search.lastIndexOf('useEffect(() => {', autoStartAt), autoStartEnd);
       assert(!autoStartEffect.includes('startProcessing(') && !autoStartEffect.includes('runPipeline('),
-        'the legacy file auto-start effect never launches a search');
-      const usaStart = search.indexOf('const triggerUSAJobsBackgroundSearch = useCallback');
-      const usaEnd = search.indexOf('const handleJobsSettingsChange = useCallback', usaStart);
-      assert(usaStart >= 0 && usaEnd > usaStart, 'the USAJobs refresh must exist before the settings handler');
-      const usaRefresh = search.slice(usaStart, usaEnd);
-      assert(usaRefresh.includes(
-        'USAJobs background search dropped because searches run only from a Job Board.',
-      ), 'a card drops the USAJobs background refresh');
-      assert(!usaRefresh.includes('acquireModuleRun') && !usaRefresh.includes('searchJobsSingleSource'),
-        'the USAJobs background refresh never acquires a run lane or contacts the provider');
-      assert(!search.includes('handleClearScrape') && !search.includes('canClearScrape'),
-        'Clear Scrape is gone from the card');
-      assert(!search.includes('Re-scan for New Jobs continues from that date'),
-        'the standalone re-scan promise is gone');
-      return { autoStartRetired: true, usaJobsDropped: true };
+        'a search starts only when the person presses a button, never from a saved file path alone');
+      assert(!search.includes('handleClearScrape') && !search.includes('canClearScrape'), 'Clear Scrape is gone from the card');
+      return { autoStartRetired: true };
     },
   },
 ];

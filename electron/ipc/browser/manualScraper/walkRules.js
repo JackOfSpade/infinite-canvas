@@ -554,12 +554,22 @@ export function glassdoorCountryDomain(hostname) {
  * location-lookup, and user-facing Solve navigation: those actions keep their
  * existing Glassdoor URLs and are not detail enrichment.
  *
- * Glassdoor: only an https `/job-listing/` page on a first-party host of the
- * SAME country domain as the list page (`context.listUrl`) may be opened —
- * www., a two-letter language host such as fr., or the bare domain: from a
- * www.glassdoor.ca list, fr.glassdoor.ca and www.glassdoor.ca qualify, never
- * glassdoor.com. Every other URL — another country, another path, an
- * employer/ATS link, plain http — is refused and that row stays with the panel.
+ * Glassdoor: only an https `/job-listing/` page on a first-party Glassdoor
+ * host may be opened — www., a two-letter language host such as fr., or the
+ * bare domain, on any Glassdoor country domain, while the list page
+ * (`context.listUrl`) is itself on Glassdoor. Every other URL — another path,
+ * an employer/ATS link, a deeper subdomain, plain http — is refused and that
+ * row stays with the panel.
+ *
+ * Another country's site was refused until 2026-11-23. Nothing had measured
+ * it; the rule only followed the hosts the 2026-11-20 tests had read. That
+ * day's run searched the United States from Canada: Glassdoor served the list
+ * on www.glassdoor.ca and linked all 1,076 cards to www.glassdoor.com, so no
+ * job page was opened in 6 hours and every description waited on the panel's
+ * 10 per 5 minutes. The owner chose to allow it. It is still unmeasured: a
+ * check or block on such a page turns the route off for the source run like
+ * any other (glassdoorJobPageVerdict), and the report counts these pages
+ * (route.jobPageOtherCountry).
  *
  * Which host to open: the address exactly as Glassdoor linked it
  * (row.glassdoorJobPageUrl). Live 2026-11-20, Glassdoor's own English
@@ -602,13 +612,18 @@ export function descriptionNavigationDecision(sourceId, rawUrl, context = {}) {
     }
     if (detail.protocol !== 'https:') return { allowed: false, reason: 'glassdoor-detail-not-https', url };
     const listDomain = glassdoorCountryDomain(list.hostname);
-    if (!listDomain || glassdoorCountryDomain(detail.hostname) !== listDomain) {
+    const detailDomain = glassdoorCountryDomain(detail.hostname);
+    if (!listDomain || !detailDomain) {
       return { allowed: false, reason: 'glassdoor-detail-other-host', url };
     }
     if (!detail.pathname.startsWith('/job-listing/')) {
       return { allowed: false, reason: 'glassdoor-detail-not-job-listing', url };
     }
-    return { allowed: true, reason: 'glassdoor-same-host-job-listing', url: detail.toString() };
+    return {
+      allowed: true,
+      reason: detailDomain === listDomain ? 'glassdoor-same-host-job-listing' : 'glassdoor-other-country-job-listing',
+      url: detail.toString(),
+    };
   }
   if (sourceId !== 'ziprecruiter') {
     return { allowed: true, reason: 'source-has-no-detail-navigation-restriction', url: String(rawUrl || '').trim() };

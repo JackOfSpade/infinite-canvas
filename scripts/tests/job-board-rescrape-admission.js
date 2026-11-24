@@ -282,20 +282,4 @@ export default [
     assert.equal(searchOnly[0].data.boardShownRun.boardId, 'board-1',
       'a Search copied without its Board keeps the original claim, so its run is not shown twice');
   } },
-  { name: 'Job Board live signature and all-done checks leave out runs shown on another Board exactly as Combine does', run: () => {
-    const board = fs.readFileSync(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
-    assert.ok(board.includes('shownElsewhere: isJobSearchRunShownOnOtherBoard(n, id),'),
-      'each connected module records whether another Board showed its run');
-    assert.ok(board.includes("(m.hasPositiveResults || m.isAuthoritativeEmpty) && !m.shownElsewhere),"),
-      'the render-time completed set (and so liveSignature) leaves those runs out like liveCombineInputs');
-    assert.ok(board.includes('&& completedModules.length + settledElsewhereCount === connectedModules.length;')
-      && board.includes('completedCount: completedModules.length + settledElsewhereCount,'),
-    'a left-out run counts as settled, never as an unfinished Search');
-    assert.ok(board.includes('inputsAtCombine.settled.length === liveConnectedCount')
-      && board.includes('liveInputs.settled.length === liveInputs.all.length'),
-    'Combine-time empty replacement uses the same settled count');
-    assert.ok(board.includes('const displayedOriginIds = new Set([...union.map(job => job?.originHubId).filter(Boolean), ...deletedOriginIdsAtCombine]);')
-      && board.includes('if (!module.runId || !displayedOriginIds.has(module.id)) continue;'),
-    'a Search is recorded as shown only when one of its rows is in the displayed set, or was shown here and then deleted by the user');
-  } },
 ];

@@ -420,7 +420,7 @@ export default [
       assert(launcher.includes('node "$PROJECT_DIR/scripts/source-manifest.mjs"')
         && !launcher.includes("stat -f '%N|%m|%z'"),
       'the launcher must use the content digest instead of a filename/mtime/size stamp');
-      const buildStart = launcher.indexOf('npm run build 2>&1 | tee "$LOG"');
+      const buildStart = launcher.indexOf('npm run "$BUILD_SCRIPT" 2>&1 | tee "$LOG"');
       const postBuild = launcher.indexOf('postbuild_manifest="$(source_manifest "$inputs_before")"', buildStart);
       const changedDuringBuild = launcher.indexOf('[[ "$postbuild_manifest" != "$manifest" ]]', postBuild);
       const stampWrite = launcher.indexOf('print -r -- "$built_manifest" > "$STAMP"', changedDuringBuild);

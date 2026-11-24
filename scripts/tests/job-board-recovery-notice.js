@@ -87,84 +87,18 @@ export default [
       const flagsEnd = source.indexOf('  // --- Board career override', flagsStart);
       assert(helpersStart > 0 && helpersEnd > helpersStart && flagsStart > 0 && flagsEnd > flagsStart);
       const flags = new Function('data', 'normalizeManualAiCleanupReceipts', 'isBoardCombineManualAiRunId',
-        `${source.slice(helpersStart, helpersEnd)}\n${source.slice(flagsStart, flagsEnd)}\nreturn { durableRecoveryActive, cleanupOnlyRecovery, cancellationCleanupActive };`);
+        `${source.slice(helpersStart, helpersEnd)}\n${source.slice(flagsStart, flagsEnd)}\nreturn { durableRecoveryActive, cancellationCleanupActive };`);
       for (const runId of ['official-posting:board-1-job-9:research', 'job-board-career:board-1:import']) {
         assert.deepStrictEqual(flags({
           manualAiResume: { runId, retirementPending: true },
           manualAiCleanupReceipts: [{ runId, cancellationPending: true }],
         }, value => value || [], isBoardCombineManualAiRunId), {
-          durableRecoveryActive: false, cleanupOnlyRecovery: false, cancellationCleanupActive: false,
+          durableRecoveryActive: false, cancellationCleanupActive: false,
         }, 'foreign saved state cannot disable the Board while self-healing runs');
       }
       assert.strictEqual(flags({ manualAiResume: { runId: 'job-board:board-1:combine' } },
         value => value || [], isBoardCombineManualAiRunId).durableRecoveryActive, true,
       'the same predicate retains real Board continuation');
-    },
-  },
-  {
-    name: 'Saved Board search pause restores Continue after remount and retains it until the parent receipt retires',
-    run: async () => {
-      const source = readNodeSource();
-      const start = source.indexOf('    const plan = data.boardScanResume;', source.indexOf('// A Board-owned child can survive'));
-      const end = source.indexOf('    if (boardRecoveryTouchesPendingDeletion', start);
-      assert(start > 0 && end > start);
-      const restore = new Function('data', 'setRecoveryError', 'savedPauseMessageForPlan',
-        'scanRunRef', 'combineRunRef', 'autoResumedBoardScanRef', 'searchRecoveryErrorRef', 'foreignRecoveryWaitSigRef',
-        'boardRecoveryDiagnosticsRef', 'recoveryError', 'awaitedSourceTerminalStatus', 'getNode',
-        source.slice(start, end) + '\nthrow new Error("recovery continued");');
-      const clearStart = source.indexOf('    if (!isSavedPauseNotice(recoveryError)) return;');
-      const clearEnd = source.indexOf('\n  }, [', clearStart);
-      const clear = new Function('data', 'recoveryError', 'setRecoveryError', 'isSavedPauseNotice',
-        'isBoardCombineManualAiRunId', 'combineRunRef', source.slice(clearStart, clearEnd));
-      const plan = { version: 1, phase: 'searches', boardRunId: 'saved-board',
-        activeSourceId: 'paused-search', completedSourceRuns: { other: { runId: 'completed' } } };
-      // A searches-phase pause with no Board AI handoff is a search pause; one
-      // that holds a Combine handoff keeps the AI-handoff notice.
-      for (const [patch, expected] of [
-        [{ boardScanResume: { ...plan, autoResumeEligible: false } }, SAVED_SEARCH_PAUSE_MESSAGE],
-        [{ boardScanResume: { ...plan, pausedByUser: true } }, SAVED_SEARCH_PAUSE_MESSAGE],
-        [{ boardScanResume: plan, manualAiResume: { runId: 'saved-combine', pausedByUser: true } }, SAVED_HANDOFF_READY_MESSAGE],
-        [{ boardScanResume: plan, manualAiResume: { runId: 'saved-combine', autoResumeEligible: false } }, SAVED_HANDOFF_READY_MESSAGE],
-      ]) {
-        let notice = null;
-        const ref = () => ({ current: null });
-        const diagnostics = ref();
-        restore(patch, value => { notice = value; }, savedPauseMessageForPlan,
-          ref(), ref(), ref(), ref(), ref(), diagnostics, null, () => 'none', () => null);
-        assert.strictEqual(notice, expected, 'paused restore must expose the explicit Continue action');
-        assert.deepStrictEqual(diagnostics.current, { recoveryErrorLatch: 'paused-continue', awaitedSource: 'none' },
-          'the report latch names the saved pause instead of claiming no recovery message is set');
-        clear(patch, notice, value => { notice = value; }, isSavedPauseNotice, () => false, ref());
-        assert.strictEqual(notice, expected, 'a parent-only saved search still owns the notice');
-        clear({}, notice, value => { notice = value; }, isSavedPauseNotice, () => false, ref());
-        assert.strictEqual(notice, null, 'retiring the final receipt removes the notice');
-      }
-      // While a live scan owns the Board the branch publishes nothing, and the
-      // latch must not claim a saved pause.
-      {
-        let notice = null;
-        const diagnostics = { current: null };
-        restore({ boardScanResume: { ...plan, pausedByUser: true } }, value => { notice = value; }, savedPauseMessageForPlan,
-          { current: Symbol('scan') }, { current: null }, { current: null }, { current: null }, { current: null },
-          diagnostics, null, () => 'pending', () => null);
-        assert.strictEqual(notice, null);
-        assert.deepStrictEqual(diagnostics.current, { recoveryErrorLatch: 'none', awaitedSource: 'pending' });
-      }
-      assert.strictEqual(savedPauseMessageForPlan({ phase: 'combine' }, null), SAVED_HANDOFF_READY_MESSAGE,
-        'only the searches phase is renamed');
-
-      const retryStart = source.indexOf('    const liveData = getNode(id)?.data || {};', source.indexOf('const handleRetryRecovery'));
-      const retryEnd = source.indexOf('    setRecoveryError(null);', retryStart);
-      const retry = new Function('getNode', 'id', 'updateGlobal', source.slice(retryStart, retryEnd));
-      let live = { boardScanResume: { ...plan, autoResumeEligible: false, pausedByUser: true },
-        manualAiResume: { runId: 'saved-combine', pausedByUser: true, autoResumeEligible: false } };
-      retry(() => ({ data: live }), 'board', (_id, patch) => { live = { ...live, ...patch }; });
-      assert.strictEqual(live.boardScanResume.autoResumeEligible, true);
-      assert.strictEqual(live.boardScanResume.pausedByUser, false);
-      assert.strictEqual(live.manualAiResume.autoResumeEligible, true);
-      assert.strictEqual(live.manualAiResume.pausedByUser, false);
-      assert.deepStrictEqual(live.boardScanResume.completedSourceRuns, plan.completedSourceRuns);
-      assert.strictEqual(live.boardScanResume.activeSourceId, plan.activeSourceId);
     },
   },
 
@@ -489,7 +423,7 @@ export default [
       assert(isSavedPauseNotice(SAVED_HANDOFF_READY_MESSAGE) && isSavedPauseNotice(SAVED_SEARCH_PAUSE_MESSAGE)
         && !isSavedPauseNotice('A real recovery failure'));
       const clearCall = source.indexOf('setRecoveryError(null)', clearEffect);
-      assert(clearCall !== -1 && clearCall < source.indexOf('const handleRetryRecovery'), 'clearing effect must call setRecoveryError(null)');
+      assert(clearCall !== -1 && clearCall - clearEffect < 1500, 'clearing effect must call setRecoveryError(null)');
 
       // (d) The supersede log now names which invariant failed.
       assert(source.includes('[JobBoard] combine superseded before commit id=${id} signature=${sigAtCombine} reason=${mismatchReason}'), 'supersede log must append reason=');

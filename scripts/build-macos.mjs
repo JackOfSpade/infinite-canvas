@@ -22,7 +22,57 @@ const UNKNOWN_LOCK_STALE_MS = 5 * 60_000;
 
 // Compile script and electron-builder output directory of the app this script packages.
 const COMPILE_SCRIPT = 'build:compile';
+// The packaging lock always lives here, whichever app is being packaged: all
+// three apps are packaged from the same compiled output (dist/, dist-electron/),
+// so their builds must never overlap.
 const RELEASE_DIRECTORY = 'release';
+
+/**
+ * The three apps packaged from this one codebase (src/utils/appRoleRules.js).
+ * What differs is only what electron-builder writes into each package: its
+ * output folder, bundle id, product name, and the package.json fields the app
+ * reads at start (`appRole`) or that give it its own data folder (`name`,
+ * `productName`). The signing identity is the same for all three; macOS ties a
+ * permission to identity plus bundle id, so each app asks for its own once.
+ */
+export const APP_VARIANTS = Object.freeze({
+  canvas: Object.freeze({
+    releaseDirectory: 'release',
+    builderArguments: Object.freeze(['-c.extraMetadata.appRole=canvas']),
+  }),
+  'job-search': Object.freeze({
+    releaseDirectory: 'release-job-search',
+    builderArguments: Object.freeze([
+      '-c.appId=com.antigravity.jobsearch',
+      '-c.productName=Job Search',
+      '-c.directories.output=release-job-search',
+      '-c.extraMetadata.name=job-search',
+      '-c.extraMetadata.productName=Job Search',
+      '-c.extraMetadata.appRole=job-search',
+      '-c.mac.extendInfo.NSAppleEventsUsageDescription=Read the job pages you are signed in to in Google Chrome.',
+    ]),
+  }),
+  'job-board': Object.freeze({
+    releaseDirectory: 'release-job-board',
+    builderArguments: Object.freeze([
+      '-c.appId=com.antigravity.jobboard',
+      '-c.productName=Job Board',
+      '-c.directories.output=release-job-board',
+      '-c.extraMetadata.name=job-board',
+      '-c.extraMetadata.productName=Job Board',
+      '-c.extraMetadata.appRole=job-board',
+      '-c.mac.extendInfo.NSAppleEventsUsageDescription=Read the official job postings opened in Google Chrome.',
+    ]),
+  }),
+});
+
+/** The variant named by APP_VARIANT (default: the existing Infinite Canvas app). */
+export function appVariant(name = process.env.APP_VARIANT) {
+  const key = typeof name === 'string' && name.trim() ? name.trim() : 'canvas';
+  const variant = APP_VARIANTS[key];
+  if (!variant) throw new Error(`Unknown APP_VARIANT "${key}". Use one of: ${Object.keys(APP_VARIANTS).join(', ')}.`);
+  return { name: key, ...variant };
+}
 
 function commandOutput(result) {
   return [result?.stdout, result?.stderr]
@@ -459,40 +509,40 @@ export function electronBuilderInvocation(projectDir, {
   return { command: process.execPath, args: [builderCli] };
 }
 
-function packageApplication(projectDir) {
+function packageApplication(projectDir, variant = appVariant()) {
   const { command, args } = electronBuilderInvocation(projectDir);
-  runOrThrow(command, args, { cwd: projectDir });
+  runOrThrow(command, [...args, ...variant.builderArguments], { cwd: projectDir });
 }
 
 export function usesMacIntegrityGate(platform = process.platform) {
   return platform === 'darwin';
 }
 
-export function buildMacApplication(projectDir = process.cwd()) {
+export function buildMacApplication(projectDir = process.cwd(), variant = appVariant()) {
   const { identity } = readConfiguredMacSigningConfig(projectDir);
   assertMacSigningPrerequisites({ identity });
 
   compileApplication(projectDir);
-  const releaseDir = path.join(projectDir, RELEASE_DIRECTORY);
+  const releaseDir = path.join(projectDir, variant.releaseDirectory);
   const before = snapshotMacApplications(releaseDir);
-  packageApplication(projectDir);
+  packageApplication(projectDir, variant);
 
   const apps = findCurrentMacApplications(releaseDir, before);
   signMacApplications({ apps, identity });
   return verifyMacApplications({ apps, identity });
 }
 
-export function buildApplication(projectDir = process.cwd(), platform = process.platform) {
+export function buildApplication(projectDir = process.cwd(), platform = process.platform, variant = appVariant()) {
   return withPackagingLock(projectDir, () => {
   // Preserve the project's generic electron-builder behavior on non-macOS
   // hosts. A macOS signature cannot be inspected there, so do not pretend to
   // offer the Darwin integrity guarantee or invoke codesign at all.
   if (!usesMacIntegrityGate(platform)) {
     compileApplication(projectDir);
-    packageApplication(projectDir);
+    packageApplication(projectDir, variant);
     return [];
   }
-  return buildMacApplication(projectDir);
+  return buildMacApplication(projectDir, variant);
   });
 }
 

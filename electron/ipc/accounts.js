@@ -2,6 +2,7 @@
  * Accounts IPC handlers — platform login, session management.
  * Opens visible browser windows for login and checks cookie health.
  */
+import { appHas } from '../appRole.js';
 import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import {
@@ -796,10 +797,21 @@ function finishPlatformVerification(platformId, notify) {
   }
 }
 
+// Each app checks only the logins it uses: marketplaces in Infinite Canvas,
+// job sites in Job Search (src/utils/appRoleRules.js). With no role named
+// (tests, an unpackaged run) both are checked, as before the apps were split.
+function startupVerifyPlatformIds() {
+  return {
+    sellIds: appHas('marketplace') ? getSellMonitorPlatforms().map(platform => platform.id) : [],
+    jobIds: appHas('jobSearch') ? getJobLoginPlatforms().map(platform => platform.id) : [],
+  };
+}
+
 export function schedulePlatformVerification() {
+  const { sellIds: scheduledSellIds, jobIds: scheduledJobIds } = startupVerifyPlatformIds();
   const platformIds = [
-    ...getSellMonitorPlatforms().map(platform => platform.id),
-    ...getJobLoginPlatforms().map(platform => platform.id),
+    ...scheduledSellIds,
+    ...scheduledJobIds,
   ];
   beginPlatformVerification(platformIds);
   return platformIds;
@@ -838,8 +850,7 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
   // it created the current generation.
   const stealthBefore = getStealthBrowserInfo();
 
-  const sellIds = getSellMonitorPlatforms().map(p => p.id);
-  const jobIds  = getJobLoginPlatforms().map(p => p.id);
+  const { sellIds, jobIds } = startupVerifyPlatformIds();
   const allIds  = [...sellIds, ...jobIds];
 
   // Reuse deferreds created by schedulePlatformVerification() during the 2.5s

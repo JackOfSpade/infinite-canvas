@@ -10,6 +10,7 @@ import { getNonApiAiHandoffLifecycleSnapshot, SAFE_NON_API_AI_CANCEL_CAUSES, SAF
 import { formatTypeAreaUtilization, getApplicationTelemetry } from '../jobApplication.js';
 import { getApplicationSyncTelemetry } from '../applicationSync.js';
 import { formatScrapePaceLine, getManualScraperTelemetry } from '../browser/manualScraper.js';
+import { describeDescriptionRouteIneligible } from '../browser/manualScraper/scrapeTelemetry.js';
 import { LISTING_LIVENESS_COUNT_FIELDS } from '../listingLivenessTelemetry.js';
 import { getListingLivenessProbeCounts } from '../listingLivenessProbe.js';
 import { getJobsSettings, getGlassdoorLocIdCache, hasStoredDiceApiKey } from '../settings.js';
@@ -68,6 +69,8 @@ export function describeCardWalkDescriptionRoute(route) {
     `panel-fallback ${n(route.fromPanel)}/${n(route.panelFallback)} described`,
     `job-page-stop ${code(route.stopReason)}${route.routeOffAtStart === true ? ' (route already off)' : ''}`,
     `source job-page-stop ${code(route.sourceStopReason)}`,
+    ...(n(route.jobPageOtherCountry) > 0 ? [`job pages on Glassdoor's other country site ${n(route.jobPageOtherCountry)} of ${n(route.jobPageEligible)}`] : []),
+    ...(describeDescriptionRouteIneligible(route.jobPageIneligible) ? [`job pages not allowed: ${describeDescriptionRouteIneligible(route.jobPageIneligible)}`] : []),
     ...(n(route.silentMisses) > 0 ? [`job-page-unread ${n(route.silentMisses)} (sent to panel)`] : []),
     ...(route.detailTabFailed === true ? ['job-page tab could not open (sent to panel)'] : []),
     ...(CARD_WALK_PANEL_BLOCK_CODES.has(route.panelBlock) ? [`panel-only-block ${route.panelBlock}`] : []),

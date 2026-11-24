@@ -22,6 +22,7 @@ import {
   resetScrapePace,
   notePaceListPage,
   notePaceDescriptionRoute,
+  notePaceTitleScreen,
   recordManualScraperTelemetry,
   recordIssuedManualQuery,
   clearManualScraperTelemetry,
@@ -1843,6 +1844,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
               logger.info(`[BrowserScraper] ${srcName} q${qi + 1} p${pageNum}: title screen skipped ${screened.skipped.length} of ${jobsToExpand.length} card(s) before opening them`);
             }
             jobsToExpand = screened.open;
+            notePaceTitleScreen(sourceId, { srcName, checked: screened.open.length + screened.skipped.length, skipped: screened.skipped.length });
           }
           sourceAlreadyReadSkipped += alreadyRead.readEarlier + alreadyRead.shownEarlier;
           sourceReadEarlierSkipped += alreadyRead.readEarlier;

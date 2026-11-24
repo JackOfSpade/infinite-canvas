@@ -1,3 +1,4 @@
+import { appSidebarTabs } from '../utils/appRole.js';
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Store, BarChart3, Briefcase, Bug } from 'lucide-react';
 
@@ -12,7 +13,7 @@ import { DashboardTab } from './sidebar/DashboardTab';
  */
 export const Sidebar = React.memo(function Sidebar({ jobCardsCount = 0, sellHubsCount = 0, totalValue = 0, onReportBugClick }) {
   const [collapsed, setCollapsed] = useState(true);
-  const [activeTab, setActiveTab] = useState('jobs');
+  const [activeTab, setActiveTab] = useState(() => (appSidebarTabs().includes('jobs') ? 'jobs' : appSidebarTabs()[0] || 'jobs'));
   const sidebarRef = useRef(null);
 
   const handleTabClick = useCallback((tab) => {
@@ -46,11 +47,13 @@ export const Sidebar = React.memo(function Sidebar({ jobCardsCount = 0, sellHubs
     return () => document.removeEventListener('pointerdown', handleDocumentPointerDown, { capture: true });
   }, [collapsed]);
 
+  // Each app shows only the modules it has (src/utils/appRoleRules.js).
+  const allowedTabs = appSidebarTabs();
   const tabs = [
     { id: 'sell', icon: Store, label: 'Sell' },
     { id: 'jobs', icon: Briefcase, label: 'Jobs' },
     { id: 'dashboard', icon: BarChart3, label: 'Stats' },
-  ];
+  ].filter(tab => allowedTabs.includes(tab.id));
 
   return (
     <div ref={sidebarRef} className="h-full flex shrink-0 overflow-hidden">

@@ -1038,7 +1038,8 @@ export default [
       const run1 = localDate(2026, 11, 18, 20).getTime();
       const entry = at => ({ coverageStartedAt: at, completedAt: at, runId: null });
       const card = (jk, posted) => ({ source: 'indeed', title: jk, company: 'Acme', url: `https://ca.indeed.com/viewjob?jk=${jk}`, posted });
-      const owedCard = card('owedjk', '5 days ago');
+      // Far enough back to be before the fixed run date on whatever day this runs.
+      const owedCard = card('owedjk', '60 days ago');
       const staged = {
         runId: 'r1', collectionStartedAt: run1, collectionCompletedAt: run1 + 1000, completedSourceIds: [],
         participatingSourceIds: ['indeed'], walkCompleteSourceIds: [], locationKey: 'Canada', readContextKey: 'p',
@@ -1058,7 +1059,7 @@ export default [
 
       // Next scan: the posted window starts at run1, after the owed card's date.
       const owedSet = new Set(owedKeys);
-      const page = selectIndeedPageRows([{ ...owedCard }, card('stale', '5 days ago'), card('fresh', 'Today')], run1,
+      const page = selectIndeedPageRows([{ ...owedCard }, card('stale', '60 days ago'), card('fresh', 'Today')], run1,
         null, job => owedSet.has(sourceJobKey(job)));
       assert(page.open.map(job => job.title).join() === 'owedjk,fresh', `the owed card is opened, got ${page.open.map(job => job.title).join()}`);
       assert(filterJobsByAge(page.open, 1).length === 2, 'the age backstop keeps it too');

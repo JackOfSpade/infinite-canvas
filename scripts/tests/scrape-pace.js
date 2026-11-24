@@ -18,6 +18,8 @@ import {
   waitForReady,
 } from '../../electron/ipc/browser/manualScraper.js';
 import { describeRefusedChecks } from '../../electron/ipc/browser/manualScraper/pageReadiness.js';
+import { notePaceListCheckStop, notePaceTitleScreen } from '../../electron/ipc/browser/manualScraper/scrapeTelemetry.js';
+import { readFileSync } from 'node:fs';
 import { buildJobsPipelineSnapshot, renderScrapePaceLines } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { challengeInputVerdict, createChallengeInputProbe, describeChallengeInput } from '../../electron/ipc/browser/challengeInputProbe.js';
 
@@ -453,5 +455,39 @@ export default [{
     assert.match(body, /code:\s+'session-blocked'/u);
     assert.match(body, /severity:\s+'block'/u);
     assert.match(body, /sourceSkipped = true;\s+break;/u);
+  },
+}, {
+  name: 'pace line shows the results-page rate, title-screen skips and the check that stopped Indeed (2026-11-23)',
+  run() {
+    // The 2026-11-23 run: Indeed drew a check on page 33 after 7 min 41 s and
+    // the report had no Indeed pace line at all, so the page rate before the
+    // check could not be read.
+    resetManualScraperTelemetry();
+    resetScrapePace('indeed', { srcName: 'Indeed', queryTotal: 10 });
+    const start = 1_000_000;
+    for (let page = 0; page < 33; page += 1) {
+      notePaceTitleScreen('indeed', { checked: 15, skipped: 12 });
+      notePaceListPage('indeed', { queryIndex: 1, now: start + page * 14_000 });
+    }
+    notePaceListCheckStop('indeed', { now: start + 32 * 14_000 + 13_000 });
+    const pace = paceOf('indeed');
+    assert.equal(pace.listPages, 33);
+    assert.equal(pace.challenges.list, 1);
+    const line = formatScrapePaceLine(pace, start + 600_000);
+    assert.match(line, /^Indeed pace: query 1\/10 · /u);
+    assert.ok(line.includes('33 list pages · one list page per 14s'), line);
+    assert.ok(line.includes('title screen skipped 396 of 495 cards before opening'), line);
+    assert.ok(line.includes('check stopped the walk after 33 list pages in 7m41s (14s per page)'), line);
+    assert.ok(renderScrapePaceLines(getManualScraperTelemetry().pace).some(text => text.includes('Indeed pace')), 'the report prints it');
+    // A source with one page and no title screen prints none of the new parts.
+    resetScrapePace('glassdoor', { srcName: 'Glassdoor' });
+    notePaceListPage('glassdoor', { now: start });
+    const plain = formatScrapePaceLine(paceOf('glassdoor'), start);
+    assert.ok(!/one list page per|title screen skipped|check stopped/u.test(plain), plain);
+    // Indeed's own walk feeds these counters.
+    const indeed = readFileSync(new URL('../../electron/extractors/indeedBrowser.js', import.meta.url), 'utf8');
+    for (const call of ["resetScrapePace('indeed'", "notePaceListPage('indeed'", "notePaceTitleScreen('indeed'", "notePaceListCheckStop('indeed'"]) {
+      assert.ok(indeed.includes(call), call);
+    }
   },
 }];

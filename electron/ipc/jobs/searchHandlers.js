@@ -21,6 +21,8 @@ import { currentJobAnalysisOperationAuthority, jobAnalysisOperationAuthorityRece
 import { validateJobBoardRunExecution } from '../jobBoardRunLease.js';
 import { parsePostedDate } from '../jobDateFilter.js';
 import { normalizeJobPreferencePlan, screenJobRolesByTitle } from '../jobPreferences.js';
+import { createListingStreamEmitter } from './listingStreamEmitter.js';
+import { jobListingStreamRoot } from '../sharedAppData.js';
 import { PAGE_TITLE_SCREEN_SOURCE_IDS, createPageTitleScreen, offTargetQueries, offTargetQueryLogLine, offTargetQueryWarning, suggestQueryRewordings } from './pageTitleScreen.js';
 import { getJobRoleScreenVerdictStore } from '../jobRoleScreenVerdicts.js';
 import { activateRunForResume, clearRunWithResult, collectionCompletedAtForManifest, computeResumeStartPagesByQuery, finishRunWithSavedListings, isJobRunAutomaticRecoveryEligible, isRunCollectionFinishedWithSavedListings, markProviderGathered, markSourceStatus, normalizeJobRunProfileFingerprint, pauseRunForManualResume, readRunState, rebindRunOperationAuthority, recordSourcePage, setStage as setJobRunStage, startRun as startJobRun } from '../jobRunStaging.js';
@@ -1171,6 +1173,48 @@ export function registerSearchHandlers(ctx) {
     // Rows a query returned without a readable description. Such a query has
     // been walked but not fully read, so it is not reported as finished.
     const unreadRowsByQuery = {};
+    // The saved listing stream: each page's listings are written for the Job
+    // Board side as soon as the page is saved, so results do not wait for the
+    // rest of the scrape (listingStreamEmitter.js).
+    const listingStream = createListingStreamEmitter({
+      root: canvasFilePath ? jobListingStreamRoot() : null,
+      streamId: nodeId,
+      runId: activeRunId,
+      location,
+      postedSinceFor,
+      jobsPerPlatform: resolveJobsPerPlatform(normalizedCollectionLimits),
+    });
+    // A status line is for the reader's display only; failing to write one
+    // must never fail the search.
+    const listingStreamStatus = (code, detail) => listingStream.status(code, detail)
+      .catch(error => logger.warn(`[Jobs][${nodeId}] listing stream status ${code} not written: ${error?.message || error}`));
+    await listingStream.runStarted({
+      queries,
+      sourceIds: activeSourceIds,
+      canonicalLocation: location,
+      rawLocation: typeof rawLocation === 'string' ? rawLocation : '',
+      countryScope: typeof countryScope === 'string' ? countryScope : '',
+      searchWindow: activeSearchWindow,
+      sourceSearchWindows: activeSourceSearchWindows || null,
+      careerSnapshotId: careerSnapshotId || null,
+      jobPreferences: typeof jobPreferences === 'string' ? jobPreferences : '',
+      jobPreferencePlan: jobPreferencePlan || null,
+      resumed: resume === true,
+    });
+    // A resumed run sends the listings its earlier attempt saved. A reader that
+    // already has them sees the same identities again, which is harmless; one
+    // that never got them (the earlier attempt predates the stream, or its
+    // write did not land) gets them now.
+    if (recoveredStagedRows.length > 0) {
+      const recoveredBySource = new Map();
+      for (const row of recoveredStagedRows) {
+        if (!row?.job || !row.sourceId) continue;
+        const rows = recoveredBySource.get(row.sourceId) || [];
+        rows.push({ ...row.job, source: row.sourceId });
+        recoveredBySource.set(row.sourceId, rows);
+      }
+      for (const [sourceId, jobs] of recoveredBySource) await listingStream.page({ sourceId, jobs });
+    }
     const stageOnPage = async ({ sourceId, query, queryIndex = null, page, jobs, terminal = false }) => {
       if (Number.isSafeInteger(queryIndex) && Array.isArray(jobs)) {
         const unread = jobs.filter(job => job?.descriptionDeferredReason || !hasResolvedJobDescription(job)).length;
@@ -1190,6 +1234,8 @@ export function registerSearchHandlers(ctx) {
       // Unsaved canvases deliberately have no sidecar, so recordSourcePage is
       // a no-op there. A saved canvas must never continue past a failed write.
       if (canvasFilePath && saved !== true) throw new Error(`Could not durably checkpoint ${sourceId} query page ${page}.`);
+      // Saved first, then sent: a listing the reader has is always one a resume can also recover.
+      await listingStream.page({ sourceId, query, queryIndex, queryTotal: queries.length, page, jobs });
     };
 
     // Close the interval after the searching-stage compare-and-set and before
@@ -1429,6 +1475,7 @@ export function registerSearchHandlers(ctx) {
       );
       await assertSearchCurrent();
       if (marked !== true) throw new Error(`Could not durably record ${sourceId} completion.`);
+      await listingStreamStatus(blocked ? 'source-stopped' : 'source-finished', { sourceId });
     };
 
     const runBrowserSourcesInOrder = async () => {
@@ -2055,6 +2102,11 @@ export function registerSearchHandlers(ctx) {
         );
         await assertSearchCurrent();
         if (marked !== true) return searchSupersededResult();
+        await listingStreamStatus(status === 'error' || retryablePartialProviderFailure ? 'source-stopped' : 'source-finished', {
+          sourceId,
+          // A fixed code only; the wording a person reads belongs to the reader.
+          reason: (effectiveWarnings || []).map(warning => warning?.code).find(code => typeof code === 'string' && code) || null,
+        });
       }
     }
 
@@ -2360,6 +2412,7 @@ export function registerSearchHandlers(ctx) {
         });
         await assertSearchCurrent();
         if (saved !== true) return searchSupersededResult();
+        await listingStream.update(diceEnrichedRows);
       }
     }
 
@@ -2654,6 +2707,7 @@ export function registerSearchHandlers(ctx) {
         });
         await assertSearchCurrent();
         if (saved !== true) return searchSupersededResult();
+        await listingStream.update(lkEnrichedRows);
       }
     }
 
@@ -3291,6 +3345,8 @@ export function registerSearchHandlers(ctx) {
         });
         await assertSearchCurrent();
         if (saved !== true) return searchSupersededResult();
+        // Whatever changed on these rows since their page was read.
+        await listingStream.update(jobs);
       }
     }
     // This is the exact collection boundary: every selected platform has
@@ -3483,6 +3539,10 @@ export function registerSearchHandlers(ctx) {
       searchSuperseded = true;
       return searchSupersededResult();
     }
+    await listingStreamStatus(finalGatingSourceIds.size > 0 ? 'run-paused' : 'run-finished', {
+      sent: listingStream.counts(),
+      unfinishedSourceIds: [...finalGatingSourceIds],
+    });
     return { jobs: kept,
       descriptionRecoveryJobs,
       descriptionRecoveryState,

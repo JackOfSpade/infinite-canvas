@@ -14,9 +14,40 @@
 # editing the launcher. ${0:A} resolves symlinks to an absolute path; each
 # :h strips one trailing path component.
 PROJECT_DIR="${0:A:h:h}"
-RELEASE_APP="$PROJECT_DIR/release/mac-arm64/infinite-canvas.app"
-# release/ is gitignored, so keeping launcher state under it is safe.
-STATE_DIR="$PROJECT_DIR/release/.launcher"
+# One codebase builds three apps (src/utils/appRoleRules.js). APP_VARIANT picks
+# which one this launch is for; the thin wrappers launch-job-search.command and
+# launch-job-board.command set it. Unset means the Infinite Canvas app itself.
+case "${APP_VARIANT:-canvas}" in
+  canvas)
+    APP_VARIANT="canvas"
+    APP_DISPLAY_NAME="Infinite Canvas"
+    RELEASE_ROOT="$PROJECT_DIR/release"
+    APP_BUNDLE_NAME="infinite-canvas"
+    APP_BUNDLE_ID="com.antigravity.infinitecanvas"
+    BUILD_SCRIPT="build"
+    ;;
+  job-search)
+    APP_DISPLAY_NAME="Job Search"
+    RELEASE_ROOT="$PROJECT_DIR/release-job-search"
+    APP_BUNDLE_NAME="Job Search"
+    APP_BUNDLE_ID="com.antigravity.jobsearch"
+    BUILD_SCRIPT="build:job-search"
+    ;;
+  job-board)
+    APP_DISPLAY_NAME="Job Board"
+    RELEASE_ROOT="$PROJECT_DIR/release-job-board"
+    APP_BUNDLE_NAME="Job Board"
+    APP_BUNDLE_ID="com.antigravity.jobboard"
+    BUILD_SCRIPT="build:job-board"
+    ;;
+  *)
+    echo "Unknown APP_VARIANT '$APP_VARIANT'. Use canvas, job-search or job-board." >&2
+    exit 1
+    ;;
+esac
+RELEASE_APP="$RELEASE_ROOT/mac-arm64/$APP_BUNDLE_NAME.app"
+# The release folders are gitignored, so keeping launcher state under them is safe.
+STATE_DIR="$RELEASE_ROOT/.launcher"
 # Written by the build: the project files it actually read (vite.config.js).
 BUILD_INPUTS="$PROJECT_DIR/dist-electron/build-inputs.json"
 STAMP="$STATE_DIR/last-build-ok"
@@ -32,10 +63,9 @@ stale_pid=""
 STALE_QUIT_TIMEOUT_SECONDS=120
 STALE_QUIT_POLL_SECONDS=0.5
 STALE_QUIT_REQUEST_TIMEOUT_SECONDS=5
-APP_BUNDLE_ID="com.antigravity.infinitecanvas"
 # Matches only the app's MAIN process: the helpers live under
 # Contents/Frameworks/... so they can't collide with this path fragment.
-APP_PROC_PATTERN="infinite-canvas.app/Contents/MacOS/infinite-canvas"
+APP_PROC_PATTERN="$APP_BUNDLE_NAME.app/Contents/MacOS/$APP_BUNDLE_NAME"
 
 # ---- functions (defined up front; execution starts after this block) ----
 
@@ -46,7 +76,7 @@ notify() {
   local msg="$1"
   msg="${msg//\\/\\\\}"
   msg="${msg//\"/\\\"}"
-  osascript -e "display notification \"$msg\" with title \"Infinite Canvas\" sound name \"$2\"" >/dev/null 2>&1
+  osascript -e "display notification \"$msg\" with title \"$APP_DISPLAY_NAME\" sound name \"$2\"" >/dev/null 2>&1
 }
 
 # Prints a sha256 over the files Infinite Canvas is built from, paths and bytes.
@@ -102,7 +132,7 @@ source_manifest() {
 # packaging step did.
 verify_app() {
   [[ -d "$RELEASE_APP" ]] || return 1
-  [[ -x "$RELEASE_APP/Contents/MacOS/infinite-canvas" ]] || return 1
+  [[ -x "$RELEASE_APP/Contents/MacOS/$APP_BUNDLE_NAME" ]] || return 1
   codesign --verify --deep --strict "$RELEASE_APP" >/dev/null 2>&1
 }
 
@@ -216,7 +246,7 @@ quit_stale_prebuild_instance() {
   [[ -n "$stale_pid" ]] || return 0
   kill -0 "$stale_pid" 2>/dev/null || return 0
 
-  echo "> Rebuild verified - asking the previous Infinite Canvas instance (pid $stale_pid) to quit and save..."
+  echo "> Rebuild verified - asking the previous $APP_DISPLAY_NAME instance (pid $stale_pid) to quit and save..."
   # Bound the Apple event itself too. The renderer may need time to complete
   # its save handshake, but an unresponsive app must not leave this launcher
   # blocked indefinitely before the PID wait below can report a clear failure.
@@ -300,12 +330,12 @@ if [[ "$need_build" -eq 1 ]]; then
 
   echo "> Source changed - building (this can take a few minutes)..."
   start_ticker
-  npm run build 2>&1 | tee "$LOG"
+  npm run "$BUILD_SCRIPT" 2>&1 | tee "$LOG"
   build_status=${pipestatus[1]}   # zsh pipestatus is 1-indexed, unlike bash's PIPESTATUS[0]
   stop_ticker
 
   if [[ "$build_status" -ne 0 ]]; then
-    fail "Build failed (npm run build exited $build_status)."
+    fail "Build failed (npm run $BUILD_SCRIPT exited $build_status)."
   fi
 
   # A source edit made while packaging was running may not be in the bundle.
@@ -321,7 +351,7 @@ if [[ "$need_build" -eq 1 ]]; then
   # Only record success after a clean build exit - this is what makes the
   # sentinel trustworthy for the staleness check above.
   print -r -- "$built_manifest" > "$STAMP"
-  notify "Infinite Canvas rebuilt." "Glass"
+  notify "$APP_DISPLAY_NAME rebuilt." "Glass"
 else
   echo "> Up to date - launching."
 fi
@@ -336,7 +366,7 @@ fi
 # final signature gate succeeded. On an unchanged launch stale_pid is empty,
 # so an already-running current app is simply activated as before.
 if ! quit_stale_prebuild_instance; then
-  fail "The previous Infinite Canvas instance (pid $stale_pid) did not quit within ${STALE_QUIT_TIMEOUT_SECONDS}s. It may be waiting for a save confirmation. Finish or cancel that save, quit Infinite Canvas with Cmd-Q, then launch again. The rebuilt app was not opened."
+  fail "The previous $APP_DISPLAY_NAME instance (pid $stale_pid) did not quit within ${STALE_QUIT_TIMEOUT_SECONDS}s. It may be waiting for a save confirmation. Finish or cancel that save, quit Infinite Canvas with Cmd-Q, then launch again. The rebuilt app was not opened."
 fi
 
 open "$RELEASE_APP" || fail "open(1) refused to launch the app."
@@ -358,4 +388,4 @@ if [[ "$launched" -ne 1 ]]; then
   fail "App did not start within 10 seconds of open (LaunchServices accepted the request but the process never appeared)."
 fi
 
-echo "> Infinite Canvas is running."
+echo "> $APP_DISPLAY_NAME is running."

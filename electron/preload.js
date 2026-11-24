@@ -212,7 +212,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // are built, so compensation context is still available on the full jobs.
   researchJobCompensation: (args) => ipcRenderer.invoke('research-job-compensation', args),
   settleBoardResearch: (args) => ipcRenderer.invoke('settle-board-research', args),
+  // Which of the three apps this window belongs to (src/utils/appRoleRules.js).
+  appRole: ((typeof process !== 'undefined' && Array.isArray(process.argv) ? process.argv : [])
+    .find(argument => typeof argument === 'string' && argument.startsWith('--app-role=')) || '').slice('--app-role='.length) || 'all',
   scoreBoardPreferenceJobs: (args) => ipcRenderer.invoke('score-board-preference-jobs', args),
+  // A Job Board taking listings from the saved streams it reads.
+  boardIntakeStep: (args) => ipcRenderer.invoke('board-intake-step', args),
+  boardIntakeState: (args) => ipcRenderer.invoke('board-intake-state', args),
+  boardIntakeForget: (args) => ipcRenderer.invoke('board-intake-forget', args),
+  recordBoardShownListings: (args) => ipcRenderer.invoke('record-board-shown-listings', args),
 
   // ── Non-API AI handoff ─────────────────────────────────────────────────
   // The main process emits a fully materialized prompt here when a job task

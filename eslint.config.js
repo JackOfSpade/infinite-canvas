@@ -12,7 +12,9 @@ export default defineConfig([
     '!.test-artifacts/blackbox-run/',     // retain the maintained root harness scripts
     '.test-artifacts/blackbox-run/*/',     // generated runs; root harness scripts stay linted
     'tmp', 'temp', 'scratch',             // disposable local output, not maintained source
-    'release',                            // electron-builder output (gitignored) — never lint built app copies
+    'release',
+    'release-job-search',
+    'release-job-board',                            // electron-builder output (gitignored) — never lint built app copies
     'Job Application Design System/build/vendor',  // third-party (pdf-lib.min.js)
     'vendor',                             // patched third-party packages (see vendor/deepmerge/README.md)
     'Job Application Design System/_ds_bundle.js', // generated dual-mode bundle (see its @ds-bundle header) — not app-consumed, never hand-edited

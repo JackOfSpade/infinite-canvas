@@ -130,6 +130,10 @@ export function JobSearchDoneState({
   // card remains the source editor; every search, re-score and re-scan of
   // these results runs only from that Board, so the card offers none.
   managedByJobBoard = false,
+  // Whether a Job Board is connected. It only reads this card's listings.
+  connectedToJobBoard = false,
+  // Start another search from this card. Null while the card is busy or locked.
+  onSearchAgain = null,
   // A disconnected Board can retain a durable recovery plan while it finishes
   // cancellation or rollback. It owns launch actions, but is deliberately not
   // presented as a live connection.
@@ -268,6 +272,8 @@ export function JobSearchDoneState({
     ? `${jobsLabel(count, 'job')} matched your preferences`
     : noNewResults
       ? jobsLabel(count, 'new job', 'new jobs')
+      : collectionOnly && !testMode
+        ? jobsLabel(count, 'listing sent', 'listings sent')
       : skippedAi
         ? jobsLabel(count, 'job collected', 'jobs collected')
         : jobsLabel(count, 'job scored', 'jobs scored');
@@ -389,7 +395,7 @@ export function JobSearchDoneState({
 
       {/* The result has only one Board destination line. Recovery replaces,
           rather than duplicates, ordinary connected/disconnected guidance. */}
-      {(count > 0 || managedByJobBoard || boardRecoveryPending) && (
+      {(count > 0 || managedByJobBoard || connectedToJobBoard || boardRecoveryPending) && (
         <div className="flex items-start gap-1.5 mt-1 px-1 text-left w-full">
           <LayoutGrid size={11} className="text-indigo-300/60 shrink-0 mt-0.5" />
           <p className="text-indigo-200/60 text-[9px] leading-snug">
@@ -397,9 +403,21 @@ export function JobSearchDoneState({
               ? 'Job Board recovery is in progress. Finish or cancel it on the Board to re-enable search actions.'
               : managedByJobBoard
                 ? 'Connected to Job Board · Results are ready to combine there.'
-                : 'Connect a Job Board to review these results.'}
+                : connectedToJobBoard
+                  ? 'The connected Job Board scores these listings and shows them as they arrive.'
+                  : 'Connect a Job Board to score and review these listings.'}
           </p>
         </div>
+      )}
+      {onSearchAgain && !careerCleared && (
+        <button
+          type="button"
+          onClick={onSearchAgain}
+          disabled={locked}
+          className="nodrag mt-2 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 py-1.5 text-[11px] text-emerald-100 hover:bg-emerald-400/20 disabled:opacity-40"
+        >
+          Search for new jobs
+        </button>
       )}
 
       {reanalysisNotice && (

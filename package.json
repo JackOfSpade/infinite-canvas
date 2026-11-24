@@ -13,6 +13,8 @@
     "dev": "vite",
     "build:compile": "vite build",
     "build": "node scripts/build-macos.mjs",
+    "build:job-search": "APP_VARIANT=job-search node scripts/build-macos.mjs",
+    "build:job-board": "APP_VARIANT=job-board node scripts/build-macos.mjs",
     "lint": "eslint .",
     "test:unit": "node --import ./scripts/test-stubs/register.mjs scripts/test-runner.js",
     "test:resume-pdf": "npm --prefix 'Job Application Design System/build' test",

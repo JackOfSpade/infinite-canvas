@@ -27,6 +27,7 @@ import { JOB_BOARD_TELEMETRY_CAP, RECENT_INDEED_LOGIN_MS } from './jobs/state.js
 export { linkedInSameIpRetryDecision, __resetJobsTelemetryForTests } from './jobs/state.js';
 import { registerCoreHandlers } from './jobs/coreHandlers.js';
 import { registerBoardHandlers } from './jobs/boardHandlers.js';
+import { registerBoardIntakeHandlers } from './jobs/boardIntakeHandlers.js';
 import { registerSearchHandlers } from './jobs/searchHandlers.js';
 import { registerRecoveryHandlers } from './jobs/recoveryHandlers.js';
 export { applyGoogleApplyLinkRetryResults } from './jobs/recoveryHandlers.js';
@@ -608,6 +609,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
   const ctx = { handleSafe, ipcMain, resolveRequiredPinnedCareerInputForHandler, runHttpSources, beforeSearchStageWrite, afterSearchProviderResult, retryIndeedDescriptions, retryGoogleApplyLinks, settleScrapedRowsForScoring, compileCareerSnapshot, dependencies, resolvePinnedScoringInputForHandler, beforeScoreSideEffect, runScoreBatch, reuseStoreDeps, runGapReview, runBoardTaxonomy, resolveBoardCompensationCareerInputs, callListingLiveness, listingLivenessCalibrationStore, settleBoardClosedRowsForHandler };
   registerCoreHandlers(ctx);
   registerBoardHandlers(ctx);
+  registerBoardIntakeHandlers(ctx);
 
   registerSearchHandlers(ctx);
 

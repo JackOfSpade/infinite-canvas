@@ -2,6 +2,7 @@ import electronPkg from 'electron';
 const { app, BrowserWindow, Menu, protocol, nativeImage } = electronPkg;
 import path from 'path';
 import { registerFilesystemHandlers } from './ipc/filesystem.js';
+import { appHas, appRole } from './appRole.js';
 import { resolveMissingPreviewPath } from './ipc/missingPreviewRelink.js';
 import {
   assertPrivateLocalFileReservation,
@@ -676,6 +677,8 @@ function createWindow(initSpec = { mode: 'auto' }) {
     skipTaskbar: isBackgroundE2E,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
+      // Tells the window which of the three apps it belongs to.
+      additionalArguments: [`--app-role=${appRole()}`],
       nodeIntegration: false,
       contextIsolation: true,
       // Never throttle: this app runs long renderer-driven work (job pipelines,
@@ -1330,7 +1333,8 @@ if (!gotTheLock) {
     registerJobsHandlers();
     registerJobApplicationHandlers();
     registerLocalAiApplicationHandlers();
-    try {
+    // Application bundles belong to the Job Board app.
+    if (appHas('jobBoard')) try {
       const claudeRunnerRoot = path.join(app.getPath('userData'), 'claude-application-runner');
       let claudeRunnerNotify = () => {};
       claudeApplicationRunner = createClaudeApplicationRunner({
@@ -1357,7 +1361,7 @@ if (!gotTheLock) {
     }
     registerApplicationGenerationGateHandlers();
     registerApplicationBundleWatchHandlers();
-    startApplicationSyncServer().catch((err) => logger.warn(`[main] Application sync service failed to start: ${err?.message || err}`));
+    if (appHas('jobBoard')) startApplicationSyncServer().catch((err) => logger.warn(`[main] Application sync service failed to start: ${err?.message || err}`));
     registerMarketplaceHandlers();
     registerAccountsHandlers();
     registerBugReportHandlers();
@@ -1417,7 +1421,9 @@ if (!gotTheLock) {
     setupApplicationMenu();
     createWindow(initialCanvasWindowSpec(process.argv));
 
-    if (process.env.INFINITE_CANVAS_E2E !== '1') {
+    // Logins are checked only by an app that uses them: job sites by Job
+    // Search, marketplaces by Infinite Canvas. The Job Board signs in nowhere.
+    if (process.env.INFINITE_CANVAS_E2E !== '1' && (appHas('jobSearch') || appHas('marketplace'))) {
       // Mark every platform pending before the delayed worker pool begins. The
       // renderer can mount and show accurate "Checking connections" state, and
       // auth-gated actions can await their selected platform instead of reading

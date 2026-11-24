@@ -17,8 +17,8 @@
  *   extractor rewrites the saved link — drew "Just a moment..." with block text,
  *   and the app's own run on www. got a 403 "Security | Glassdoor" with
  *   hard-block text on its first page. So the route opens the address as
- *   Glassdoor linked it (row.glassdoorJobPageUrl, unpinned, same country
- *   domain only) with the list page as Referer; rows without it fall back to
+ *   Glassdoor linked it (row.glassdoorJobPageUrl, unpinned; any Glassdoor
+ *   country site since 2026-11-23) with the list page as Referer; rows without it fall back to
  *   the saved url pinned to the list host. The field is scrape-only and is
  *   stripped before rows leave the scraper (withoutGlassdoorJobPageUrl).
  *
@@ -75,7 +75,7 @@ export const GLASSDOOR_JOB_PAGE_MAX_ZERO_READ_BATCHES = 2;
 /** The source-run ladder state kept on walkPlan.detailPacing. */
 export function glassdoorJobPageState(detailPacing) {
   const pacing = detailPacing && typeof detailPacing === 'object' ? detailPacing : {};
-  pacing.glassdoorJobPage ||= { rateLimits: 0, off: false, stopReason: 'none', fromJobPage: 0, fromPanel: 0, zeroReadBatches: 0, lastBatchFromJobPage: null, lastBatchReadNothing: false };
+  pacing.glassdoorJobPage ||= { rateLimits: 0, off: false, stopReason: 'none', fromJobPage: 0, fromPanel: 0, zeroReadBatches: 0, lastBatchFromJobPage: null, lastBatchReadNothing: false, everRead: false, ineligible: {} };
   return pacing.glassdoorJobPage;
 }
 
@@ -269,9 +269,32 @@ export function glassdoorJobPageTarget(job, listUrl) {
   return asLinked || pinGlassdoorDetailUrlToListHost(job?.url || '', listUrl);
 }
 
-/** True when a row may be read from its own job page (same-country https /job-listing/). */
+/** True when a row may be read from its own job page (https /job-listing/ on a Glassdoor site). */
 export function glassdoorJobPageEligible(job, listUrl) {
   return descriptionNavigationDecision('glassdoor', glassdoorJobPageTarget(job, listUrl), { listUrl }).allowed;
+}
+
+/** Fixed codes for why a row's job page may not be opened, for the report. */
+export const GLASSDOOR_JOB_PAGE_INELIGIBLE_CODES = Object.freeze(['not-job-listing', 'not-https', 'bad-url', 'list-unknown']);
+
+const INELIGIBLE_CODE_BY_REASON = {
+  'glassdoor-detail-other-host': 'not-job-listing',
+  'glassdoor-detail-not-job-listing': 'not-job-listing',
+  'glassdoor-detail-not-https': 'not-https',
+  'malformed-detail-url': 'bad-url',
+  'glassdoor-list-host-unknown': 'list-unknown',
+};
+
+/** The fixed code for why this row's job page may not be opened, or null when it may. */
+export function glassdoorJobPageIneligibleCode(job, listUrl) {
+  const decision = descriptionNavigationDecision('glassdoor', glassdoorJobPageTarget(job, listUrl), { listUrl });
+  if (decision.allowed) return null;
+  return INELIGIBLE_CODE_BY_REASON[decision.reason] || 'bad-url';
+}
+
+/** True when the row's job page is on another Glassdoor country site than the list page. */
+export function glassdoorJobPageIsOtherCountry(job, listUrl) {
+  return descriptionNavigationDecision('glassdoor', glassdoorJobPageTarget(job, listUrl), { listUrl }).reason === 'glassdoor-other-country-job-listing';
 }
 
 /**
@@ -317,12 +340,14 @@ function combinePanelResults(a, b) {
  * out the cooldown instead (the source-wide block does that). "Read nothing"
  * means the route had rows it could open and neither read nor closed any of
  * them; a batch with no openable rows, or one whose job pages found the
- * listings closed, says nothing against a healthy route.
+ * listings closed, says nothing against a healthy route. A route that has not
+ * read or closed a single row all source run is not known to be reading, so
+ * its panel block is source-wide too (state.everRead).
  */
 export function glassdoorPanelBlockIsSourceWide(detailPacing) {
   const state = detailPacing?.glassdoorJobPage;
   if (!state) return false;
-  return !!state.off || state.lastBatchReadNothing === true;
+  return !!state.off || state.lastBatchReadNothing === true || state.everRead !== true;
 }
 
 /**
@@ -356,7 +381,19 @@ export async function expandGlassdoorDescriptions(page, jobs, sourceId, overlayB
   const physicalIndexFor = index => (Number.isFinite(Number(physicalIndexes[index])) ? Number(physicalIndexes[index]) : index + 1);
 
   const routeOffAtStart = !!state.off;
-  const eligible = routeOffAtStart ? [] : rows.map((job, index) => (glassdoorJobPageEligible(job, listUrl) ? index : -1)).filter(i => i >= 0);
+  const eligible = [];
+  // Why the other rows could not use their job page, by fixed code.
+  const ineligible = {};
+  if (!routeOffAtStart) {
+    rows.forEach((job, index) => {
+      const code = glassdoorJobPageIneligibleCode(job, listUrl);
+      if (code == null) eligible.push(index);
+      else ineligible[code] = count(ineligible[code]) + 1;
+    });
+  }
+  // Rows whose job page is on another Glassdoor country site than the list
+  // (allowed since 2026-11-23, not yet measured live).
+  const otherCountry = eligible.filter(index => glassdoorJobPageIsOtherCountry(rows[index], listUrl)).length;
   // 'done' rows are final: a description came from the job page, or the job
   // page reported the listing closed (closed-listing rules already applied).
   const done = new Array(rows.length).fill(false);
@@ -450,11 +487,24 @@ export async function expandGlassdoorDescriptions(page, jobs, sourceId, overlayB
   // The route was on, had rows to open, and neither read nor closed any of
   // them. A 429 or a challenge counts too: then no route is reading.
   state.lastBatchReadNothing = !routeOffAtStart && eligible.length > 0 && fromJobPage === 0 && jobPageClosed === 0;
+  // Whether a job page has read or closed any row in this source run. Until
+  // one has, the route is not known to be reading, so a panel block stops
+  // every description (glassdoorPanelBlockIsSourceWide). 2026-11-23: no card
+  // had a job page the route was then allowed to open, so it was "on" with
+  // nothing to open all run; one HTTP 502 from the panel then let the walk
+  // pass 18 pages in 8 minutes with 343 listings never requested.
+  if (fromJobPage > 0 || jobPageClosed > 0) state.everRead = true;
+  for (const [code, n] of Object.entries(ineligible)) {
+    state.ineligible ||= {};
+    state.ineligible[code] = count(state.ineligible[code]) + n;
+  }
   noteGlassdoorJobPageBatchReads(state, {
     eligible: eligible.length, read: fromJobPage, closed: jobPageClosed, stopReason: batchStopReason,
   });
   const route = {
     jobPageEligible: eligible.length,
+    jobPageIneligible: ineligible,
+    jobPageOtherCountry: otherCountry,
     jobPageOpened: count(navResult?.jobPageRoute?.opened),
     silentMisses: count(navResult?.jobPageRoute?.silentMisses),
     detailTabFailed: navResult?.jobPageRoute?.detailTabFailed === true,
@@ -468,7 +518,7 @@ export async function expandGlassdoorDescriptions(page, jobs, sourceId, overlayB
     panelBlock: panelBlockOutcome,
   };
   deps.record?.(route);
-  deps.notePace?.({ fromJobPage: state.fromJobPage, fromPanel: state.fromPanel, stopReason: state.stopReason || 'none' });
+  deps.notePace?.({ fromJobPage: state.fromJobPage, fromPanel: state.fromPanel, stopReason: state.stopReason || 'none', ineligible: state.ineligible || {} });
 
   // A row the job page retired is null; the panel never drops rows.
   return {

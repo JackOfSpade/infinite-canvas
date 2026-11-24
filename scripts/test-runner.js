@@ -217,6 +217,10 @@ import validator_correction_details from './tests/validator-correction-details.j
 import job_analysis_snapshot_size from './tests/job-analysis-snapshot-size.js';
 import job_search_clear_ui from './tests/job-search-clear-ui.js';
 import job_board_combine_receipt from './tests/job-board-combine-receipt.js';
+import job_listing_stream from './tests/job-listing-stream.js';
+import job_board_intake from './tests/job-board-intake.js';
+import job_board_intake_cache from './tests/job-board-intake-cache.js';
+import job_board_stream_intake from './tests/job-board-stream-intake.js';
 import job_board_recovery_retry from './tests/job-board-recovery-retry.js';
 import job_api_probe from './tests/job-api-probe.js';
 import application_pdf_reconcile from './tests/application-pdf-reconcile.js';
@@ -509,6 +513,10 @@ const testGroups = [
   ['job-analysis-snapshot-size.js', job_analysis_snapshot_size],
   ['job-search-clear-ui.js', job_search_clear_ui],
   ['job-board-combine-receipt.js', job_board_combine_receipt],
+  ['job-listing-stream.js', job_listing_stream],
+  ['job-board-intake.js', job_board_intake],
+  ['job-board-intake-cache.js', job_board_intake_cache],
+  ['job-board-stream-intake.js', job_board_stream_intake],
   ['job-board-recovery-retry.js', job_board_recovery_retry],
   ['job-api-probe.js', job_api_probe],
   ['application-pdf-reconcile.js', application_pdf_reconcile],

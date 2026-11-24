@@ -139,7 +139,37 @@ export function resetScrapePace(sourceId, meta = {}) {
 }
 
 export function notePaceListPage(sourceId, meta = {}) {
-  return updateScrapePace(sourceId, meta, pace => { pace.listPages += 1; });
+  return updateScrapePace(sourceId, meta, pace => {
+    pace.listPages += 1;
+    const at = Number(meta.now) || Date.now();
+    pace.firstListPageAt ||= at;
+    pace.lastListPageAt = at;
+  });
+}
+
+// Cards the per-page title screen removed before they were opened. Skipped
+// cards shorten the time spent on each results page, so the next results page
+// is requested sooner; the pace line prints both so a check can be read
+// against the page rate that preceded it.
+export function notePaceTitleScreen(sourceId, meta = {}) {
+  return updateScrapePace(sourceId, meta, pace => {
+    pace.titleScreenChecked = (Number(pace.titleScreenChecked) || 0) + Math.max(0, Number(meta.checked) || 0);
+    pace.titleScreenSkipped = (Number(pace.titleScreenSkipped) || 0) + Math.max(0, Number(meta.skipped) || 0);
+  });
+}
+
+// A check that ended a source's walk on a results page (Indeed stops there for
+// a person to solve). Keeps how many results pages had been read and how long
+// they took, so the page rate at the moment of the check survives the run.
+export function notePaceListCheckStop(sourceId, meta = {}) {
+  return updateScrapePace(sourceId, meta, pace => {
+    const at = Number(meta.now) || Date.now();
+    pace.challenges.list = (Number(pace.challenges.list) || 0) + 1;
+    pace.listCheckStop = {
+      listPages: Math.max(0, Number(pace.listPages) || 0),
+      elapsedMs: pace.firstListPageAt ? Math.max(0, at - Number(pace.firstListPageAt)) : 0,
+    };
+  });
 }
 
 export function notePaceDetailOpened(sourceId, meta = {}) {
@@ -155,12 +185,38 @@ export function notePaceDetailOpened(sourceId, meta = {}) {
 // descriptions read from job pages vs the panel fallback, and the fixed code
 // for why the job-page route stopped. Counts and codes only.
 const DESCRIPTION_ROUTE_STOP_CODES = new Set(['none', 'unreadable', 'no-reads', '429-first', '429-second', 'challenge']);
+// Why rows could not use their own job page: fixed codes and counts only.
+const DESCRIPTION_ROUTE_INELIGIBLE_LABELS = Object.freeze({
+  'not-job-listing': 'not a Glassdoor job page link',
+  'not-https': 'not an https link',
+  'bad-url': 'unreadable link',
+  'list-unknown': 'search page address unknown',
+});
+
+export function descriptionRouteIneligibleCounts(value) {
+  const out = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return out;
+  for (const code of Object.keys(DESCRIPTION_ROUTE_INELIGIBLE_LABELS)) {
+    const n = Math.max(0, Math.floor(Number(value[code]) || 0));
+    if (n > 0) out[code] = n;
+  }
+  return out;
+}
+
+/** "12 not a Glassdoor job page link, …" or '' when every row could use its job page. */
+export function describeDescriptionRouteIneligible(value) {
+  return Object.entries(descriptionRouteIneligibleCounts(value))
+    .map(([code, n]) => `${n} ${DESCRIPTION_ROUTE_INELIGIBLE_LABELS[code]}`)
+    .join(', ');
+}
+
 export function notePaceDescriptionRoute(sourceId, meta = {}) {
   return updateScrapePace(sourceId, meta, pace => {
     pace.descriptionRoute = {
       fromJobPage: Math.max(0, Number(meta.fromJobPage) || 0),
       fromPanel: Math.max(0, Number(meta.fromPanel) || 0),
       stopReason: DESCRIPTION_ROUTE_STOP_CODES.has(meta.stopReason) ? meta.stopReason : 'none',
+      ineligible: descriptionRouteIneligibleCounts(meta.ineligible),
     };
   });
 }
@@ -269,6 +325,22 @@ export function formatScrapePaceLine(pace, now = Date.now()) {
     `query ${Number(pace.queryIndex) || 1}${queryTotal > 0 ? `/${queryTotal}` : ''}`,
     `${detailOpened} detail page${detailOpened === 1 ? '' : 's'}`,
     `${listPages} list page${listPages === 1 ? '' : 's'}`,
+    ...(() => {
+      // Average gap between results pages, first read to last read.
+      const span = Number(pace.lastListPageAt) - Number(pace.firstListPageAt);
+      return listPages >= 2 && span > 0 ? [`one list page per ${Math.round(span / (listPages - 1) / 1000)}s`] : [];
+    })(),
+    ...(() => {
+      const checked = Math.max(0, Number(pace.titleScreenChecked) || 0);
+      return checked > 0 ? [`title screen skipped ${Math.max(0, Number(pace.titleScreenSkipped) || 0)} of ${checked} cards before opening`] : [];
+    })(),
+    ...(() => {
+      const stop = pace.listCheckStop;
+      if (!stop || typeof stop !== 'object') return [];
+      const pages = Math.max(0, Number(stop.listPages) || 0);
+      const elapsed = Math.max(0, Number(stop.elapsedMs) || 0);
+      return [`check stopped the walk after ${pages} list page${pages === 1 ? '' : 's'} in ${duration(elapsed)}${pages >= 2 && elapsed > 0 ? ` (${Math.round(elapsed / (pages - 1) / 1000)}s per page)` : ''}`];
+    })(),
     `${checks} check${checks === 1 ? '' : 's'} (${detailChecks} detail, ${listChecks} list)`,
     `detail pages between checks ${between || 'n/a'}`,
     `waiting on you ${duration(waitMs)}${pace.openChallengeSince ? ` (check still open${(() => {
@@ -304,7 +376,8 @@ export function formatScrapePaceLine(pace, now = Date.now()) {
       const route = pace.descriptionRoute;
       if (!route || typeof route !== 'object') return [];
       const stop = DESCRIPTION_ROUTE_STOP_CODES.has(route.stopReason) ? route.stopReason : 'none';
-      return [`descriptions: ${Math.max(0, Number(route.fromJobPage) || 0)} from job pages, ${Math.max(0, Number(route.fromPanel) || 0)} from panel fallback · job-page route stop ${stop}`];
+      const notAllowed = describeDescriptionRouteIneligible(route.ineligible);
+      return [`descriptions: ${Math.max(0, Number(route.fromJobPage) || 0)} from job pages, ${Math.max(0, Number(route.fromPanel) || 0)} from panel fallback · job-page route stop ${stop}${notAllowed ? ` · job pages not allowed: ${notAllowed}` : ''}`];
     })(),
     `spacing ${duration(spacingMs)}`,
     `page loads ${duration(loadMs)}`,

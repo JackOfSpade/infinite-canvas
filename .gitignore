@@ -12,6 +12,8 @@ dist
 dist-ssr
 dist-electron
 release/
+release-job-search/
+release-job-board/
 release-interview/
 
 # Sensitive — secrets, signing keys, env variants
